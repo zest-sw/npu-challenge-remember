@@ -35,12 +35,34 @@ class NonAgent(Agent):
             base_url = os.environ.get('TT_LLM_BASE_URL', 'http://localhost:8100/v1')
             # max_tokens here = max GENERATED tokens (not context); keep modest so
             # prefill+decode fits the server's max_seq_len.
+            # A JSON *schema* triggers the server's grammar-constrained decoding
+            # (the equivalent of Ollama's format="json", but stronger): it forces
+            # the required keys, caps free-text length, and forbids extra keys so a
+            # small model can't ramble in a reasoning field and blow the budget.
+            answer_schema = {
+                'type': 'object',
+                'properties': {
+                    'type': {'type': 'string'},
+                    'text': {'type': 'string', 'maxLength': 300},
+                    'binary': {'type': ['string', 'null']},
+                    'position': {'type': ['string', 'null']},
+                    'orientation': {'type': ['string', 'null']},
+                    'time': {'type': ['number', 'string', 'null']},
+                    'duration': {'type': ['number', 'string', 'null']},
+                },
+                'required': ['type', 'text', 'binary', 'position', 'time'],
+                'additionalProperties': False,
+            }
             self.chain = ChatOpenAI(
                 model=llm_type[len('tt/'):],
                 base_url=base_url,
                 api_key='local',
                 temperature=temperature,
-                max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '512')),
+                max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
+                model_kwargs={'response_format': {
+                    'type': 'json_schema',
+                    'json_schema': {'name': 'agent_output', 'schema': answer_schema},
+                }},
             )
         else:
             self.chain = ChatOllama(model=llm_type, num_ctx=num_ctx, temperature=temperature)

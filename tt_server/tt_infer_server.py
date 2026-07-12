@@ -58,6 +58,31 @@ from models.bos_model.qwen25_vl.demo_qwen25_vl import (
     warmup_model as qwen_warmup_model,
 )
 
+# Optional: JSON-constrained (grammar) decoding, the equivalent of Ollama's
+# format="json". Guarded so a VLM-only server or a missing dep still runs.
+try:
+    from lmformatenforcer import JsonSchemaParser, TokenEnforcer
+    from lmformatenforcer.integrations.transformers import build_token_enforcer_tokenizer_data
+
+    _HAS_LMFE = True
+except Exception:  # noqa: BLE001
+    _HAS_LMFE = False
+
+
+def _masked_argmax(logits: "torch.Tensor", token_list, vocab: int) -> int:
+    """Greedy argmax over ONLY the grammar-allowed token ids (host-side mask).
+    Accepts a logits tensor of any rank whose flattened length is the vocab row
+    (batch=1)."""
+    row = logits.reshape(-1)
+    w = min(row.shape[0], vocab)
+    allowed = [t for t in token_list.allowed_tokens if 0 <= t < w]
+    if not allowed:  # grammar dead-end (shouldn't happen) -> fall back to plain argmax
+        return int(torch.argmax(row[:w]).item())
+    idx = torch.tensor(allowed, dtype=torch.long)
+    sub = row.index_select(0, idx)
+    return int(idx[int(torch.argmax(sub).item())].item())
+
+
 # Model repos (override via env)
 LLM_MODEL = os.environ.get("TT_LLM_MODEL", "meta-llama/Llama-3.2-3B-Instruct")
 VLM_MODEL = os.environ.get("TT_VLM_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
@@ -90,6 +115,19 @@ class LlamaEngine:
         self.mesh_device = mesh_device
         self.max_seq_len = max_seq_len
         self.page_params = {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024}
+        self._enforcer_data = None  # lazily built token-enforcer data (grammar decoding)
+
+    def _ensure_enforcer_data(self):
+        """Build the lm-format-enforcer tokenizer data once (iterates the full
+        vocab, ~a few seconds), on first JSON request."""
+        if not _HAS_LMFE:
+            raise RuntimeError("lm-format-enforcer not installed; `pip install lm-format-enforcer`")
+        if self._enforcer_data is None:
+            logger.info("[LLM] building JSON grammar tokenizer data ...")
+            self._enforcer_data = build_token_enforcer_tokenizer_data(
+                self.tokenizer, vocab_size=self.model_args[0].vocab_size
+            )
+        return self._enforcer_data
 
     def load(self):
         _set_hf_model(LLM_MODEL)
@@ -125,7 +163,7 @@ class LlamaEngine:
         self.generator = LlamaGenerator(model, model_args, self.mesh_device, tokenizer=self.tokenizer)
         logger.info("[LLM] ready.")
 
-    def generate(self, prompt: str, max_new_tokens: int = 256) -> str:
+    def generate(self, prompt: str, max_new_tokens: int = 256, force_json: bool = False, json_schema=None) -> str:
         model_args, model, tokenizer = self.model_args, self.model, self.tokenizer
         generator, page_table, tt_kv_cache = self.generator, self.page_table, self.tt_kv_cache
         mesh_device = self.mesh_device
@@ -162,6 +200,31 @@ class LlamaEngine:
         logits = generator.prefill_forward_text(
             input_tokens_prefill_pt, page_table=page_table, kv_cache=tt_kv_cache, prompt_lens=decoding_pos
         )
+        # ---- JSON-constrained (grammar) decoding: the format="json" equivalent ----
+        # Host-side masking: run decode with sampling_params=None so decode_forward_text
+        # returns raw host logits [1,1,vocab]; mask to grammar-allowed ids; argmax.
+        if force_json:
+            vocab = model_args[0].vocab_size
+            enforcer = TokenEnforcer(self._ensure_enforcer_data(), JsonSchemaParser(json_schema))
+            first = _masked_argmax(logits, enforcer.get_allowed_tokens([]), vocab)
+            generated = [] if first in tokenizer.stop_tokens else [first]
+            current_pos = torch.tensor([decoding_pos[0]])
+            out_tok = torch.tensor([[first]])
+            for _ in range(max_new_tokens - 1):
+                dlogits = generator.decode_forward_text(
+                    out_tok, current_pos, enable_trace=True,
+                    page_table=page_table, kv_cache=tt_kv_cache, sampling_params=None,
+                )
+                nxt = _masked_argmax(dlogits, enforcer.get_allowed_tokens(generated), vocab)
+                current_pos = current_pos + 1
+                if nxt in tokenizer.stop_tokens:
+                    break
+                generated.append(nxt)
+                out_tok = torch.tensor([[nxt]])
+            ttnn.synchronize_device(mesh_device)
+            return tokenizer.decode(generated).strip()
+
+        # ---- unconstrained device-greedy path ----
         prefilled_token = torch.argmax(logits, dim=-1)
 
         device_sampling_params = SamplingParams(temperature=0.0, top_k=-1, top_p=1.0)  # greedy on device
@@ -382,7 +445,15 @@ def chat_completions(req: dict):
     messages = req.get("messages", [])
     max_tokens = int(req.get("max_tokens") or 256)
     prompt = _messages_to_prompt(messages)
-    text = _submit(_engines["llm"].generate, prompt, max_tokens)
+    # Honor OpenAI response_format: json_object -> any valid JSON (Ollama format="json"
+    # equivalent); json_schema -> constrain to the given JSON schema.
+    rf = req.get("response_format") or {}
+    force_json = rf.get("type") in ("json_object", "json_schema")
+    json_schema = None
+    if rf.get("type") == "json_schema":
+        js = rf.get("json_schema") or {}
+        json_schema = js.get("schema", js)
+    text = _submit(_engines["llm"].generate, prompt, max_tokens, force_json, json_schema)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
