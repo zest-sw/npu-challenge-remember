@@ -46,7 +46,11 @@ def main():
     agent.set_memory(memory)
 
     print("[4/4] Querying...")
-    out = agent.query("What did you see?")
+    question = "What did you see?"
+    # NonAgent uses memory.get_working_memory() as context, which is populated by
+    # the search_* methods (not by insert). Retrieve relevant memories first.
+    memory.search_by_text(question)
+    out = agent.query(question)
     print("      AgentOutput:", out)
     print("\nOK: end-to-end path completed.")
 

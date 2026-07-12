@@ -50,7 +50,10 @@ class NonAgent(Agent):
                     'time': {'type': ['number', 'string', 'null']},
                     'duration': {'type': ['number', 'string', 'null']},
                 },
-                'required': ['type', 'text', 'binary', 'position', 'time'],
+                # AgentOutput requires all of these (no defaults), so force the model
+                # to emit every key — otherwise AgentOutput.from_dict() raises and
+                # NonAgent.query retries forever.
+                'required': ['type', 'text', 'binary', 'position', 'orientation', 'time', 'duration'],
                 'additionalProperties': False,
             }
             self.chain = ChatOpenAI(
