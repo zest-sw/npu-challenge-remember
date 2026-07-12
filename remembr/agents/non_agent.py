@@ -27,6 +27,21 @@ class NonAgent(Agent):
         if llm_type == 'gpt-4o':
             # TODO: ADD OpenAI key here!
             pass
+        elif llm_type.startswith('tt/'):
+            # Tenstorrent NPU backend: talk to the local unified inference server
+            # (tt_infer_server.py) via its OpenAI-compatible /v1/chat/completions endpoint.
+            # llm_type format: 'tt/<model_name>', e.g. 'tt/Llama-3.2-3B-Instruct'.
+            from langchain_openai import ChatOpenAI
+            base_url = os.environ.get('TT_LLM_BASE_URL', 'http://localhost:8100/v1')
+            # max_tokens here = max GENERATED tokens (not context); keep modest so
+            # prefill+decode fits the server's max_seq_len.
+            self.chain = ChatOpenAI(
+                model=llm_type[len('tt/'):],
+                base_url=base_url,
+                api_key='local',
+                temperature=temperature,
+                max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '512')),
+            )
         else:
             self.chain = ChatOllama(model=llm_type, num_ctx=num_ctx, temperature=temperature)
         self.prompt = file_to_string(str(os.path.dirname(__file__)) + '/../' + 'prompts/non_agent_system_prompt.txt')
