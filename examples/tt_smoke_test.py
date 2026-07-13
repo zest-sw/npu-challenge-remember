@@ -32,24 +32,46 @@ def load_frames(paths):
 def main():
     frames = load_frames(sys.argv[1:])
 
-    print(f"[1/4] Captioning {len(frames)} frame(s) on the NPU (Qwen2.5-VL)...")
-    captioner = TenstorrentCaptioner()
-    caption = captioner.caption(frames)
-    print("      caption:", caption)
+    import os
+    question = os.environ.get("TT_SMOKE_QUESTION", "did you see pasta?")
 
-    print("[2/4] Inserting into Milvus memory...")
+    print("[1/4] Setting up memory (fresh collection)...")
     memory = MilvusMemory("tt_smoke_test", db_ip="127.0.0.1")
-    memory.insert(MemoryItem(caption=caption, time=time.time(), position=[0.0, 0.0, 0.0], theta=0.0))
+    # The collection persists across runs and MilvusMemory never drops it on
+    # construction, so stale captions from previous runs would pollute the
+    # retrieval (and the LLM would answer from them). Start each smoke run clean.
+    memory.reset(drop_collection=True)
+
+    # Caption EACH frame separately and store it as its own timestamped memory.
+    # This is how ReMEmbR is meant to work: one caption per frame/window, so the
+    # vector search can later retrieve the *relevant* frame for a question.
+    # (Lumping unrelated frames into a single caption gives the VLM one merged
+    # scene to hallucinate over and leaves nothing meaningful to retrieve.)
+    captioner = TenstorrentCaptioner()
+    base_t = time.time()
+    print(f"[2/4] Captioning {len(frames)} frame(s) on the NPU (Qwen2.5-VL) + inserting...")
+    for i, frame in enumerate(frames):
+        caption = captioner.caption([frame])          # one frame -> one caption
+        print(f"      frame {i}: {caption[:160]}")
+        memory.insert(MemoryItem(
+            caption=caption,
+            time=base_t + i * 10.0,                    # stagger frames 10s apart
+            position=[float(i), 0.0, 0.0],             # and along the x-axis
+            theta=0.0,
+        ))
 
     print("[3/4] Building NonAgent (Llama-3.2-3B on the NPU)...")
     agent = NonAgent(llm_type="tt/Llama-3.2-3B-Instruct")
     agent.set_memory(memory)
 
-    print("[4/4] Querying...")
-    question = "What did you see?"
+    print(f"[4/4] Querying: {question!r}")
     # NonAgent uses memory.get_working_memory() as context, which is populated by
     # the search_* methods (not by insert). Retrieve relevant memories first.
-    memory.search_by_text(question)
+    ctx = memory.search_by_text(question)
+    print("      retrieved context:")
+    for line in ctx.splitlines():
+        if line.strip():
+            print("        " + line)
     out = agent.query(question)
     print("      AgentOutput:", out)
     print("\nOK: end-to-end path completed.")
