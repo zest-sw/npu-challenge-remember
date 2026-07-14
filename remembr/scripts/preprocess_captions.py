@@ -10,7 +10,9 @@ import sys
 
 # load this directory
 sys.path.append(sys.path[0] + '/..')
-from captioners.vila_captioner import VILACaptioner
+# NOTE: VILACaptioner is imported lazily inside build_captioner() so this script
+# also runs in the (VILA-free) remembr_venv when using the Tenstorrent NPU
+# captioner. Importing VILA at module load would hard-fail without the VILA stack.
 from utils.util import get_frames
 import pickle as pkl
 from PIL import Image as PILImage
@@ -23,6 +25,34 @@ import json
 
 import tqdm
 
+
+def build_captioner(args):
+    """Pick the captioner backend. Both implement Captioner.caption(images)->str,
+    so the rest of the preprocessing pipeline is identical regardless of choice.
+
+    - 'vila'        : original ReMEmbR captioner (needs the VILA/torch stack).
+    - 'tenstorrent' : Qwen2.5-VL on the Tenstorrent NPU, via the local inference
+                      server (talks HTTP; no VILA deps in-process).
+    """
+    if args.captioner == 'tenstorrent':
+        from captioners.tenstorrent_captioner import TenstorrentCaptioner
+        # Keep the paper's original --query verbatim, but neutralize the VILA
+        # *video* wording: Qwen2.5-VL is given a still frame, so "<video>" / "the
+        # few seconds of the video" make it refuse ("I can't see the video you're
+        # referring to"). Only those phrases are rewritten -> everything else
+        # ("Think step by step", the focus list, ...) stays faithful to the paper.
+        # url/timeout come from TT_VLM_URL / TT_VLM_TIMEOUT env if set.
+        prompt = (args.query or "")
+        prompt = prompt.replace("<video>", "")
+        prompt = prompt.replace("the few seconds of the video", "the image")
+        prompt = prompt.replace("the video", "the image")
+        prompt = prompt.strip() or None
+        return TenstorrentCaptioner(prompt=prompt) if prompt else TenstorrentCaptioner()
+    elif args.captioner == 'vila':
+        from captioners.vila_captioner import VILACaptioner  # lazy: heavy deps
+        return VILACaptioner(args)
+    else:
+        raise ValueError(f"Unknown --captioner {args.captioner!r} (vila|tenstorrent)")
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -56,19 +86,49 @@ def run_video_in_segs(args):
             current_segment.append(file)
 
     embedder = HuggingFaceEmbeddings(model_name='mixedbread-ai/mxbai-embed-large-v1')
-    vila_model = VILACaptioner(args)
+    captioner_model = build_captioner(args)
 
-    # if exists, then exit
     # captions_location = f'./data/{SEQUENCE_ID}/captions'
     captions_location = args.out_path
-    if os.path.exists(captions_location):
+    out_file = os.path.join(
+        captions_location,
+        f'captions_{args.captioner_name}_{args.seconds_per_caption}_secs.json',
+    )
+    # Skip only if the FINAL captions JSON already exists (a completed run).
+    # The original code exited whenever the *directory* existed, which meant a
+    # killed/interrupted run left an empty dir and permanently blocked re-runs.
+    if os.path.exists(out_file):
+        print(f"Captions already exist, nothing to do: {out_file}")
         exit()
-        # shutil.rmtree(captions_location, ignore_errors=True)
     os.makedirs(captions_location, exist_ok=True)
 
+    # --- incremental checkpoint / resume ---
+    # Each finished caption is appended to this JSONL sidecar immediately, so an
+    # interrupted run (kill, server hiccup) keeps everything done so far and can
+    # resume instead of recomputing every caption. On full completion we write the
+    # final JSON and delete the sidecar.
+    partial_file = out_file + '.partial.jsonl'
     outputs = []
+    done_ids = set()
+    if os.path.exists(partial_file):
+        with open(partial_file) as pf:
+            for line in pf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ent = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # torn last line from a mid-write kill; drop it
+                outputs.append(ent)
+                done_ids.add(ent['id'])
+        print(f"[resume] {len(done_ids)} captions loaded from checkpoint; continuing")
+    partial_fh = open(partial_file, 'a')
 
     for i, file_names in tqdm.tqdm(enumerate(segments), total=len(segments)):
+
+        if file_names[0] in done_ids:
+            continue  # already captioned in a previous run -> skip
 
         images = []
         # depth = []
@@ -99,7 +159,7 @@ def run_video_in_segs(args):
         # let's sample the images down to args.num_video_frames
         images = images[::30//args.num_video_frames]
 
-        out_text = vila_model.caption(images)
+        out_text = captioner_model.caption(images)
 
         print(out_text)
         filename_start = os.path.basename(file_names[0])
@@ -122,21 +182,23 @@ def run_video_in_segs(args):
 
         outputs.append(entity)
 
-
-        entity = {
-            'id': file_names[0],
-            'position': position.mean(axis=0),
-            'theta': 3.14,
-            'time': timestamp.mean(),
-            'caption': out_text,
-            'text_embedding': text_embedding
-        }
+        # checkpoint this caption immediately (durable against interruption)
+        partial_fh.write(json.dumps(entity, cls=NumpyEncoder) + '\n')
+        partial_fh.flush()
+        os.fsync(partial_fh.fileno())
 
 
 
-    # now save the outputs into a json
-    with open(os.path.join(captions_location, f'captions_{args.captioner_name}_{args.seconds_per_caption}_secs.json'), 'w') as f:
+    partial_fh.close()
+
+    # now save the outputs into a json (same path checked at the top)
+    with open(out_file, 'w') as f:
         json.dump(outputs, f, cls=NumpyEncoder)
+
+    # completed successfully -> drop the checkpoint sidecar
+    if os.path.exists(partial_file):
+        os.remove(partial_file)
+    print(f"Wrote {len(outputs)} captions -> {out_file}")
 
 
 if __name__ == "__main__":
@@ -166,6 +228,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="./coda_data")
     parser.add_argument("--out_path", type=str, default="./data/captions")
     parser.add_argument("--captioner_name", type=str, default="Llama-3-VILA1.5-8b")
+    # which captioner backend to run: 'vila' (original) or 'tenstorrent' (NPU).
+    parser.add_argument("--captioner", type=str, default="vila", choices=["vila", "tenstorrent"])
 
     parser.add_argument("--seconds_per_caption", type=int, default=3)
 
