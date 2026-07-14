@@ -45,8 +45,22 @@ pip install --upgrade pip          # ★ 먼저 pip 업그레이드 (구버전 p
 pip install "langchain-core==0.2.40" "langchain-community==0.2.16" \
             "langchain-openai==0.1.25" "langchain==0.2.16" \
             "langchain-huggingface==0.0.3" \
+            "langgraph==0.2.40" "langsmith==0.1.147" \
+            "numpy<2" "opencv-python-headless<5" \
             pillow requests pymilvus "sentence-transformers==3.1.0"
 ```
+> **`opencv`/`numpy` 버전 핀 주의.** `opencv-python-headless`는 CODa 전처리
+> (`preprocess_coda_rosfree.py`, `cv2.imread`)에 필요하다. 그냥 `pip install
+> opencv-python-headless`를 하면 opencv 5.x가 **numpy 2.x를 끌어와** langchain 0.2.16 /
+> sentence-transformers 3.1.0(둘 다 numpy<2 요구)을 깨뜨린다. 반드시 `numpy<2` +
+> `opencv-python-headless<5`(4.x)로 고정한다. (GUI 없는 `-headless` 사용.)
+> **`langgraph`/`langsmith` 버전 핀 주의.** `langgraph`는 `eval.py`가 임포트하는
+> `ReMEmbRAgent`(RAG 에이전트)의 핵심 의존성이다. 그냥 `pip install langgraph`를 하면
+> 최신 langgraph가 **langchain-core를 0.3.x로 끌어올려 위 0.2.x 핀을 전부 깨뜨린다.**
+> 반드시 core 0.2.40과 호환되는 `langgraph==0.2.40` + `langsmith==0.1.147`로 고정한다.
+>
+> **NVIDIA NIM 백엔드(`langchain_nvidia_ai_endpoints`)는 설치하지 않는다.** 이 NPU
+> 셋업은 로컬 NPU만 쓰므로 불필요하며, 코드에서 `nim/` 경로일 때만 lazy import 한다.
 > pip가 `AssertionError: len(weights) == expected_node_count`로 죽으면 구버전 pip
 > 버그다. 위처럼 `pip install --upgrade pip`를 먼저 하면 해결된다. 그래도 안 되면
 > `--use-deprecated=legacy-resolver` 플래그를 붙이거나 패키지를 나눠서 설치한다.
@@ -122,15 +136,26 @@ OK: end-to-end path completed.
 
 ## 4. 종료
 
-```bash
-pkill -f tt_infer_server.py          # 정상 종료(SIGTERM) — device를 깔끔히 닫음
-# 또는
-kill $(lsof -t -i:8100)
-
-lsof -i :8100                        # 결과 없으면 완전히 내려간 것
+**서버 콘솔에서 `Ctrl-C`를 한 번 누르고 기다린다.** (또는 `kill -TERM <pid>` / `pkill -f tt_infer_server.py` = SIGTERM.)
+서버가 워커에 정지 신호를 보내고 **`close_mesh_device()`로 device를 깨끗이 닫은 뒤** 종료한다.
+아래 로그가 뜨면 안전하게 내려간 것:
 ```
-안 죽으면 그때만 `pkill -9 -f tt_infer_server.py` (단, `-9`는 device를 못 닫고 죽어
-다음 기동 시 드물게 보드 리셋 필요 → 우선 `-9` 없이 시도).
+Shutting down: releasing the NPU cleanly ...
+NPU released cleanly. Safe to exit.
+```
+device teardown(진행 중 op가 있으면 그게 끝날 때까지, 최대 180초) 동안 **추가 Ctrl-C는 무시**된다.
+
+> ⚠️ **`Ctrl-C`를 연타하지 말 것 / `-9`(SIGKILL)를 쓰지 말 것.**
+> 예전엔 종료 시 device를 닫는 코드가 **daemon 워커의 finally**라 인터프리터 종료 시
+> 실행되지 않았고, **Ctrl-C 연타 → teardown 중단 → 보드 wedged**가 됐다. 지금은 종료
+> 경로가 워커를 join하고 그 구간의 SIGINT/SIGTERM을 무시하도록 고쳐서 연타에 안전하다.
+> 하지만 **`-9`(SIGKILL)만은 커널이 즉살시켜 이 정리를 건너뛴다** → device가 활성 상태로
+> 남아 보드가 wedged된다. `-9`는 절대 사용 금지(정말 안 죽는 stuck 상태에서만 최후수단, 이후 보드 리셋 각오).
+
+```bash
+lsof -i :8100                        # 결과 없으면 완전히 내려간 것
+fuser -v /dev/bos/0                  # 결과 없으면 device 완전히 해제됨
+```
 
 ---
 
