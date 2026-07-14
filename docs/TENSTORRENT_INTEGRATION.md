@@ -1,7 +1,15 @@
-# ReMEmbR × Tenstorrent NPU 통합 작업 정리
+# ReMEmbR × NPU 통합 — 아키텍처 & 설계
 
-로봇 시공간 메모리 시스템 **ReMEmbR**를 Tenstorrent NPU 위에서 end-to-end로 돌리기 위한 통합 작업 기록.
+로봇 시공간 메모리 시스템 **ReMEmbR**를 NPU 위에서 end-to-end로 돌리기 위한 통합 작업 기록.
 VLM(캡셔너)과 LLM(질의응답)을 모두 NPU에서 구동하고, 그 사이를 Milvus 벡터 메모리로 잇는다.
+
+> **진행 상태·변경 로그·알려진 이슈는 [DEV_STATUS.md](DEV_STATUS.md)를 참조.** 이 문서는 아키텍처와
+> 설계 결정, 디버깅 기록에 집중한다.
+>
+> **하드웨어 주의**: 이 장비는 **BOS 칩**이다(Tenstorrent 아님). tt-metal 호환 스택(`bos-metal`)으로
+> ttnn을 쓰기에 로그엔 `BlackholeTTDevice`로 뜨지만, 실제 device 노드는 **`/dev/bos/0`**, 커널 모듈은
+> **`bos`**다. device 점유 확인은 `fuser -v /dev/bos/0` / `lsmod | grep bos`. (`/dev/tenstorrent`·`lspci 1e52`는
+> 이 장비에 없음.)
 
 ---
 
@@ -117,6 +125,28 @@ end-to-end 경로(캡션→저장→검색→답변)를 한 번에 검증하는 
 - **수정**: 스모크 테스트를 **프레임별 개별 캡션 → 개별 `MemoryItem` 저장**으로 변경. 각 프레임에 staggered `time`(+10s씩)과 `position`(x축) 부여. 검색된 context도 출력해 눈으로 확인 가능.
   - ⚠️ 이는 **스모크 테스트 스크립트만** 바뀐 것. **캡셔너 인터페이스(윈도우 → 캡션 1개)는 그대로** 유지. 실제 시퀀스 영상은 같은 장면의 연속 프레임이므로 윈도우로 묶는 것이 맞다.
 
+### 문제 ④ 캡션이 다시 거부 ("I can't see the video")
+- **증상**: 논문 프롬프트로 CODa 프레임 캡션 시 "비디오를 못 본다"며 거부.
+- **원인**: 논문 원문 프롬프트가 VILA **비디오**용("the few seconds of the video")인데, 우리는 Qwen에 **정지 프레임 1장**(`--num-video-frames 1`)을 줌 → 프롬프트-입력 불일치.
+- **수정**: 원문을 그대로 쓰되 video 문구만 중화(`<video>` 제거, "the few seconds of the video" → "the image"). "Think step by step" 등 나머지는 논문 그대로 → 충실도 유지 + 거부 해소.
+
+### 문제 ⑤ 캡션 문장이 중간에 잘림
+- **원인**: 서버 `/caption`이 `max_gen_len` 미지정 시 **128 토큰**으로 상한. step-by-step 캡션이 그 전에 EOT를 못 내 잘림.
+- **수정**: 캡셔너가 `max_gen_len`(기본 256, `TT_VLM_MAX_GEN_LEN`) 전송. 서버는 이미 이 파라미터를 존중하므로 **서버 코드 무변경**, 클라이언트 재실행으로 적용.
+
+### 문제 ⑥ 캡션이 갈수록 느려짐 (21s → 80s)
+- **측정**: 캡션 길이·호스트 RAM·스왑 모두 안정 → **device 쪽 누적**이 원인.
+- **원인**: `describe()`가 요청마다 만든 device 텐서(`batch_logits/pxm/ptm/dxm/dtm/masks/logits`)를 해제하지 않아 device DRAM에 누적 → 이후 요청이 점점 느려짐.
+- **수정**: 요청 끝에 `ttnn.deallocate`(guarded). ⚠️ fresh run에서 실효 재검증 필요. 임시완화=서버 재시작으로 device 상태 리셋.
+
+### 문제 ⑦ Ctrl-C(특히 연타)로 보드가 wedged
+- **원인**: device를 닫는 `close_mesh_device()`가 **daemon 워커의 finally**라 인터프리터 종료 시 실행 안 됨. Ctrl-C 연타는 uvicorn을 강제종료시켜 teardown을 중단 → device 활성 상태로 남아 **wedged**(재기동 시 `failed to initialize FW`).
+- **수정**: 종료 시 워커에 정지 신호 후 `join()`으로 `close_mesh_device()` 보장 + **teardown 구간 SIGINT/SIGTERM 무시**(연타 안전). `-9`(SIGKILL)만은 여전히 우회하므로 **금지**.
+
+### 문제 ⑧ "보드 죽음" 오진 (device 노드 이름)
+- **원인**: 진단 시 `/dev/tenstorrent`·`lspci 1e52`로 확인 → 계속 "없음" → "버스 이탈" 오진 반복. 실제는 **BOS 칩**이라 노드가 `/dev/bos/0`.
+- **교훈**: device 확인은 `fuser -v /dev/bos/0`, `lsmod | grep bos`, `/proc/<pid>/fd | grep bos`.
+
 ---
 
 ## 5. 남은 이슈 / 다음 단계
@@ -128,10 +158,10 @@ end-to-end 경로(캡션→저장→검색→답변)를 한 번에 검증하는 
   1. **8B로 교체** — DRAM 제약으로 co-resident 불가 가능성 → 캡션/질의 단계를 시간분리(한 번에 한 모델만 로드)하는 폴백 구성.
   2. **3B 유지 + 튜닝** — 서버에 repetition penalty 추가, `TT_LLM_MAX_TOKENS` 축소.
 
-### 실제 시퀀스 데이터 투입
-- 캡셔너는 이미 윈도우 입력을 지원. 실제 파이프라인은 **"윈도우 → 캡션 1개 → 그 시점 time/position으로 insert"** 반복.
-- 주의: 프레임당 vision token ≈ 64개, `TT_VLM_MAX_SEQ_LEN` 내에서 윈도우 크기 제한. 크게 잡으려면 seq len 상향.
-- TODO: 영상 프레임 폴더/타임스탬프(rosbag 등)를 받아 **윈도우 슬라이딩 + 프레임별 time/position 부여** 로더 작성.
+### 실제 시퀀스 데이터 (진행됨)
+- 원 논문 데이터(CODa)용 파이프라인이 구축됨: `preprocess_coda_rosfree.py`(ROS-free .pkl 추출) → `preprocess_captions.py --captioner tenstorrent`(체크포인트 캡셔닝) → `form_question_jsons.py` → `eval.py`. 상세는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md).
+- **충실도 편차**: 프레임 6→1(절충). 다중 프레임은 Qwen도 지원하나 첫 컴파일 비용/안정성 때문에 1로 시작. 올리려면 `--num-video-frames` 상향(첫 컴파일 인내 필요).
+- 진행 상태는 [DEV_STATUS](DEV_STATUS.md) 상태 보드 참조.
 
 ### 정리성
 - PyMilvus/LangChain deprecation 경고 다수 (`connections.connect`, ORM 스타일 API 등). 기능엔 무해하나 추후 `MilvusClient` / `langchain-milvus`로 마이그레이션 권장.
@@ -161,9 +191,13 @@ TT_SMOKE_QUESTION="did you see a dog?" PYTHONPATH=$(pwd) python examples/tt_smok
 
 | 파일 | 역할 |
 |---|---|
-| `remembr/tt_server/tt_infer_server.py` | NPU 통합 추론 서버 (LLM+VLM, 포트 8100) |
-| `remembr/captioners/tenstorrent_captioner.py` | Qwen2.5-VL 캡셔너 (HTTP 클라이언트) |
-| `remembr/agents/non_agent.py` | Llama-3.2-3B `tt/` 백엔드 추가, JSON schema 제약 |
+| `tt_server/tt_infer_server.py` | NPU 통합 추론 서버 (LLM+VLM, 포트 8100, JSON 제약 디코딩, clean shutdown, 텐서 해제) |
+| `tt_server/run_server.sh` | 서버 런처 (env 세팅) |
+| `remembr/captioners/tenstorrent_captioner.py` | Qwen2.5-VL 캡셔너 (HTTP 클라이언트, `max_gen_len`, import fallback) |
+| `remembr/agents/non_agent.py` | Llama-3.2-3B `tt/` 백엔드, JSON schema 제약 |
+| `remembr/agents/remembr_agent.py` | `ChatNVIDIA` lazy import |
+| `remembr/scripts/preprocess_coda_rosfree.py` | ROS-free CODa → .pkl 추출기 |
+| `remembr/scripts/preprocess_captions.py` | 캡셔닝(`--captioner tenstorrent`, 체크포인트/resume, 프롬프트 중화) |
 | `examples/tt_smoke_test.py` | end-to-end 스모크 테스트 |
 
 *(tt-metal 원본은 건드리지 않고, 추가 코드는 remembr 쪽에 모음.)*

@@ -4,6 +4,10 @@ All the glue code needed to run ReMEmbR on a Tenstorrent board lives in **this
 repo**. The tt-metal SDK is used as-is (imported at runtime via `PYTHONPATH`);
 nothing is copied into or modified inside the tt-metal source tree.
 
+See also: [../docs/DEV_STATUS.md](../docs/DEV_STATUS.md) (진행 상태), [RUNBOOK.md](RUNBOOK.md)
+(기동/venv/종료), [../docs/PAPER_EVAL_RUNBOOK.md](../docs/PAPER_EVAL_RUNBOOK.md) (논문 평가),
+[../docs/TENSTORRENT_INTEGRATION.md](../docs/TENSTORRENT_INTEGRATION.md) (아키텍처).
+
 ## Layout of what was added
 
 ```
@@ -12,11 +16,16 @@ remembr/
 │   ├── tt_infer_server.py   # unified NPU inference server (LLM + VLM)
 │   ├── run_server.sh        # launcher (sets env, runs in tt-metal venv)
 │   └── README.md            # this file
-├── remembr/agents/non_agent.py          # + 'tt/<model>' backend branch (ChatOpenAI -> server)
-├── remembr/captioners/tenstorrent_captioner.py   # Captioner -> POST /caption
-├── remembr/captioners/__init__.py       # captioner_selector() factory
-└── examples/tt_smoke_test.py            # end-to-end: image -> caption -> memory -> query
+├── remembr/agents/non_agent.py                    # + 'tt/<model>' backend (ChatOpenAI -> server)
+├── remembr/agents/remembr_agent.py                # lazy-import ChatNVIDIA (optional NIM backend)
+├── remembr/captioners/tenstorrent_captioner.py    # Captioner -> POST /caption (max_gen_len, import fallback)
+├── remembr/scripts/preprocess_coda_rosfree.py     # ROS-free CODa -> .pkl extractor
+├── remembr/scripts/preprocess_captions.py         # + --captioner tenstorrent, checkpoint/resume
+└── examples/tt_smoke_test.py                      # end-to-end: image -> caption -> memory -> query
 ```
+
+> **HW note**: 이 장비는 **BOS 칩**(Tenstorrent 아님). device 노드 `/dev/bos/0`, 모듈 `bos`.
+> 점유 확인: `fuser -v /dev/bos/0`, `lsmod | grep bos`.
 
 ## Architecture
 
@@ -68,14 +77,10 @@ PYTHONPATH=$(pwd) python examples/tt_smoke_test.py path/to/frame.jpg
 | `TT_PORT` | `8100` | |
 
 remembr side: `TT_LLM_BASE_URL` (default `http://localhost:8100/v1`),
-`TT_VLM_URL` (default `http://localhost:8100/caption`).
+`TT_VLM_URL` (default `http://localhost:8100/caption`),
+`TT_VLM_TIMEOUT` (client timeout, default 900s — raise for the slow first compile),
+`TT_VLM_MAX_GEN_LEN` (max caption tokens, default 256 — server default is 128 which truncates).
 
-## Notes / known limits
-
-- **DRAM budget.** This board exposes only ~12GB DRAM (3 banks). Llama-3.2-3B +
-  Qwen-3B fit together at `max_seq_len=1024`. An 8B LLM does **not** co-fit — use
-  the time-separated fallback (`TT_ENABLE_VLM=1 TT_ENABLE_LLM=0` for the caption
-  phase, then swap) or a smaller model.
 ## JSON-constrained decoding (format="json" equivalent)
 
 `NonAgent` needs strict JSON. Ollama guaranteed this with `format="json"`
@@ -109,3 +114,11 @@ Non-JSON requests keep the fast on-device greedy path.
 - **3B answer quality.** JSON validity is now guaranteed; answer grounding still
   depends on the model. The 3B is mostly grounded but occasionally copies the
   prompt example — the 8B is stronger (use the DRAM fallback if needed).
+- **Shutdown.** Stop with a single `Ctrl-C` (or SIGTERM) and wait — the server
+  joins the worker so `close_mesh_device()` runs and the board is released
+  cleanly, and it ignores extra SIGINT/SIGTERM during teardown (mashing Ctrl-C is
+  safe). **Never `kill -9`** — SIGKILL skips teardown and wedges the board.
+- **Per-caption slowdown.** `describe()` deallocates its per-request device
+  tensors so latency doesn't creep up over a long captioning run. If a run still
+  slows down, restart the server (resets device state) and resume from the
+  captioner checkpoint. (The deallocation fix still wants a fresh-run re-check.)

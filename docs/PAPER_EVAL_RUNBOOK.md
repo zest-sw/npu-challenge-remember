@@ -150,6 +150,13 @@ python scripts/preprocess_captions.py \
 - 캡션 프롬프트는 논문 원문을 그대로 쓰되, VILA 비디오 문구만 중화한다
   (`<video>` 제거, "the few seconds of the video" → "the image"). 나머지("Think
   step by step", focus 리스트)는 논문 그대로.
+- **문장 잘림 방지**: 캡셔너가 `max_gen_len=256`(기본, `TT_VLM_MAX_GEN_LEN`으로 조절)을 보낸다.
+  서버 기본 128이면 verbose 캡션이 중간에 잘린다.
+- **체크포인트/resume**: 캡션 1개마다 `..._secs.json.partial.jsonl`에 즉시 기록된다. 중단(kill,
+  서버 문제) 후 **같은 명령을 재실행하면 이어서** 진행(이미 한 세그먼트는 skip). 전체 완료 시
+  최종 JSON 저장 + partial 삭제. 처음부터 다시 하려면 partial을 지운다.
+- **점점 느려지면**(캡션당 시간 증가) device 텐서 누적 때문 → **서버 재시작**하면 속도 리셋되고
+  체크포인트로 이어진다. (서버 `describe()`에 텐서 해제를 추가했으나 fresh run 재검증 권장.)
 - 결과: `data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json`.
 - 첫 캡션만 트레이스 컴파일로 느리고, 이후 캐시되어 빨라진다.
 
@@ -193,21 +200,24 @@ python scripts/eval.py \
 
 ## 5. NPU 안전 수칙 (반드시)
 
-디바이스는 커널이 실행/컴파일 중일 때 호스트가 강제 종료되면 코어·NoC·ARC 상태가
-정리되지 않아 **하드웨어 데드락(wedged)** 에 빠진다. 그러면 재기동 시 FW init이
-타임아웃되고 보드가 PCIe 버스에서 이탈한다. 복구는 리셋(재부팅)뿐.
+device가 실행/컴파일 중일 때 teardown 없이 죽으면 코어·NoC·ARC 상태가 정리되지 않아
+**하드웨어 데드락(wedged)** 에 빠진다. 재기동 시 `failed to initialize FW`가 나고 복구가
+번거롭다(이 PC는 재부팅 시 NPU를 먼저 켜야 인식되는 제약도 있음). 규칙:
 
-1. **캡셔닝/추론 중 서버를 절대 `kill -9`/강제 종료하지 말 것.** 특히 첫 컴파일(느린)
-   구간이 위험창. `--num-video-frames 1`로 이 창을 짧게 유지.
-2. **종료는 항상 graceful로:**
-   ```bash
-   pkill -f tt_infer_server.py        # SIGTERM
-   # 프로세스가 사라질 때까지 대기 (device teardown 완주)
-   lsof -i :8100                      # 비면 완전 종료
+1. **서버 종료는 `Ctrl-C` 한 번(또는 SIGTERM) 후 기다린다.** 서버가 워커를 join해
+   `close_mesh_device()`로 device를 깨끗이 닫는다. 아래 로그가 뜨면 완료:
    ```
-   안 죽을 때만 `-9`, 단 `-9`는 device를 못 닫아 다음 기동 시 리셋 필요.
-3. **클라이언트 타임아웃은 넉넉히** (`TT_VLM_TIMEOUT=3600`) — 타임아웃으로 클라이언트가
-   죽는 것 자체는 안전하나, 그 뒤 서버를 급히 kill하는 게 위험.
+   Shutting down: releasing the NPU cleanly ...
+   NPU released cleanly. Safe to exit.
+   ```
+   teardown 중 **추가 Ctrl-C는 무시**되므로 연타해도 안전(예전 버그 수정됨).
+2. **`kill -9`(SIGKILL)는 절대 금지.** 이것만은 teardown을 건너뛰어 보드를 wedged로 만든다.
+   유일하게 위험한 종료 방식.
+3. **클라이언트(캡셔닝)는 죽여도 안전**하고 체크포인트로 이어진다. 단 클라이언트 kill이
+   서버를 죽이는 건 아니므로, 급하게 서버까지 `-9`하지 말 것.
+4. **첫 컴파일(느린 구간)은 죽이지 말고 기다린다.** `--num-video-frames 1`로 이 창을 짧게 유지.
+   `TT_VLM_TIMEOUT=3600`으로 클라이언트 타임아웃도 넉넉히.
+5. device 점유 확인: `fuser -v /dev/bos/0` (빈 결과 = 프리), `lsmod | grep bos`(usage 0 = 미사용).
 
 ---
 
@@ -219,32 +229,32 @@ Device 0: Timeout waiting for physical cores to finish
 Device 0 init: failed to initialize FW! Try resetting the board.
 ```
 
-### 진단
+### 진단 (⚠️ device 노드는 `/dev/bos` — Tenstorrent 아님)
 ```bash
-lspci | grep -i 1e52            # 보드가 버스에 있나
-ls /dev/tenstorrent            # 노드 존재?
-uptime -p                      # 재부팅 했는지
-pgrep -af tt_infer_server      # hang된 서버가 device 점유 중인가
+fuser -v /dev/bos/0            # 누가 device 쥐고 있나 (빈 결과 = 프리)
+lsmod | grep bos              # bos 모듈 usage count (0 = 아무도 안 씀)
+pgrep -af tt_infer_server     # 서버 프로세스 남아있나
+uptime -p                     # 재부팅 했는지
+# 보드가 실제로 죽었는지 결정적 테스트 (서버 내린 뒤):
+#   python3 -m ttnn.examples.usage.run_op_on_device
+#   -> tensor 출력 나오면 보드 정상, FW init 에러면 wedged
 ```
 
 ### 복구 순서
-1. **hang된 서버 정리**: `pkill -f tt_infer_server.py` (필요시 `kill -9 <pid>`).
-2. **보드가 버스에 살아 있고 sudo 가능** → NPU만 리셋(재부팅 불필요):
-   ```bash
-   pip install tt-smi                          # 최초 1회
-   sudo sh -c 'echo 1 > /sys/bus/pci/rescan'   # 이탈 시 재열거
-   sudo tt-smi -r 0                            # 워엄 리셋
-   ```
-3. **보드가 버스에서 이탈했거나 sudo 불가** → **호스트 재부팅**:
-   ```bash
-   sudo reboot
-   ```
-   재부팅 후에도 안 되면 **완전 전원 차단(cold power cycle)**. 심하게 wedged된
-   Blackhole는 warm reboot로 안 풀리는 경우가 있다.
-4. 복구 확인: `lspci | grep -i 1e52` + `ls /dev/tenstorrent`.
+1. **먼저 좀비 서버 확인·정리.** hang된 서버가 device를 **안 쥐고 있으면**(`fuser`에 없거나
+   op가 device를 열 수 있으면) `kill -9 <pid>`로 정리해도 **안전**하다(끊길 device 연산이 없음).
+   → 정리 후 서버 재기동만으로 복구되는 경우가 많다(실제 사례).
+2. **보드가 정말 wedged면(FW init 실패)** → 워엄 리셋 필요. 이 환경 제약:
+   `tt-smi` 미설치 + sudo 비번 필요 + `/sys/bus/pci/rescan` root 전용이라, sudo 계정이
+   있을 때만 `sudo <bos reset 도구>` 가능.
+3. **sudo 불가 시 → 재부팅.** 단 **이 PC는 NPU를 먼저 켜고 부팅해야 인식**되므로, 단순
+   `sudo reboot`이 아니라 올바른 전원 순서(전원 차단 → NPU on → PC on)가 필요할 수 있다.
+   심하게 wedged면 warm reboot로 안 풀려 cold power cycle이 필요.
+4. 복구 확인: `fuser -v /dev/bos/0`(프리) + `python3 -m ttnn.examples.usage.run_op_on_device`(정상 연산).
 
-> 이 환경 제약: **tt-smi 미설치 + sudo 비번 필요 + `/sys/bus/pci/rescan` root 전용**.
-> 그래서 "NPU만 명령으로 리셋"은 sudo 계정이 있을 때만 가능하고, 없으면 재부팅이 유일.
+> 이 환경 제약: **`bos` reset 도구 미설치 + sudo 비번 필요 + `/sys/bus/pci/rescan` root 전용**.
+> 그래서 "NPU만 명령으로 리셋"은 sudo 계정이 있을 때만 가능. 대부분은 **좀비 서버 정리 + 재기동**으로
+> 해결된다(보드가 실제로 죽은 경우가 아니라면).
 
 ---
 
