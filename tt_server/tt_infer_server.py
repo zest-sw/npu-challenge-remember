@@ -341,6 +341,22 @@ class QwenVLEngine:
                 users_decoding = False
             gen_idx += 1
 
+        # Free this request's device tensors so they do NOT accumulate in device
+        # DRAM across captions — that accumulation is what makes each successive
+        # caption slower (per-request latency creeps up over a long run). These
+        # are all created fresh per request (the next request re-allocates them),
+        # so releasing them here is safe. Best-effort + guarded: anything that is
+        # not a live ttnn device tensor is simply ignored.
+        for _t in (batch_logits, pxm, ptm, dxm, dtm, masks):
+            try:
+                ttnn.deallocate(_t)
+            except Exception:  # noqa: BLE001 - non-ttnn / already-freed
+                pass
+        try:
+            ttnn.deallocate(logits)  # last decode logits (undefined-safe via except)
+        except Exception:  # noqa: BLE001
+            pass
+
         tokens_out = [t for t in all_outputs if t != tokenizer.pad_token_id]
         full = tokenizer.decode(tokens_out)
         prompt_str = tokenizer.decode(model_input.tokens.tolist())
@@ -480,11 +496,35 @@ def caption(req: dict):
 
 def main():
     import uvicorn
+    import signal
 
-    threading.Thread(target=_worker, daemon=True).start()
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
     logger.info("Loading models on the NPU (this can take several minutes on first run)...")
     _ready.wait()  # block startup until models are on device
-    uvicorn.run(app, host=os.environ.get("TT_HOST", "0.0.0.0"), port=int(os.environ.get("TT_PORT", "8100")))
+    try:
+        uvicorn.run(app, host=os.environ.get("TT_HOST", "0.0.0.0"), port=int(os.environ.get("TT_PORT", "8100")))
+    finally:
+        # Clean NPU teardown. The worker's `finally: close_mesh_device()` is the
+        # ONLY thing that releases the board, but the worker is a daemon thread
+        # whose finally is skipped if the interpreter just exits -> the device is
+        # left active -> the board wedges. So on shutdown we explicitly signal the
+        # worker to stop and JOIN it, letting close_mesh_device() run to completion.
+        #
+        # We also ignore further SIGINT/SIGTERM here: a second Ctrl-C during this
+        # window would otherwise abort the device close mid-way and wedge the board
+        # (exactly the "mash Ctrl-C -> board dies" failure). Only SIGKILL (-9) can
+        # still interrupt this — which is why -9 must never be used on this server.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        logger.info("Shutting down: releasing the NPU cleanly — do NOT force-kill (-9)...")
+        _jobs.put((None, None, None))  # shutdown sentinel -> worker breaks + closes device
+        worker.join(timeout=180)
+        if worker.is_alive():
+            logger.warning("Device worker still busy after 180s (op in flight?); "
+                           "device may not have closed cleanly.")
+        else:
+            logger.info("NPU released cleanly. Safe to exit.")
 
 
 if __name__ == "__main__":
