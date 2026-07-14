@@ -5,7 +5,13 @@ from io import BytesIO
 import requests
 from PIL import Image
 
-from remembr.captioners.captioner import Captioner
+# Support both launch styles: the smoke test runs with the outer repo root on
+# PYTHONPATH (so `remembr.*` resolves), while the eval/preprocess scripts add the
+# inner `remembr/` dir to sys.path and import as `captioners.*`.
+try:
+    from remembr.captioners.captioner import Captioner
+except ModuleNotFoundError:
+    from captioners.captioner import Captioner
 
 
 # NOTE: the original ReMEmbR prompt began with a literal "<video>" token — that
@@ -34,7 +40,8 @@ class TenstorrentCaptioner(Captioner):
     local unified inference server (``tt_infer_server.py``) over HTTP.
     """
 
-    def __init__(self, url: str = None, prompt: str = DEFAULT_PROMPT, timeout: float = None):
+    def __init__(self, url: str = None, prompt: str = DEFAULT_PROMPT, timeout: float = None,
+                 max_gen_len: int = None):
         self.url = url or os.environ.get("TT_VLM_URL", "http://localhost:8100/caption")
         self.prompt = prompt
         # First caption after a fresh server launch compiles ttnn traces
@@ -44,11 +51,19 @@ class TenstorrentCaptioner(Captioner):
         if timeout is None:
             timeout = float(os.environ.get("TT_VLM_TIMEOUT", "900"))
         self.timeout = timeout
+        # Max tokens the VLM may generate per caption. The server defaults to 128,
+        # which truncates the (verbose, step-by-step) campus captions mid-sentence.
+        # Bump it so captions finish; the model still stops early on EOT, so this is
+        # only an upper bound. Must satisfy prefill+max_gen_len <= TT_VLM_MAX_SEQ_LEN.
+        if max_gen_len is None:
+            max_gen_len = int(os.environ.get("TT_VLM_MAX_GEN_LEN", "256"))
+        self.max_gen_len = max_gen_len
 
     def caption(self, images: list[Image.Image]) -> str:
         payload = {
             "images": [_encode_image(im) for im in images],
             "prompt": self.prompt,
+            "max_gen_len": self.max_gen_len,
         }
         response = requests.post(self.url, json=payload, timeout=self.timeout)
         response.raise_for_status()
