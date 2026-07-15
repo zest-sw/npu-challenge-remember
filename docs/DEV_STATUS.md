@@ -105,7 +105,7 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
   (temp≤0=기존 greedy, >0=grammar 허용 토큰에서 샘플링). grammar 제약은 그대로라 JSON 유효성 무영향.
   **실측**: temp=0 → 3회 요청 고유응답 1개, temp=0.7 → 3개(둘 다 schema 유효).
 - 🔄 **캡션 재생성 착수**: 혼합 품질(128/256 토큰 섞임) 해소 위해 전량 재생성. 기존본은 `*.MIXED-BACKUP.json` 보관.
-  초기 실측: 길이 ~1150자로 일관, 비전 **83~182 it/s**, 캡션당 VisionBlock 1회 — 그간 수정들이 모두 효과 확인.
+  초기 실측: 길이 \~1150자로 일관, 비전 **83\~182 it/s**, 캡션당 VisionBlock 1회 — 그간 수정들이 모두 효과 확인.
 - `8aea788` **eval optimal 경로 버그 수정**: `TextMemory.memory_to_string`이 이미 문자열인 optimal
   컨텍스트를 문자 단위로 순회해 `doc.time`에서 터지던 것(→ eval 재시도 무한루프) 수정. 문자열이면 그대로 통과.
 - ✅ **질문 JSON 생성**: `human_qa.json` 30문항(position 12 / time 7 / text 5 / binary 4 / duration 2).
