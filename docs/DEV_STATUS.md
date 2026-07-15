@@ -65,7 +65,7 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 
 | 이슈 | 상태 / 대응 |
 |---|---|
-| ~~**서버 slowdown**~~ (캡션당 21s→80s) | ✅ **해결**. 원인은 device 텐서가 아니라 **tt-metal Inspector**(디버그, 기본 ON)가 workload마다 YAML `flush()` → 캡션당 ~5천회 동기 I/O, YAML 153MB/534만 라인 누적 → flush가 점점 blocking. `run_server.sh`에서 `TT_METAL_INSPECTOR=0`으로 해결([8be8bc6]). 실측: 비전 19→2.1 it/s 하락이 **~42 it/s 안정**으로. |
+| **서버 slowdown** (원인 2개) | **① tt-metal Inspector**(디버그, 기본 ON): workload마다 YAML `flush()` → 캡션당 ~5천회 동기 I/O, 153MB/534만 라인 누적 → 19→2.1 it/s. `TT_METAL_INSPECTOR=0`으로 해결([8be8bc6]).<br>**② Tracy 프로파일링 빌드**: Inspector를 끄니 드러남(84→50 it/s). 동일 이미지 12회에 **RSS +33MB/요청, 지연 +1.0초/요청 선형 증가**. `build -> build_Release_tracy`(`ENABLE_TRACY=ON`)라 Tracy가 zone을 계속 누적. **컴파일 타임 스위치라 env로 못 끔** → 기본 빌드(`./build_metal.sh`, TRACY OFF)로 교체 중. 롤백: `ln -nsf build_Release_tracy build`. |
 | **캡션 문장 잘림** | 서버 기본 max_gen_len=128에서 잘림. 캡셔너가 256 전송하도록 수정([8caa7c9]). 재시작 후 적용. |
 | **보드 wedged** | 원인=캡셔닝/컴파일 중 강제종료(특히 Ctrl-C 연타). shutdown 정리 로직 추가([f9bc7bf]). **`-9` 절대 금지.** 복구는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 6번. |
 | **재부팅 제약** | 이 PC는 NPU 먼저 켜고 부팅해야 인식됨. wedged 시 재부팅보다 프로세스 정리+재기동을 먼저 시도. |

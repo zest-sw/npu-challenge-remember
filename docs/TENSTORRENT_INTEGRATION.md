@@ -151,6 +151,31 @@ end-to-end 경로(캡션→저장→검색→답변)를 한 번에 검증하는 
 - **원인**: device를 닫는 `close_mesh_device()`가 **daemon 워커의 finally**라 인터프리터 종료 시 실행 안 됨. Ctrl-C 연타는 uvicorn을 강제종료시켜 teardown을 중단 → device 활성 상태로 남아 **wedged**(재기동 시 `failed to initialize FW`).
 - **수정**: 종료 시 워커에 정지 신호 후 `join()`으로 `close_mesh_device()` 보장 + **teardown 구간 SIGINT/SIGTERM 무시**(연타 안전). `-9`(SIGKILL)만은 여전히 우회하므로 **금지**.
 
+### 문제 ⑫ slowdown의 **두 번째** 원인 — tt-metal이 Tracy 프로파일링 빌드
+- **증상**: Inspector를 끈 뒤에도 비전 블록이 **84 → 50 it/s**로 계속 하락. Inspector가 워낙 지배적이라
+  (19→2.1) 그 아래 숨어 있었다.
+- **정량 확증**: **완전히 동일한 이미지**로 12회 연속 요청 →
+  ```
+  RSS : 5280 → 5649 MB   (요청당 +33MB, 편차 거의 없음)
+  지연: 55.8s → 67.8s    (요청당 +1.0초 단조 증가)
+  ```
+  입력이 같은데 선형 증가 = 캐시/컴파일이 아니라 **요청마다 쌓이는 구조**.
+- **원인**: 이 tt-metal은 **`build_metal.sh --enable-profiler`로 빌드된 Tracy 빌드**다
+  (`build -> build_Release_tracy`, `CMakeCache: ENABLE_TRACY:BOOL=ON`, `_ttnn.so`에 Tracy 심볼 705개).
+  `build_metal.sh`의 기본값은 `enable_profiler="OFF"`이므로 누군가 의도적으로 `-p`를 준 것.
+  Tracy는 `TRACY_ON_DEMAND` 없이 컴파일되면 **UI 연결 여부와 무관하게 프로그램 시작부터 모든 zone을
+  메모리에 쌓는다.** `ReadDeviceProfilerResults`는 profiler 비활성 시 내부 블록을 건너뛰지만
+  그 위의 **`ZoneScoped;`(Tracy 매크로)** 는 `#if defined(TRACY_ENABLE)` 안에서 그대로 실행된다.
+  게다가 `decode_forward`가 **디코딩 토큰마다**(캡션당 ~256회), 비전 블록 루프가 **블록마다**(32회)
+  `ttnn.ReadDeviceProfiler`를 호출한다 → 캡션당 수만 zone 누적.
+- **왜 env로 못 끄나**: `TT_METAL_DEVICE_PROFILER`는 profiler *동작*만 끌 뿐, Tracy는 **컴파일 타임**
+  스위치라 런타임에 못 끈다.
+- **수정**: 프로파일러 없는 **기본 빌드**로 교체 — `./build_metal.sh`(기본 `ENABLE_TRACY=OFF`).
+  tt-metal 소스 무수정, 빌드 디렉토리가 분리되고(`build_Release`) 심볼릭 링크만 바뀌므로
+  **롤백은 `ln -nsf build_Release_tracy build` 한 줄**.
+- **교훈**: 성능 이상을 볼 때 **환경이 프로파일링 빌드인지** 먼저 의심할 것. 두 원인(Inspector, Tracy)
+  모두 "디버그 도구가 기본/의도적으로 켜져 있었다"였다.
+
 ### 문제 ⑨ 요청당 prefill 2회 (비전 인코더 2배 낭비)
 - **발견**: 서버 로그에 `32 x Qwen2_5_VLVisionBlock`이 캡션 1개당 **2번** 찍혔다.
 - **원인**: 원본 데모(`qwen25_vl/demo/vision_demo.py`)가 **의도적으로** prefill을 2번 호출한다 —
