@@ -69,17 +69,32 @@ except Exception:  # noqa: BLE001
     _HAS_LMFE = False
 
 
-def _masked_argmax(logits: "torch.Tensor", token_list, vocab: int) -> int:
-    """Greedy argmax over ONLY the grammar-allowed token ids (host-side mask).
+def _masked_sample(logits: "torch.Tensor", token_list, vocab: int, temperature: float = 0.0) -> int:
+    """Pick the next token from ONLY the grammar-allowed ids (host-side mask).
+
+    temperature <= 0 -> greedy argmax (deterministic).
+    temperature  > 0 -> sample from softmax(allowed_logits / temperature).
+
+    Sampling matters for callers that retry on a bad answer: remembr's eval loop
+    (`answer_squad_question`) re-asks until the answer parses/scores, which only
+    makes progress if the model can produce a different answer. With greedy
+    decoding every retry returns the identical output and the loop never ends.
+
     Accepts a logits tensor of any rank whose flattened length is the vocab row
     (batch=1)."""
     row = logits.reshape(-1)
     w = min(row.shape[0], vocab)
     allowed = [t for t in token_list.allowed_tokens if 0 <= t < w]
-    if not allowed:  # grammar dead-end (shouldn't happen) -> fall back to plain argmax
+    if not allowed:  # grammar dead-end (shouldn't happen) -> fall back to full vocab
+        if temperature > 0:
+            probs = torch.softmax(row[:w].float() / temperature, dim=-1)
+            return int(torch.multinomial(probs, 1).item())
         return int(torch.argmax(row[:w]).item())
     idx = torch.tensor(allowed, dtype=torch.long)
     sub = row.index_select(0, idx)
+    if temperature > 0:
+        probs = torch.softmax(sub.float() / temperature, dim=-1)
+        return int(idx[int(torch.multinomial(probs, 1).item())].item())
     return int(idx[int(torch.argmax(sub).item())].item())
 
 
@@ -163,7 +178,8 @@ class LlamaEngine:
         self.generator = LlamaGenerator(model, model_args, self.mesh_device, tokenizer=self.tokenizer)
         logger.info("[LLM] ready.")
 
-    def generate(self, prompt: str, max_new_tokens: int = 256, force_json: bool = False, json_schema=None) -> str:
+    def generate(self, prompt: str, max_new_tokens: int = 256, force_json: bool = False, json_schema=None,
+                 temperature: float = 0.0) -> str:
         model_args, model, tokenizer = self.model_args, self.model, self.tokenizer
         generator, page_table, tt_kv_cache = self.generator, self.page_table, self.tt_kv_cache
         mesh_device = self.mesh_device
@@ -206,11 +222,12 @@ class LlamaEngine:
         )
         # ---- JSON-constrained (grammar) decoding: the format="json" equivalent ----
         # Host-side masking: run decode with sampling_params=None so decode_forward_text
-        # returns raw host logits [1,1,vocab]; mask to grammar-allowed ids; argmax.
+        # returns raw host logits [1,1,vocab]; mask to grammar-allowed ids; then pick
+        # greedily (temperature<=0) or by sampling (temperature>0).
         if force_json:
             vocab = model_args[0].vocab_size
             enforcer = TokenEnforcer(self._ensure_enforcer_data(), JsonSchemaParser(json_schema))
-            first = _masked_argmax(logits, enforcer.get_allowed_tokens([]), vocab)
+            first = _masked_sample(logits, enforcer.get_allowed_tokens([]), vocab, temperature)
             generated = [] if first in tokenizer.stop_tokens else [first]
             current_pos = torch.tensor([decoding_pos[0]])
             out_tok = torch.tensor([[first]])
@@ -219,7 +236,7 @@ class LlamaEngine:
                     out_tok, current_pos, enable_trace=True,
                     page_table=page_table, kv_cache=tt_kv_cache, sampling_params=None,
                 )
-                nxt = _masked_argmax(dlogits, enforcer.get_allowed_tokens(generated), vocab)
+                nxt = _masked_sample(dlogits, enforcer.get_allowed_tokens(generated), vocab, temperature)
                 current_pos = current_pos + 1
                 if nxt in tokenizer.stop_tokens:
                     break
@@ -231,7 +248,8 @@ class LlamaEngine:
         # ---- unconstrained device-greedy path ----
         prefilled_token = torch.argmax(logits, dim=-1)
 
-        device_sampling_params = SamplingParams(temperature=0.0, top_k=-1, top_p=1.0)  # greedy on device
+        # temperature=0 -> greedy on device (the default); >0 samples there.
+        device_sampling_params = SamplingParams(temperature=temperature, top_k=-1, top_p=1.0)
 
         first = int(prefilled_token[0].item())
         generated = []
@@ -460,7 +478,12 @@ def chat_completions(req: dict):
     if rf.get("type") == "json_schema":
         js = rf.get("json_schema") or {}
         json_schema = js.get("schema", js)
-    text = _submit(_engines["llm"].generate, prompt, max_tokens, force_json, json_schema)
+    # Honor OpenAI `temperature`. 0 (or absent) keeps the deterministic greedy
+    # path; >0 samples, which callers that retry on a bad answer depend on —
+    # remembr's eval loop re-asks until the answer scores, and with greedy
+    # decoding every retry is identical, so it would spin forever.
+    temperature = float(req.get("temperature") or 0.0)
+    text = _submit(_engines["llm"].generate, prompt, max_tokens, force_json, json_schema, temperature)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
