@@ -134,10 +134,14 @@ end-to-end 경로(캡션→저장→검색→답변)를 한 번에 검증하는 
 - **원인**: 서버 `/caption`이 `max_gen_len` 미지정 시 **128 토큰**으로 상한. step-by-step 캡션이 그 전에 EOT를 못 내 잘림.
 - **수정**: 캡셔너가 `max_gen_len`(기본 256, `TT_VLM_MAX_GEN_LEN`) 전송. 서버는 이미 이 파라미터를 존중하므로 **서버 코드 무변경**, 클라이언트 재실행으로 적용.
 
-### 문제 ⑥ 캡션이 갈수록 느려짐 (21s → 80s)
-- **측정**: 캡션 길이·호스트 RAM·스왑 모두 안정 → **device 쪽 누적**이 원인.
-- **원인**: `describe()`가 요청마다 만든 device 텐서(`batch_logits/pxm/ptm/dxm/dtm/masks/logits`)를 해제하지 않아 device DRAM에 누적 → 이후 요청이 점점 느려짐.
-- **수정**: 요청 끝에 `ttnn.deallocate`(guarded). ⚠️ fresh run에서 실효 재검증 필요. 임시완화=서버 재시작으로 device 상태 리셋.
+### 문제 ⑥ 캡션이 갈수록 느려짐 (21s → 80s) — **범인: tt-metal Inspector**
+- **측정**: 캡션 길이·호스트 RAM·스왑 모두 안정. 서버 로그의 비전 블록 속도가 **19 → 2.1 it/s로 단조 하락**(9배)하는 것이 결정적 단서였다.
+- **원인**: tt-metal의 **Inspector**(디버그 기능)가 **기본 ON**이다(`rtoptions.hpp`: `InspectorSettings::enabled = true`). 그 logger가 **mesh workload마다 YAML을 append하고 매번 `fstream::flush()`** 를 호출한다(`logger.cpp`) → 여기선 **캡션당 약 5,000회 동기 디스크 flush**. 한 번의 캡셔닝 run에서 `generated/inspector/mesh_workloads_log.yaml`이 **153MB / 534만 라인**까지 커졌고, 파일이 커질수록 flush가 점점 blocking되어 VLM이 끌려 내려갔다.
+  - 메모리 문제가 **아니다**: inspector의 `unordered_map`은 `erase`로 정리되며, 실제로 호스트 RSS는 11.3GB로 평평했다.
+- **수정**: **tt-metal 소스는 건드리지 않고**, tt-metal이 제공하는 스위치를 `run_server.sh`에서 설정 —
+  `TT_METAL_INSPECTOR=0`, `TT_METAL_INSPECTOR_RPC=0`.
+- **실측 결과**: 비전 블록이 **~42 it/s로 안정 유지**(하락 소멸), inspector YAML 미생성. 서버 로그의 `Inspector RPC 50051` 경고도 함께 사라진다.
+- **오진 기록**: 처음엔 device 텐서 누적으로 보고 `describe()`에 `ttnn.deallocate`를 추가했으나 **원인이 아니었고**(LLM 디코딩 텐서를 겨냥했음) 되돌렸다. `TT_METAL_DEVICE_PROFILER`도 무관(`'1'`일 때만 활성인데 미설정이라 no-op).
 
 ### 문제 ⑦ Ctrl-C(특히 연타)로 보드가 wedged
 - **원인**: device를 닫는 `close_mesh_device()`가 **daemon 워커의 finally**라 인터프리터 종료 시 실행 안 됨. Ctrl-C 연타는 uvicorn을 강제종료시켜 teardown을 중단 → device 활성 상태로 남아 **wedged**(재기동 시 `failed to initialize FW`).

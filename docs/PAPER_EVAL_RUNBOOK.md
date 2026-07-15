@@ -155,8 +155,11 @@ python scripts/preprocess_captions.py \
 - **체크포인트/resume**: 캡션 1개마다 `..._secs.json.partial.jsonl`에 즉시 기록된다. 중단(kill,
   서버 문제) 후 **같은 명령을 재실행하면 이어서** 진행(이미 한 세그먼트는 skip). 전체 완료 시
   최종 JSON 저장 + partial 삭제. 처음부터 다시 하려면 partial을 지운다.
-- **점점 느려지면**(캡션당 시간 증가) device 텐서 누적 때문 → **서버 재시작**하면 속도 리셋되고
-  체크포인트로 이어진다. (서버 `describe()`에 텐서 해제를 추가했으나 fresh run 재검증 권장.)
+- **점점 느려지는 문제는 해결됨**: 원인은 tt-metal **Inspector**(디버그 기능, 기본 ON)가 mesh workload마다
+  YAML을 flush해 캡션당 ~5,000회 동기 디스크 I/O를 내던 것. `run_server.sh`가 이제
+  `TT_METAL_INSPECTOR=0`/`TT_METAL_INSPECTOR_RPC=0`으로 끈다(tt-metal 소스 무수정).
+  실측: 비전 블록 19→2.1 it/s로 하락하던 것이 **~42 it/s 안정 유지**로 개선.
+  혹시 다시 느려지면 서버 로그의 `32 x Qwen2_5_VLVisionBlock ... it/s` 값이 최고의 게이지다.
 - 결과: `data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json`.
 - 첫 캡션만 트레이스 컴파일로 느리고, 이후 캐시되어 빨라진다.
 

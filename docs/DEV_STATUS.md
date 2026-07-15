@@ -22,10 +22,10 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | end-to-end 스모크 테스트 | ✅ 완료 |
 | 원 논문 데이터 확보 (data.csv + CODa seq0) | ✅ 완료 |
 | ROS-free CODa→.pkl 추출 | ✅ 완료 (8213 프레임) |
-| 캡셔닝 파이프라인 (체크포인트/재개) | ✅ 코드 완료, 🔄 full run 검증 중 |
-| 서버 안정화 (clean shutdown + slowdown) | ✅ 코드 완료, ⚠️ 하드웨어 재검증 필요 |
-| seq0 캡션 생성 완료 | ⏳ 진행/재시작 대기 |
-| 질문 JSON 생성 (form_question_jsons) | ⬜ 미착수 (캡션 후) |
+| 캡셔닝 파이프라인 (체크포인트/재개) | ✅ 완료 (full run에서 resume 동작 확인) |
+| 서버 안정화 (clean shutdown + slowdown) | ✅ 완료 (slowdown 원인=Inspector, 실측 해결) |
+| **seq0 캡션 생성 완료** | ✅ **272개 생성** (`captions_tt-qwen25-vl-3b_3_secs.json`, 6.1MB) |
+| 질문 JSON 생성 (form_question_jsons) | ⬜ 다음 단계 |
 | 평가 실행 (eval.py, optimal+tt/) | ⬜ 미착수 |
 | 다중 프레임(논문 충실도) 캡션 | ⬜ 선택 과제 |
 
@@ -50,7 +50,7 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 
 | 이슈 | 상태 / 대응 |
 |---|---|
-| **서버 slowdown** (캡션당 21s→80s로 누적 증가) | 원인=요청 device 텐서 미해제. `describe()`에 `ttnn.deallocate` 추가([f9bc7bf]). ⚠️ **fresh run에서 실효 재검증 필요.** 임시완화=서버 재시작(속도 리셋). |
+| ~~**서버 slowdown**~~ (캡션당 21s→80s) | ✅ **해결**. 원인은 device 텐서가 아니라 **tt-metal Inspector**(디버그, 기본 ON)가 workload마다 YAML `flush()` → 캡션당 ~5천회 동기 I/O, YAML 153MB/534만 라인 누적 → flush가 점점 blocking. `run_server.sh`에서 `TT_METAL_INSPECTOR=0`으로 해결([8be8bc6]). 실측: 비전 19→2.1 it/s 하락이 **~42 it/s 안정**으로. |
 | **캡션 문장 잘림** | 서버 기본 max_gen_len=128에서 잘림. 캡셔너가 256 전송하도록 수정([8caa7c9]). 재시작 후 적용. |
 | **보드 wedged** | 원인=캡셔닝/컴파일 중 강제종료(특히 Ctrl-C 연타). shutdown 정리 로직 추가([f9bc7bf]). **`-9` 절대 금지.** 복구는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 6번. |
 | **재부팅 제약** | 이 PC는 NPU 먼저 켜고 부팅해야 인식됨. wedged 시 재부팅보다 프로세스 정리+재기동을 먼저 시도. |
@@ -73,7 +73,9 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 ## 6. 변경 로그 (Changelog)
 
 ### 2026-07-15
-- `f9bc7bf` **서버 안정화**: 종료 시 워커 join으로 `close_mesh_device()` 보장 + teardown 중 SIGINT/SIGTERM 무시(Ctrl-C 연타 wedge 방지). `describe()`에 요청 device 텐서 `ttnn.deallocate` 추가(slowdown 대응).
+- ✅ **seq0 캡셔닝 완주**: 272 캡션 생성(`captions_tt-qwen25-vl-3b_3_secs.json`). 체크포인트 resume 실동작 확인(중단 후 이어서 → 완료 시 partial 자동 삭제).
+- `8be8bc6` **slowdown 원인 규명 & 해결**: tt-metal **Inspector**(디버그, 기본 ON)가 mesh workload마다 YAML `flush()` → 캡션당 ~5천회 동기 디스크 I/O, 한 run에 153MB/534만 라인 누적 → 파일이 커질수록 flush가 blocking → 비전 블록 **19→2.1 it/s 단조 하락**. `run_server.sh`에서 tt-metal 자체 스위치(`TT_METAL_INSPECTOR=0`, `_RPC=0`)로 비활성 — **tt-metal 소스 무수정**. 실측: **~42 it/s 안정 유지**, YAML 미생성. 함께 이전의 오진 수정(`describe()`의 `ttnn.deallocate`)을 되돌림.
+- `f9bc7bf` **서버 안정화**: 종료 시 워커 join으로 `close_mesh_device()` 보장 + teardown 중 SIGINT/SIGTERM 무시(Ctrl-C 연타 wedge 방지).
 - `804bcf6` **eval import**: `ChatNVIDIA`(NIM) lazy import → NIM 패키지 없이 eval 실행.
 - `8caa7c9` **캡셔너**: import fallback(inner/outer 경로 양쪽), `max_gen_len`(기본 256) 전송으로 문장 잘림 해결.
 - `16a253e` **캡셔닝 파이프라인**: `--captioner {vila,tenstorrent}` 선택 + VILA lazy import, 프롬프트 video→image 중화, JSONL 체크포인트/resume, early-exit를 "최종 JSON 존재"로 수정.
