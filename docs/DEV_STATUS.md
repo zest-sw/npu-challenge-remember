@@ -26,7 +26,9 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | 서버 안정화 (clean shutdown + slowdown) | ✅ 완료 (slowdown 원인=Inspector, 실측 해결) |
 | **seq0 캡션 생성 완료** | ✅ **272개 생성** (`captions_tt-qwen25-vl-3b_3_secs.json`, 6.1MB) |
 | **질문 JSON 생성** (form_question_jsons) | ✅ **30문항** (`data/questions/0/human_qa.json`) |
-| **평가 실행** (eval.py, optimal+tt/) | ⛔ **막힘** — 서버가 temperature를 무시(greedy) → eval.py 재시도 루프가 무한 반복. [방향 결정 필요](#4-알려진-이슈--주의점-gotchas) |
+| 서버 temperature 지원 | ✅ 완료 (`b2dab02`) — eval 무한 재시도 해소. 실측: temp=0 동일 / 0.7 매번 다름 |
+| **캡션 재생성** (품질 일관화) | 🔄 진행 중 — 전부 256토큰(~1150자)으로 통일, ~2.9h |
+| **평가 실행** (eval.py, optimal+tt/) | ⬜ 캡션 재생성 후 |
 | 다중 프레임(논문 충실도) 캡션 | ⬜ 선택 과제 |
 
 ### 하드웨어 실측 스펙 (`tt_server/npu_info.py`)
@@ -54,16 +56,10 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 
 ## 3. 진행 중 / 다음 단계
 
-1. ⛔ **평가가 막혀 있음 — 방향 결정 필요.** 3B가 time 질문에 `type='text', time=None`으로 답하면
-   `evaluate_output`이 `abs(answer - None)`으로 크래시하고, `answer_squad_question`의 `while True`
-   재시도가 무한 반복된다. 원본은 `temperature=0.7`(eval.py 기본값)이라 재시도마다 다른 답이
-   나온다는 전제인데, **우리 서버는 temperature를 읽지도 않고 항상 greedy**라 전제가 깨졌다.
-   선택지: **(A)** 서버가 temperature를 존중(원본 의도 복원, 가장 정석) / **(B)** `evaluate_output`에
-   None 가드(원본 채점 수정) / **(C)** JSON schema로 type별 필드 강제.
-2. (선택) **캡션 품질 일관화** — 현재 앞부분은 128토큰, 뒷부분은 256토큰으로 섞여 있다(길이 501~1269자).
-   재생성 시 이제 ~38초/캡션이라 272개 ≈ 2.9시간.
-3. (선택) **다중 프레임 캡션**으로 논문 충실도 향상 — 절차는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 4-1.
-4. (선택) **평가 단계 8B 투입** — DRAM 12GiB라 VLM을 내리면(`TT_ENABLE_VLM=0`) 8B가 단독으로 들어간다.
+1. 🔄 **캡션 재생성 완주 대기** — 전부 256토큰으로 통일(~2.9h). 완료 시 최종 JSON 생성 + partial 자동 삭제.
+2. **질문 JSON 재생성** — 캡션이 바뀌었으므로 `form_question_jsons.py`를 다시 돌려 optimal 컨텍스트를 갱신해야 한다.
+3. **평가 실행** — `eval.py --model optimal+tt/Llama-3.2-3B-Instruct --sequence_id 0 ...` (temperature 기본 0.7).
+4. (선택) **다중 프레임 캡션**으로 논문 충실도 향상 — 절차는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 4-1.
 
 ## 4. 알려진 이슈 / 주의점 (gotchas)
 
@@ -74,9 +70,9 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | **보드 wedged** | 원인=캡셔닝/컴파일 중 강제종료(특히 Ctrl-C 연타). shutdown 정리 로직 추가([f9bc7bf]). **`-9` 절대 금지.** 복구는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 6번. |
 | **재부팅 제약** | 이 PC는 NPU 먼저 켜고 부팅해야 인식됨. wedged 시 재부팅보다 프로세스 정리+재기동을 먼저 시도. |
 | **device 노드 = `/dev/bos/0`** | Tenstorrent 아님(`/dev/tenstorrent` 없음). 확인: `fuser -v /dev/bos/0`, `lsmod \| grep bos`. |
-| ⛔ **eval 무한 재시도** | `answer_squad_question`의 `while True`가 채점 예외 시 재시도하는데, **서버가 temperature를 무시하고 greedy**라 재시도해도 답이 동일 → 무한 루프. 트리거: 3B가 time 질문에 `type='text', time=None`. **미해결, 방향 결정 필요**(3번 참고). |
-| **3B 품질** | JSON 유효성은 보장되나 grounding은 3B 한계 — 질문 type에 맞는 필드를 못 채우는 사례 확인(위 이슈의 트리거). 필요시 8B(평가 단계 단독 로딩). |
-| **캡션 품질 혼합** | seq0 캡션 1~117은 128토큰(≈600자), 118~272는 256토큰(≈1200자)에서 잘림 — max_gen_len 수정 전후가 resume으로 섞임. 평가엔 사용 가능하나 일관성은 아쉬움. |
+| ~~**eval 무한 재시도**~~ | ✅ **해결**([b2dab02]). 원인=서버가 temperature를 무시하고 greedy → eval의 재시도가 매번 동일한 답. 서버가 OpenAI `temperature`를 존중하도록 수정(0이면 greedy 유지, >0이면 grammar 허용 토큰에서 샘플링). 트리거였던 "3B가 time 질문에 `time=None`" 자체는 남아 있으나, 이제 재시도가 진전한다. |
+| **3B 품질** | JSON 유효성은 보장되나 grounding은 3B 한계 — 질문 type에 맞는 필드를 못 채우는 사례 있음(재시도로 흡수). **8B로 올리지 않는 이유는 5번 설계 결정 참고**(로봇 배포 시 co-resident 필요). |
+| ~~**캡션 품질 혼합**~~ | 🔄 재생성 중으로 해소 예정. (기존 혼합본은 `*.MIXED-BACKUP.json`으로 보관) |
 | **충실도 편차** | 캡셔너 VILA→Qwen, LLM 8B→3B(이식 불가피), 프레임 6→1(절충). [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 충실도 표. |
 | **venv 의존성 함정** | 새 패키지가 `langchain-core`를 0.3, `numpy`를 2.x로 끌어올리면 스택이 깨짐. 핀 준수([RUNBOOK](../tt_server/RUNBOOK.md) 1-3). |
 
@@ -84,6 +80,14 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 
 - **두 venv를 HTTP로 분리** — ttnn/transformers(서버) vs langchain/pymilvus(remembr) 버전 충돌 회피.
 - **NonAgent 채택** (ReMEmbRAgent 아님) — 3B는 tool-calling 불안정. 단일 JSON 호출이 NPU에 적합.
+- **LLM은 3B 유지 (8B로 안 감)** — 평가만 보면 평가 단계엔 VLM이 필요 없으니 `TT_ENABLE_VLM=0`으로
+  8B를 단독 로딩해 품질을 올릴 수 있다(DRAM 12GiB에 8B는 단독으로만 들어감). **그러나 최종 목표는
+  로봇 배포**이고, 주행 중에는 캡션 생성과 질의응답이 함께 일어나므로 **두 모델이 co-resident여야 한다.**
+  8B+VLM은 12GiB에 안 들어간다 → **3B+3B가 배포 가능한 유일한 구성.** 시간분리(time-separated)는
+  평가 전용 최적화일 뿐 실배포에 못 쓰므로, **평가도 배포와 같은 3B 구성으로** 한다(평가의 대표성 확보).
+- **서버가 temperature를 존중** — 원본 eval은 `temperature=0.7`(기본값)로 재시도하면 다른 답이 나온다는
+  전제로 재시도 루프를 돌린다. 서버가 greedy 고정이면 그 계약이 깨져 무한 루프가 된다. eval 코드를
+  고치는 대신 **서버가 계약을 지키게** 했다(temperature=0이면 기존 greedy 그대로).
 - **JSON 제약 디코딩** — Ollama `format="json"` 대체. 3B의 무한 재시도/헛소리 방지.
 - **캡셔너 = HTTP 클라이언트** — VLM을 remembr 프로세스에 직접 로드하지 않음(의존성/디바이스 소유 충돌).
 - **`<video>` 제거, video→image 프롬프트** — VILA 잔재. Qwen 정지프레임에서 거부 유발.
@@ -94,6 +98,14 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 ## 6. 변경 로그 (Changelog)
 
 ### 2026-07-15
+- `b2dab02` **서버가 temperature 존중 → eval 무한 재시도 해소**: `chat_completions`가 `temperature`를
+  읽지 않고, JSON 경로는 masked argmax, non-JSON은 `SamplingParams(temperature=0.0)`로 **greedy 고정**이었다.
+  원본 eval은 `--temperature 0.7`로 재시도하면 답이 달라진다는 전제라, greedy면 재시도가 무한 반복된다.
+  temperature를 `chat_completions → generate() → sampler`로 전달하고 `_masked_argmax`→`_masked_sample`
+  (temp≤0=기존 greedy, >0=grammar 허용 토큰에서 샘플링). grammar 제약은 그대로라 JSON 유효성 무영향.
+  **실측**: temp=0 → 3회 요청 고유응답 1개, temp=0.7 → 3개(둘 다 schema 유효).
+- 🔄 **캡션 재생성 착수**: 혼합 품질(128/256 토큰 섞임) 해소 위해 전량 재생성. 기존본은 `*.MIXED-BACKUP.json` 보관.
+  초기 실측: 길이 ~1150자로 일관, 비전 **83~182 it/s**, 캡션당 VisionBlock 1회 — 그간 수정들이 모두 효과 확인.
 - `8aea788` **eval optimal 경로 버그 수정**: `TextMemory.memory_to_string`이 이미 문자열인 optimal
   컨텍스트를 문자 단위로 순회해 `doc.time`에서 터지던 것(→ eval 재시도 무한루프) 수정. 문자열이면 그대로 통과.
 - ✅ **질문 JSON 생성**: `human_qa.json` 30문항(position 12 / time 7 / text 5 / binary 4 / duration 2).
