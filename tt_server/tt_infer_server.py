@@ -194,9 +194,13 @@ class LlamaEngine:
 
         input_tokens_prefill_pt = torch.stack(input_tokens_prefill_pt).view(1, -1)
 
-        generator.prefill_forward_text(
-            input_tokens_prefill_pt, page_table=page_table, kv_cache=tt_kv_cache, prompt_lens=decoding_pos
-        )
+        # Single prefill. Like the VLM path, the upstream demo runs prefill twice
+        # (a compile pass then a timed inference pass) purely to report compile-vs-
+        # inference ms; the first call's result is not even bound to a name here.
+        # The server's program cache is warm after its first request, so the extra
+        # pass is a duplicate forward. prefill_forward_text writes the prompt's K/V
+        # at fixed positions (the cache is zeroed just above), so one call yields
+        # the same state and logits.
         logits = generator.prefill_forward_text(
             input_tokens_prefill_pt, page_table=page_table, kv_cache=tt_kv_cache, prompt_lens=decoding_pos
         )
@@ -312,10 +316,13 @@ class QwenVLEngine:
         tokens = torch.full((1, int(max(total_lens))), pad_id, dtype=torch.long)
         tokens[0, : len(prompt_tokens)] = prompt_tokens.detach().clone().to(torch.long)
 
-        # prefill (warmup + real, mirroring the demo)
-        masks = generator.prefill_forward(
-            vision_images, vision_mask, tokens, xattn_caches, total_lens, prefill_lens, image_grid_thw=image_grid_thw
-        )
+        # prefill. The demo (qwen25_vl/demo/vision_demo.py) deliberately calls this
+        # TWICE — a "compile_prefill" pass to warm the program cache, then a second
+        # "inference_prefill" pass it times — so it can report compile-vs-inference
+        # ms separately. That split only makes sense for benchmarking: a long-lived
+        # server compiles on its very first request and every request after that
+        # already runs warm, so the extra pass is a pure duplicate forward (and its
+        # result was discarded here anyway). One call == the demo's inference_prefill.
         batch_logits, pxm, ptm, dxm, dtm = generator.prefill_forward(
             vision_images, vision_mask, tokens, xattn_caches, total_lens, prefill_lens, image_grid_thw=image_grid_thw
         )
