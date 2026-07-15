@@ -23,11 +23,13 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | 원 논문 데이터 확보 (data.csv + CODa seq0) | ✅ 완료 |
 | ROS-free CODa→.pkl 추출 | ✅ 완료 (8213 프레임) |
 | 캡셔닝 파이프라인 (체크포인트/재개) | ✅ 완료 (full run에서 resume 동작 확인) |
-| 서버 안정화 (clean shutdown + slowdown) | ✅ 완료 (slowdown 원인=Inspector, 실측 해결) |
+| 서버 안정화 (clean shutdown) | ✅ 완료 |
+| slowdown 해결 ① Inspector | ✅ 완료 (`TT_METAL_INSPECTOR=0`) — 19→2.1 it/s 하락 제거 |
+| slowdown 해결 ② Tracy 빌드 | 🔄 tt-metal 재빌드 중 (`ENABLE_TRACY=OFF`) — RSS +33MB/요청 누수 제거 목적 |
 | **seq0 캡션 생성 완료** | ✅ **272개 생성** (`captions_tt-qwen25-vl-3b_3_secs.json`, 6.1MB) |
 | **질문 JSON 생성** (form_question_jsons) | ✅ **30문항** (`data/questions/0/human_qa.json`) |
 | 서버 temperature 지원 | ✅ 완료 (`b2dab02`) — eval 무한 재시도 해소. 실측: temp=0 동일 / 0.7 매번 다름 |
-| **캡션 재생성** (품질 일관화) | 🔄 진행 중 — 전부 256토큰(~1150자)으로 통일, ~2.9h |
+| **캡션 재생성** (품질 일관화) | ⏸️ 51/272에서 대기 — Tracy 재빌드 후 재개(체크포인트 보존) |
 | **평가 실행** (eval.py, optimal+tt/) | ⬜ 캡션 재생성 후 |
 | 다중 프레임(논문 충실도) 캡션 | ⬜ 선택 과제 |
 
