@@ -43,9 +43,8 @@ CODa seq .zip ──(선택 압축해제)──► 2d_rect/cam0 + poses/dense
 | cam0 8213장 + pose | `/home/user/coda_raw/seq0/` | ✅ 압축해제 |
 | `.pkl` 프레임 8213개 | `/home/user/coda_raw/coda_data/0/` | ✅ 추출 |
 | ROS-free 추출기 | `remembr/scripts/preprocess_coda_rosfree.py` | ✅ |
-
-| **seq0 캡션 272개** | `remembr/data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json` | ✅ 생성 완료 |
-| **seq0 질문 30문항** | `remembr/data/questions/0/human_qa.json` | ✅ 생성 완료 |
+| **seq0 캡션** | `remembr/data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json` | 🔄 재생성 중 (품질 일관화) |
+| **seq0 질문 30문항** | `remembr/data/questions/0/human_qa.json` | ⚠️ 캡션 재생성 후 **다시 생성 필요** |
 
 **남은 것**: 캡션 재생성(품질 일관화) → 질문 JSON 재생성 → **4-3 평가**.
 temperature 미지원으로 막혀 있던 문제는 해결됐다(서버가 OpenAI `temperature`를 존중).
@@ -174,6 +173,8 @@ python scripts/question_scripts/form_question_jsons.py \
 ```
 - `./data/navqa/data.csv` + 위 캡션 → `data/questions/0/human_qa.json`.
 - 캡션이 있는 seq만 처리, 나머지는 자동 skip.
+- ⚠️ **캡션을 다시 만들면 이 단계도 다시 돌려야 한다.** 질문 JSON에는 캡션에서 뽑은 "optimal
+  context"(정답에 필요한 캡션들)가 박혀 있어서, 캡션이 바뀌면 그 컨텍스트도 갱신해야 한다.
 
 ### 4-3. 평가
 **권장 — optimal(오라클) 컨텍스트 + NonAgent** (seq_len에 맞고 tool-calling 불필요):
