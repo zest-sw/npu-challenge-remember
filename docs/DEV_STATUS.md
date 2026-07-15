@@ -26,8 +26,7 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | 서버 안정화 (clean shutdown) | ✅ 완료 |
 | slowdown 해결 ① Inspector | ✅ 완료 (`TT_METAL_INSPECTOR=0`) — 19→2.1 it/s 하락 제거 |
 | slowdown 해결 ② Tracy 빌드 | ✅ 완료 — 기본 빌드로 교체(`ENABLE_TRACY=OFF`, Tracy 심볼 705→0). 실측: RSS +33MB/요청 → **+0~1MB**, 지연 +1.0초/요청 → **36초 고정** |
-| **seq0 캡션 생성 완료** | ✅ **272개 생성** (`captions_tt-qwen25-vl-3b_3_secs.json`, 6.1MB) |
-| **질문 JSON 생성** (form_question_jsons) | ✅ **30문항** (`data/questions/0/human_qa.json`) |
+| **질문 JSON 생성** (form_question_jsons) | ⚠️ 30문항 생성됨 — 캡션 재생성 후 **다시 생성 필요**(optimal 컨텍스트가 캡션에서 추출됨) |
 | 서버 temperature 지원 | ✅ 완료 (`b2dab02`) — eval 무한 재시도 해소. 실측: temp=0 동일 / 0.7 매번 다름 |
 | **캡션 재생성** (품질 일관화) | 🔄 **109/272** — Tracy 재빌드 후 재개, **36초/캡션 고정**(누수 0) |
 | **평가 실행** (eval.py, optimal+tt/) | ⬜ 캡션 재생성 후 |
@@ -67,7 +66,7 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 
 | 이슈 | 상태 / 대응 |
 |---|---|
-| **서버 slowdown** (원인 2개) | **① tt-metal Inspector**(디버그, 기본 ON): workload마다 YAML `flush()` → 캡션당 ~5천회 동기 I/O, 153MB/534만 라인 누적 → 19→2.1 it/s. `TT_METAL_INSPECTOR=0`으로 해결([8be8bc6]).<br>**② Tracy 프로파일링 빌드**: Inspector를 끄니 드러남(84→50 it/s). 동일 이미지 12회에 **RSS +33MB/요청, 지연 +1.0초/요청 선형 증가**. `build -> build_Release_tracy`(`ENABLE_TRACY=ON`)라 Tracy가 zone을 계속 누적. **컴파일 타임 스위치라 env로 못 끔** → 기본 빌드(`./build_metal.sh`, TRACY OFF)로 교체 중. 롤백: `ln -nsf build_Release_tracy build`. |
+| **서버 slowdown** (원인 2개) | **① tt-metal Inspector**(디버그, 기본 ON): workload마다 YAML `flush()` → 캡션당 ~5천회 동기 I/O, 153MB/534만 라인 누적 → 19→2.1 it/s. `TT_METAL_INSPECTOR=0`으로 해결([8be8bc6]).<br>**② Tracy 프로파일링 빌드**: Inspector를 끄니 드러남(84→50 it/s). 동일 이미지 12회에 **RSS +33MB/요청, 지연 +1.0초/요청 선형 증가**. `build -> build_Release_tracy`(`ENABLE_TRACY=ON`)라 Tracy가 zone을 계속 누적. **컴파일 타임 스위치라 env로 못 끔** → ✅ 기본 빌드(`./build_metal.sh`, TRACY OFF)로 교체 완료([458bf09], 심볼 705→0). 실측 **36초 고정·RSS +0MB**. 롤백: `ln -nsf build_Release_tracy build`. |
 | **캡션 문장 잘림** | 서버 기본 max_gen_len=128에서 잘림. 캡셔너가 256 전송하도록 수정([8caa7c9]). 재시작 후 적용. |
 | **보드 wedged** | 원인=캡셔닝/컴파일 중 강제종료(특히 Ctrl-C 연타). shutdown 정리 로직 추가([f9bc7bf]). **`-9` 절대 금지.** 복구는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 6번. |
 | **재부팅 제약** | 이 PC는 NPU 먼저 켜고 부팅해야 인식됨. wedged 시 재부팅보다 프로세스 정리+재기동을 먼저 시도. |
