@@ -15,6 +15,8 @@ remembr/
 ├── tt_server/
 │   ├── tt_infer_server.py   # unified NPU inference server (LLM + VLM)
 │   ├── run_server.sh        # launcher (sets env, runs in tt-metal venv)
+│   ├── npu_info.py          # hardware/spec dump (arch, DRAM, Tensix grid, L1)
+│   ├── RUNBOOK.md           # start/venv/troubleshoot/shutdown
 │   └── README.md            # this file
 ├── remembr/agents/non_agent.py                    # + 'tt/<model>' backend (ChatOpenAI -> server)
 ├── remembr/agents/remembr_agent.py                # lazy-import ChatNVIDIA (optional NIM backend)
@@ -107,10 +109,18 @@ Non-JSON requests keep the fast on-device greedy path.
 
 ## Notes / known limits
 
-- **DRAM budget.** This board exposes only ~12GB DRAM (3 banks). Llama-3.2-3B +
-  Qwen-3B fit together at `max_seq_len=1024`. An 8B LLM does **not** co-fit — use
-  the time-separated fallback (`TT_ENABLE_VLM=1 TT_ENABLE_LLM=0` for the caption
+- **DRAM budget.** Measured via `npu_info.py`: **12 GiB = 4 GiB x 3 banks**
+  (arch BLACKHOLE, Tensix 5x4 = 20 cores, L1 1.5MB/core). Llama-3.2-3B + Qwen-3B
+  fit together at `max_seq_len=1024`. An 8B LLM does **not** co-fit — use the
+  time-separated fallback (`TT_ENABLE_VLM=1 TT_ENABLE_LLM=0` for the caption
   phase, then swap) or a smaller model.
+- **Inspector is off.** `run_server.sh` sets `TT_METAL_INSPECTOR=0` /
+  `TT_METAL_INSPECTOR_RPC=0`. tt-metal's Inspector defaults to ON and flushes a
+  YAML record per mesh workload (~5k synchronous disk flushes per caption), which
+  dragged the VLM from 19 to 2.1 it/s over one run. Leave it off unless debugging.
+- **Single prefill.** The upstream demo runs prefill twice (compile pass + timed
+  pass) to report compile-vs-inference ms; the server keeps one, since its cache
+  is warm after the first request.
 - **3B answer quality.** JSON validity is now guaranteed; answer grounding still
   depends on the model. The 3B is mostly grounded but occasionally copies the
   prompt example — the 8B is stronger (use the DRAM fallback if needed).

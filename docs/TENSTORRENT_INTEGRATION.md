@@ -10,6 +10,10 @@ VLM(캡셔너)과 LLM(질의응답)을 모두 NPU에서 구동하고, 그 사이
 > ttnn을 쓰기에 로그엔 `BlackholeTTDevice`로 뜨지만, 실제 device 노드는 **`/dev/bos/0`**, 커널 모듈은
 > **`bos`**다. device 점유 확인은 `fuser -v /dev/bos/0` / `lsmod | grep bos`. (`/dev/tenstorrent`·`lspci 1e52`는
 > 이 장비에 없음.)
+>
+> **실측 스펙** (`python tt_server/npu_info.py`): arch `BLACKHOLE`, device 1개, **DRAM 12 GiB**
+> (4 GiB × 3 뱅크), **Tensix 5×4 = 20 코어**(harvesting `0x0`), L1 1.5 MB/worker 코어.
+> DRAM 12 GiB가 "3B+3B co-resident 가능 / 8B 불가"의 근거다.
 
 ---
 
@@ -146,6 +150,33 @@ end-to-end 경로(캡션→저장→검색→답변)를 한 번에 검증하는 
 ### 문제 ⑦ Ctrl-C(특히 연타)로 보드가 wedged
 - **원인**: device를 닫는 `close_mesh_device()`가 **daemon 워커의 finally**라 인터프리터 종료 시 실행 안 됨. Ctrl-C 연타는 uvicorn을 강제종료시켜 teardown을 중단 → device 활성 상태로 남아 **wedged**(재기동 시 `failed to initialize FW`).
 - **수정**: 종료 시 워커에 정지 신호 후 `join()`으로 `close_mesh_device()` 보장 + **teardown 구간 SIGINT/SIGTERM 무시**(연타 안전). `-9`(SIGKILL)만은 여전히 우회하므로 **금지**.
+
+### 문제 ⑨ 요청당 prefill 2회 (비전 인코더 2배 낭비)
+- **발견**: 서버 로그에 `32 x Qwen2_5_VLVisionBlock`이 캡션 1개당 **2번** 찍혔다.
+- **원인**: 원본 데모(`qwen25_vl/demo/vision_demo.py`)가 **의도적으로** prefill을 2번 호출한다 —
+  `profiler("compile_prefill")`로 program cache를 데우고, `profiler("inference_prefill")`로 순수 추론
+  시간을 잰다. **컴파일 vs 추론 ms를 분리 보고하려는 벤치마크 장치**이며 데모로선 올바르다.
+  그러나 서버는 **첫 요청에서만 컴파일**되고 이후엔 전부 warm이라, 2회차는 순수 중복 forward였다.
+  게다가 첫 결과는 VLM에선 미사용 변수 `masks`에, LLM(`generate`)에선 **변수에 받지도 않았다**.
+- **수정**: VLM·LLM 모두 **1회**(= 데모의 `inference_prefill`)만 유지. 실측: 캡션당 VisionBlock 2회→1회,
+  ~76s → **~38s**.
+
+### 문제 ⑩ optimal 평가 경로가 첫 질문에서 크래시 → 무한 재시도
+- **증상**: `AttributeError: 'str' object has no attribute 'time'` (`text_memory.py`).
+- **원인**: eval.py의 `optimal+` 경로는 `TextMemory`에 **이미 렌더링된 문자열**(`qa_instance['context']`)을
+  넣는다. `get_working_memory()`는 str이면 문자열을 그대로 반환하는데, `NonAgent`가 그걸 다시
+  `memory_to_string()`에 넘기면서 **문자열을 문자 단위로 순회** → `doc.time`에서 폭발. upstream 버그.
+- **수정**: `memory_to_string`이 이미 문자열이면 그대로 통과(= `get_working_memory`의 주석 의도와 일치).
+
+### 문제 ⑪ (미해결) 서버가 temperature를 무시 → eval 재시도 루프가 무한
+- **증상**: 3B가 time 질문에 `type='text', time=None`으로 답하면 `evaluate_output`이
+  `abs(answer - None)`으로 크래시 → `answer_squad_question`의 `while True`가 영원히 재시도.
+- **원인**: 원본은 **`temperature=0.7`**(eval.py 기본값)이라 재시도하면 다른 답이 나온다는 전제인데,
+  우리 `/v1/chat/completions`는 **temperature를 읽지도 않고** `_masked_argmax`(greedy)로만 디코딩한다
+  → 재시도해도 **동일한 답** → 무한 루프. (`tt_server/README.md`가 경고한 "greedy → identical retries"의
+  재발이며, 그때는 JSON 유효성 문제였고 이번은 **JSON은 유효하나 내용이 틀린** 경우.)
+- **선택지**: (A) 서버가 temperature 존중(원본 의도 복원) / (B) `evaluate_output`에 None 가드 /
+  (C) JSON schema로 type별 필드 강제. **방향 미정.**
 
 ### 문제 ⑧ "보드 죽음" 오진 (device 노드 이름)
 - **원인**: 진단 시 `/dev/tenstorrent`·`lspci 1e52`로 확인 → 계속 "없음" → "버스 이탈" 오진 반복. 실제는 **BOS 칩**이라 노드가 `/dev/bos/0`.

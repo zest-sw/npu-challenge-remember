@@ -25,9 +25,22 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | 캡셔닝 파이프라인 (체크포인트/재개) | ✅ 완료 (full run에서 resume 동작 확인) |
 | 서버 안정화 (clean shutdown + slowdown) | ✅ 완료 (slowdown 원인=Inspector, 실측 해결) |
 | **seq0 캡션 생성 완료** | ✅ **272개 생성** (`captions_tt-qwen25-vl-3b_3_secs.json`, 6.1MB) |
-| 질문 JSON 생성 (form_question_jsons) | ⬜ 다음 단계 |
-| 평가 실행 (eval.py, optimal+tt/) | ⬜ 미착수 |
+| **질문 JSON 생성** (form_question_jsons) | ✅ **30문항** (`data/questions/0/human_qa.json`) |
+| **평가 실행** (eval.py, optimal+tt/) | ⛔ **막힘** — 서버가 temperature를 무시(greedy) → eval.py 재시도 루프가 무한 반복. [방향 결정 필요](#4-알려진-이슈--주의점-gotchas) |
 | 다중 프레임(논문 충실도) 캡션 | ⬜ 선택 과제 |
+
+### 하드웨어 실측 스펙 (`tt_server/npu_info.py`)
+
+| 항목 | 값 |
+|---|---|
+| arch / devices | `BLACKHOLE` / 1개 (`/dev/bos/0`, 모듈 `bos` 2.3.0) |
+| **DRAM** | **12 GiB** = 4 GiB × **3 뱅크** (`dram_grid_size (3,1)`) |
+| Tensix 연산 그리드 | **5×4 = 20 코어** (harvesting mask `0x0` = 전 코어 정상) |
+| L1 / worker 코어 | 1.5 MB (eth 코어 512 KB) |
+| PCIe | `0000:01:00.0` Co-processor (Synopsys DWC) |
+
+> **12 GiB**가 "3B+3B는 co-resident 가능, 8B는 불가"의 근거다. 평가 단계에서 8B를 쓰려면
+> 단계별 단일 모델 로딩(`TT_ENABLE_VLM=0`)이 필요하다.
 
 ---
 
@@ -41,10 +54,16 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 
 ## 3. 진행 중 / 다음 단계
 
-1. **seq0 캡셔닝 완주** — 서버 재시작 후 max_gen_len·slowdown 수정 반영해 재실행(체크포인트 resume).
-2. **질문 JSON 생성** → `form_question_jsons.py --caption_file captions_tt-qwen25-vl-3b_3_secs`.
-3. **평가** → `eval.py --model optimal+tt/Llama-3.2-3B-Instruct --sequence_id 0 ...`.
-4. (선택) **다중 프레임 캡션**으로 논문 충실도 향상 — 절차는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 4-1.
+1. ⛔ **평가가 막혀 있음 — 방향 결정 필요.** 3B가 time 질문에 `type='text', time=None`으로 답하면
+   `evaluate_output`이 `abs(answer - None)`으로 크래시하고, `answer_squad_question`의 `while True`
+   재시도가 무한 반복된다. 원본은 `temperature=0.7`(eval.py 기본값)이라 재시도마다 다른 답이
+   나온다는 전제인데, **우리 서버는 temperature를 읽지도 않고 항상 greedy**라 전제가 깨졌다.
+   선택지: **(A)** 서버가 temperature를 존중(원본 의도 복원, 가장 정석) / **(B)** `evaluate_output`에
+   None 가드(원본 채점 수정) / **(C)** JSON schema로 type별 필드 강제.
+2. (선택) **캡션 품질 일관화** — 현재 앞부분은 128토큰, 뒷부분은 256토큰으로 섞여 있다(길이 501~1269자).
+   재생성 시 이제 ~38초/캡션이라 272개 ≈ 2.9시간.
+3. (선택) **다중 프레임 캡션**으로 논문 충실도 향상 — 절차는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 4-1.
+4. (선택) **평가 단계 8B 투입** — DRAM 12GiB라 VLM을 내리면(`TT_ENABLE_VLM=0`) 8B가 단독으로 들어간다.
 
 ## 4. 알려진 이슈 / 주의점 (gotchas)
 
@@ -55,7 +74,9 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | **보드 wedged** | 원인=캡셔닝/컴파일 중 강제종료(특히 Ctrl-C 연타). shutdown 정리 로직 추가([f9bc7bf]). **`-9` 절대 금지.** 복구는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 6번. |
 | **재부팅 제약** | 이 PC는 NPU 먼저 켜고 부팅해야 인식됨. wedged 시 재부팅보다 프로세스 정리+재기동을 먼저 시도. |
 | **device 노드 = `/dev/bos/0`** | Tenstorrent 아님(`/dev/tenstorrent` 없음). 확인: `fuser -v /dev/bos/0`, `lsmod \| grep bos`. |
-| **3B 품질** | JSON 유효성은 보장되나 grounding은 3B 한계. 필요시 8B(DRAM 시간분리 폴백). |
+| ⛔ **eval 무한 재시도** | `answer_squad_question`의 `while True`가 채점 예외 시 재시도하는데, **서버가 temperature를 무시하고 greedy**라 재시도해도 답이 동일 → 무한 루프. 트리거: 3B가 time 질문에 `type='text', time=None`. **미해결, 방향 결정 필요**(3번 참고). |
+| **3B 품질** | JSON 유효성은 보장되나 grounding은 3B 한계 — 질문 type에 맞는 필드를 못 채우는 사례 확인(위 이슈의 트리거). 필요시 8B(평가 단계 단독 로딩). |
+| **캡션 품질 혼합** | seq0 캡션 1~117은 128토큰(≈600자), 118~272는 256토큰(≈1200자)에서 잘림 — max_gen_len 수정 전후가 resume으로 섞임. 평가엔 사용 가능하나 일관성은 아쉬움. |
 | **충실도 편차** | 캡셔너 VILA→Qwen, LLM 8B→3B(이식 불가피), 프레임 6→1(절충). [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 충실도 표. |
 | **venv 의존성 함정** | 새 패키지가 `langchain-core`를 0.3, `numpy`를 2.x로 끌어올리면 스택이 깨짐. 핀 준수([RUNBOOK](../tt_server/RUNBOOK.md) 1-3). |
 
@@ -73,6 +94,18 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 ## 6. 변경 로그 (Changelog)
 
 ### 2026-07-15
+- `8aea788` **eval optimal 경로 버그 수정**: `TextMemory.memory_to_string`이 이미 문자열인 optimal
+  컨텍스트를 문자 단위로 순회해 `doc.time`에서 터지던 것(→ eval 재시도 무한루프) 수정. 문자열이면 그대로 통과.
+- ✅ **질문 JSON 생성**: `human_qa.json` 30문항(position 12 / time 7 / text 5 / binary 4 / duration 2).
+  eval은 text를 skip하므로 **25문항 채점** 대상. 나머지 seq는 캡션이 없어 자동 skip.
+- ⛔ **평가 착수 → 막힘**: 서버가 temperature를 무시(greedy)해 eval.py 재시도 루프가 무한 반복. 방향 결정 대기.
+- `9fe023c` **npu_info 수정**: 추측했던 device 메서드가 실제로 없어 전부 `(n/a)`였던 것 → `open_mesh_device`와
+  MeshDevice 실 API만 사용. DRAM 크기는 MeshDevice에 API가 없어 **SoC descriptor YAML**에서 읽음.
+  ttnn의 loguru+C++ 로그를 **fd 리다이렉트로 억제**(`-v`로 볼 수 있음). → **실측 스펙 확보(DRAM 12GiB 등)**.
+- `4f81c2e` **중복 prefill 제거**: 데모(`vision_demo.py`)가 `compile_prefill` + `inference_prefill`로
+  **의도적으로 prefill을 2번** 하는데(컴파일/추론 시간 분리 측정용 = 벤치마크 장치), 서버는 첫 요청 이후
+  캐시가 warm이라 두 번째가 순수 중복이었다. 첫 결과는 VLM에선 미사용 `masks`에, LLM에선 **변수에 받지도 않음**.
+  VLM·LLM 둘 다 1회로. 실측: 캡션당 VisionBlock 2회→**1회**, ~76s→**~38s**.
 - ✅ **seq0 캡셔닝 완주**: 272 캡션 생성(`captions_tt-qwen25-vl-3b_3_secs.json`). 체크포인트 resume 실동작 확인(중단 후 이어서 → 완료 시 partial 자동 삭제).
 - `8be8bc6` **slowdown 원인 규명 & 해결**: tt-metal **Inspector**(디버그, 기본 ON)가 mesh workload마다 YAML `flush()` → 캡션당 ~5천회 동기 디스크 I/O, 한 run에 153MB/534만 라인 누적 → 파일이 커질수록 flush가 blocking → 비전 블록 **19→2.1 it/s 단조 하락**. `run_server.sh`에서 tt-metal 자체 스위치(`TT_METAL_INSPECTOR=0`, `_RPC=0`)로 비활성 — **tt-metal 소스 무수정**. 실측: **~42 it/s 안정 유지**, YAML 미생성. 함께 이전의 오진 수정(`describe()`의 `ttnn.deallocate`)을 되돌림.
 - `f9bc7bf` **서버 안정화**: 종료 시 워커 join으로 `close_mesh_device()` 보장 + teardown 중 SIGINT/SIGTERM 무시(Ctrl-C 연타 wedge 방지).

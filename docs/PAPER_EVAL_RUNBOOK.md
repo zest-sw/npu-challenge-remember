@@ -44,7 +44,11 @@ CODa seq .zip ──(선택 압축해제)──► 2d_rect/cam0 + poses/dense
 | `.pkl` 프레임 8213개 | `/home/user/coda_raw/coda_data/0/` | ✅ 추출 |
 | ROS-free 추출기 | `remembr/scripts/preprocess_coda_rosfree.py` | ✅ |
 
-**남은 것**: 캡셔닝(2단계)부터. 보드가 정상일 때 재개.
+| **seq0 캡션 272개** | `remembr/data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json` | ✅ 생성 완료 |
+| **seq0 질문 30문항** | `remembr/data/questions/0/human_qa.json` | ✅ 생성 완료 |
+
+**남은 것**: **4-3 평가**. 단, 현재 **막혀 있음** — 서버가 temperature를 무시(greedy)해서 eval.py의
+재시도 루프가 무한 반복된다(4-3 주의사항 참고). 방향 결정 후 재개.
 
 ### 논문 대비 충실도 (무엇이 같고 무엇이 다른가)
 
@@ -189,8 +193,14 @@ python scripts/eval.py \
   --coda_dir /home/user/coda_raw/coda_data --postfix _0
 ```
 - 결과는 `./out/`. binary/position/time/duration 채점, text 질문은 skip(원 코드 동작).
+  seq0은 30문항 중 text 5개를 빼고 **25문항 채점**.
 - ⚠️ **순수 `tt/...`(접두어 없이)는 피할 것** — TextMemory가 윈도우 전체 캡션을 넣어
   긴 질문에서 seq_len 초과.
+- ⛔ **현재 막힘 (미해결)**: 3B가 time 질문에 `type='text', time=None`으로 답하면 `evaluate_output`이
+  `abs(answer - None)`에서 크래시하고, `answer_squad_question`의 `while True`가 **무한 재시도**한다.
+  원본은 `--temperature 0.7`(기본값)이라 재시도마다 답이 달라진다는 전제인데, **서버가 temperature를
+  읽지 않고 항상 greedy**라 같은 답만 반복된다. 해결 방향: (A) 서버가 temperature 존중(정석) /
+  (B) `evaluate_output`에 None 가드 / (C) JSON schema로 type별 필드 강제. → [DEV_STATUS](DEV_STATUS.md) 참고.
 
 ### 모델별 메모리 방식
 | `--model` | 메모리 | 컨텍스트 | NPU 3B 적합성 |
