@@ -25,7 +25,7 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | 캡셔닝 파이프라인 (체크포인트/재개) | ✅ 완료 (full run에서 resume 동작 확인) |
 | 서버 안정화 (clean shutdown) | ✅ 완료 |
 | slowdown 해결 ① Inspector | ✅ 완료 (`TT_METAL_INSPECTOR=0`) — 19→2.1 it/s 하락 제거 |
-| slowdown 해결 ② Tracy 빌드 | 🔄 tt-metal 재빌드 중 (`ENABLE_TRACY=OFF`) — RSS +33MB/요청 누수 제거 목적 |
+| slowdown 해결 ② Tracy 빌드 | ✅ 완료 — 기본 빌드로 교체(`ENABLE_TRACY=OFF`, Tracy 심볼 705→0). 실측: RSS +33MB/요청 → **+0~1MB**, 지연 +1.0초/요청 → **36초 고정** |
 | **seq0 캡션 생성 완료** | ✅ **272개 생성** (`captions_tt-qwen25-vl-3b_3_secs.json`, 6.1MB) |
 | **질문 JSON 생성** (form_question_jsons) | ✅ **30문항** (`data/questions/0/human_qa.json`) |
 | 서버 temperature 지원 | ✅ 완료 (`b2dab02`) — eval 무한 재시도 해소. 실측: temp=0 동일 / 0.7 매번 다름 |
