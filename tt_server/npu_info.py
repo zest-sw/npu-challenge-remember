@@ -15,8 +15,12 @@ The ttnn section is written defensively: device introspection method names vary
 between tt-metal/bos-metal versions, so each field tries several candidates and
 prints "(n/a)" instead of crashing when none exist.
 """
+import contextlib
+import glob
 import os
+import re
 import subprocess
+import sys
 
 DEV_NODE = os.environ.get("BOS_DEV_NODE", "/dev/bos/0")
 
@@ -98,73 +102,125 @@ def _probe(dev, label, names, post=lambda x: x):
         print(f"  {label:28}: (n/a: {type(e).__name__})")
 
 
-def ttnn_info() -> None:
-    hdr("ttnn / device spec")
-    try:
-        import ttnn
-    except Exception as e:  # noqa: BLE001
-        print("  ttnn import failed -> run inside the tt-metal python_env")
-        print("  (source /home/user/tt-metal/env_set.sh):", e)
+@contextlib.contextmanager
+def quiet(enabled: bool = True):
+    """Silence ttnn's import/device chatter.
+
+    The noise comes from two places: python-side loguru records ("DEBUG | ttnn:
+    ... Initial ttnn.CONFIG") and C++ logs written straight to the process's
+    stdout/stderr ("info | UMD | Initializing TLB mappings", "Metal | Profiler
+    started"). tt-metal has no log-level env for these, so redirect the actual
+    file descriptors — that catches the native writes too, which a Python-level
+    redirect would miss. Only the ttnn import / device open+close are wrapped;
+    our own printing happens outside.
+    """
+    if not enabled:
+        yield
         return
-
-    # device count (module-level, no open)
-    for nm in ("get_device_ids", "GetNumAvailableDevices", "get_num_devices"):
-        if hasattr(ttnn, nm):
-            try:
-                kv(f"ttnn.{nm}", getattr(ttnn, nm)())
-            except Exception as e:  # noqa: BLE001
-                kv(f"ttnn.{nm}", f"(n/a: {type(e).__name__})")
-            break
-
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved = (os.dup(1), os.dup(2))
     try:
-        dev = ttnn.open_device(device_id=int(os.environ.get("BOS_DEVICE_ID", "0")))
-    except Exception as e:  # noqa: BLE001
-        print("  open_device failed (device busy/held by server, or wedged):", e)
-        return
-
-    try:
-        _probe(dev, "arch", ["arch", "get_arch"])
-        _probe(dev, "device id", ["id", "get_id"])
-        _probe(dev, "compute grid (Tensix)",
-               ["compute_with_storage_grid_size", "logical_grid_size", "grid_size"])
-        _probe(dev, "dram channels", ["num_dram_channels", "get_num_dram_channels"])
-        _probe(dev, "dram grid", ["dram_grid_size"])
-        _probe(dev, "dram / channel",
-               ["dram_size_per_channel"], post=lambda b: f"{b/1e9:.2f} GB ({b} B)")
-        _probe(dev, "L1 / core",
-               ["l1_size_per_core", "get_l1_size_per_core"], post=lambda b: f"{b/1024:.0f} KB")
-        _probe(dev, "worker grid", ["worker_grid_size"])
-        _probe(dev, "num program cache", ["num_program_cache_entries"])
-
-        # total DRAM = channels * size/channel, if both available
-        try:
-            ch = _first(dev, ["num_dram_channels", "get_num_dram_channels"])
-            per = _first(dev, ["dram_size_per_channel"])
-            kv("total DRAM", f"{ch * per / 1e9:.2f} GB ({ch} x {per/1e9:.2f} GB)")
-        except Exception:  # noqa: BLE001
-            pass
-
-        # allocator / free memory snapshot, if the version exposes it
-        for nm in ("dump_device_memory_state", "get_memory_view"):
-            if hasattr(ttnn, nm):
-                print(f"  --- ttnn.{nm} ---")
-                try:
-                    getattr(ttnn, nm)(dev)
-                except Exception as e:  # noqa: BLE001
-                    print(f"      (n/a: {type(e).__name__})")
-                break
+        sys.stdout.flush(); sys.stderr.flush()
+        os.dup2(devnull, 1); os.dup2(devnull, 2)
+        yield
     finally:
-        try:
-            ttnn.close_device(dev)
-        except Exception:  # noqa: BLE001
-            pass
+        sys.stdout.flush(); sys.stderr.flush()
+        os.dup2(saved[0], 1); os.dup2(saved[1], 2)
+        for fd in (*saved, devnull):
+            os.close(fd)
+
+
+def soc_descriptor_specs(arch: str) -> dict:
+    """DRAM / L1 sizes from tt-metal's SoC descriptor.
+
+    MeshDevice only exposes grid sizes (dram_grid_size / compute_with_storage_
+    grid_size) — there is no DRAM-size method to query — but the authoritative
+    numbers are in $TT_METAL_HOME/tt_metal/soc_descriptors/<arch>_*.yaml.
+    """
+    home = os.environ.get("TT_METAL_HOME", "/home/user/tt-metal")
+    pat = os.path.join(home, "tt_metal", "soc_descriptors", f"{arch.lower()}*.yaml")
+    files = sorted(glob.glob(pat))
+    if not files:
+        return {}
+    text = open(files[0]).read()
+    out = {"_file": files[0]}
+
+    def num(key):
+        # values sit on the line after the key, e.g. "dram_bank_size:\n  0xFFFFFFC0"
+        m = re.search(rf"^{key}:\s*\n\s*\[?\s*(0x[0-9A-Fa-f]+|\d+)", text, re.M)
+        return int(m.group(1), 0) if m else None
+
+    out["dram_bank_size"] = num("dram_bank_size")
+    out["worker_l1_size"] = num("worker_l1_size")
+    out["eth_l1_size"] = num("eth_l1_size")
+    out["dram_channels"] = len(re.findall(r"^\s*channel:\s*\d+", text, re.M)) or None
+    return out
+
+
+def ttnn_info(verbose: bool = False) -> None:
+    hdr("ttnn / device spec")
+    specs, err = {}, None
+    try:
+        with quiet(not verbose):
+            import ttnn
+
+            specs["device_ids"] = ttnn.get_device_ids()
+            dev = ttnn.open_mesh_device(mesh_shape=ttnn.MeshShape(1, 1))
+            try:
+                # MeshDevice exposes only these; DRAM/L1 sizes come from the
+                # SoC descriptor below.
+                specs["arch"] = dev.arch()
+                specs["compute_grid"] = dev.compute_with_storage_grid_size()
+                specs["dram_grid"] = dev.dram_grid_size()
+                specs["core_grid"] = getattr(dev, "core_grid", None)
+                specs["num_devices"] = dev.get_num_devices()
+            finally:
+                ttnn.close_mesh_device(dev)
+    except Exception as e:  # noqa: BLE001
+        err = e
+
+    if err is not None:
+        print(f"  unavailable: {type(err).__name__}: {err}")
+        print("  (run in the tt-metal python_env with TT_METAL_HOME set, and the")
+        print("   inference server stopped — the device is exclusive)")
+        return
+
+    kv("arch", specs["arch"])
+    kv("devices", f'{specs["num_devices"]}  (ids={specs["device_ids"]})')
+    kv("compute grid (Tensix)", specs["compute_grid"])
+    kv("dram grid", specs["dram_grid"])
+
+    arch_name = str(specs["arch"]).split(".")[-1]
+    soc = soc_descriptor_specs(arch_name)
+    if soc:
+        bank, ch = soc.get("dram_bank_size"), soc.get("dram_channels")
+        if bank:
+            kv("DRAM / bank", f"{bank/2**30:.2f} GiB (0x{bank:X})")
+        if bank and ch:
+            kv("DRAM total", f"{bank*ch/2**30:.2f} GiB  ({ch} banks x {bank/2**30:.2f} GiB)")
+        if soc.get("worker_l1_size"):
+            kv("L1 / worker core", f"{soc['worker_l1_size']/1024:.0f} KB")
+        if soc.get("eth_l1_size"):
+            kv("L1 / eth core", f"{soc['eth_l1_size']/1024:.0f} KB")
+        kv("(soc descriptor)", soc["_file"])
 
 
 if __name__ == "__main__":
+    verbose = "-v" in sys.argv or "--verbose" in sys.argv
     print("NPU (BOS) info dump")
     host_info()
     free = availability()
-    ttnn_info()
+    ttnn_info(verbose=verbose)
     if not free:
         print("\nNote: device was held -> the ttnn spec section may be partial. "
               "Stop the server and re-run for full specs.")
+    if not verbose:
+        print("\n(ttnn/UMD logs suppressed; pass -v to see them)")
+        # ttnn tears the device down at interpreter exit, which prints one last
+        # native line ("Closing user mode device drivers") after we're done. Keep
+        # the fd redirect in place through exit so the report stays clean.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
