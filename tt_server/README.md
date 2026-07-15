@@ -67,6 +67,111 @@ export OPENAI_API_KEY=local
 PYTHONPATH=$(pwd) python examples/tt_smoke_test.py path/to/frame.jpg
 ```
 
+## HTTP API
+
+Interactive docs are served by FastAPI at **`http://localhost:8100/docs`** (Swagger UI),
+`/redoc`, and `/openapi.json`. Note the handlers take a raw `dict`, so the generated
+schema shows only `{"type": "object"}` — the request/response fields are documented here
+instead. All three endpoints are safe to hit while a caption run is in progress; NPU work
+is serialized by the worker queue, so a request just waits its turn.
+
+### `GET /health`
+Readiness of the device worker and each engine. Cheap, no NPU work.
+```jsonc
+// 200
+{"ready": true, "llm": true, "vlm": true}
+```
+`ready` flips true only after both enabled models are loaded on the device. `llm`/`vlm`
+follow `TT_ENABLE_LLM` / `TT_ENABLE_VLM`.
+
+### `POST /caption` — VLM (Qwen2.5-VL)
+```jsonc
+// request
+{
+  "images": ["<base64 image>", "..."],  // required, non-empty. Any PIL-readable format
+                                        // (JPEG/PNG). Server decodes -> RGB -> resize 224x224.
+                                        // Multiple images are treated as frames of one scene.
+  "prompt": "string",                   // optional, defaults to the server's DEFAULT_VLM_PROMPT.
+                                        // Do NOT include a literal "<video>" token: Qwen2.5-VL
+                                        // does not use it and refuses when it appears with images.
+  "max_gen_len": 128                    // optional, default 128. Max tokens generated; decoding
+                                        // stops earlier on EOT. 128 truncates verbose captions
+                                        // mid-sentence — the captioner sends 256.
+}
+// 200
+{"caption": "string"}
+// 503 VLM not loaded (TT_ENABLE_VLM=0)   400 no images provided
+```
+
+### `POST /v1/chat/completions` — LLM (Llama-3.2-3B), OpenAI-compatible
+Accepts the subset of the OpenAI schema this server implements, so `ChatOpenAI`
+(`base_url=http://localhost:8100/v1`) works unmodified.
+```jsonc
+// request
+{
+  "messages": [{"role": "user", "content": "..."}],  // flattened into one prompt
+  "max_tokens": 256,        // optional, default 256. Clamped to max_seq_len//2; an over-long
+                            // prompt is truncated (head kept) rather than erroring.
+  "temperature": 0.0,       // optional, default 0. 0 = greedy (deterministic);
+                            // >0 samples — required if the caller retries on a bad answer,
+                            // since greedy returns an identical answer every time.
+  "model": "string",        // optional, echoed back only
+  "response_format": {      // optional -> grammar-constrained decoding
+    "type": "json_object"   //   any valid JSON
+    // or:
+    // "type": "json_schema",
+    // "json_schema": {"name": "x", "schema": { /* JSON Schema */ }}
+  }
+}
+// 200 (OpenAI shape)
+{
+  "id": "chatcmpl-<hex>", "object": "chat.completion", "created": 1234567890,
+  "model": "meta-llama/Llama-3.2-3B-Instruct",
+  "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}]
+}
+// 503 LLM not loaded (TT_ENABLE_LLM=0)
+```
+Unsupported OpenAI fields (`stream`, `top_p`, `n`, `stop`, …) are ignored, and usage/token
+counts are not reported.
+
+### Examples
+
+```bash
+curl -s localhost:8100/health
+# {"ready":true,"llm":true,"vlm":true}
+
+# LLM, JSON-constrained
+curl -s localhost:8100/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages":[{"role":"user","content":"Give me an object with ok=true."}],
+  "max_tokens":40, "temperature":0,
+  "response_format":{"type":"json_object"}}'
+# ... "content": "{\"ok\": true}" ...
+```
+
+For `/caption`, **write the payload to a file and use `-d @file`** — a base64 image does not
+fit in a shell argument (a 1.7MB CODa frame is ~2.3MB base64, over the ~2MB `ARG_MAX`, and
+curl dies with "Argument list too long"):
+
+```bash
+python3 - <<'EOF'
+import base64, json
+b64 = base64.b64encode(open("frame.png","rb").read()).decode()
+json.dump({"images": [b64], "prompt": "Describe this image in one sentence.",
+           "max_gen_len": 256}, open("/tmp/cap.json", "w"))
+EOF
+curl -s localhost:8100/caption -H 'Content-Type: application/json' -d @/tmp/cap.json
+# {"caption":"The image shows an outdoor area with a concrete surface, a set of stairs ..."}
+```
+
+From Python, just post it directly — that is what `TenstorrentCaptioner` does:
+```python
+import base64, requests
+b64 = base64.b64encode(open("frame.png","rb").read()).decode()
+r = requests.post("http://localhost:8100/caption",
+                  json={"images": [b64], "prompt": "...", "max_gen_len": 256}, timeout=3600)
+print(r.json()["caption"])
+```
+
 ## Env vars (server)
 
 | var | default | note |

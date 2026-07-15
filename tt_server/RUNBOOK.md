@@ -127,6 +127,12 @@ curl -s http://localhost:8100/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Reply with JSON {\"ok\":true}"}]}'
 ```
 
+### API 문서
+- **Swagger UI: <http://localhost:8100/docs>** (그 외 `/redoc`, `/openapi.json`)
+  — 단, 핸들러가 raw `dict`를 받아 **자동 생성 스키마엔 필드가 안 나온다**.
+- **요청/응답 필드·예시는 [README의 HTTP API 절](README.md#http-api)** 을 볼 것
+  (`/health`, `/caption`, `/v1/chat/completions` 전부 문서화됨).
+
 ---
 
 ## 3. 스모크 테스트 실행 (remembr_venv)
