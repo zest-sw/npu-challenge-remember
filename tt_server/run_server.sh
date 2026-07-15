@@ -24,4 +24,15 @@ export TT_TRACE_REGION_SIZE="${TT_TRACE_REGION_SIZE:-15000000}"
 export TT_ENABLE_LLM="${TT_ENABLE_LLM:-1}"
 export TT_ENABLE_VLM="${TT_ENABLE_VLM:-1}"
 
+# tt-metal's Inspector is a DEBUG facility that defaults to ON (rtoptions.hpp:
+# InspectorSettings::enabled = true). It appends a YAML record per mesh workload
+# and fstream::flush()es on every one — ~5k synchronous disk flushes per caption
+# here, growing generated/inspector/mesh_workloads_log.yaml to 153MB / 5.3M lines
+# over one captioning run. As that file grows, each flush blocks longer and the
+# VLM slows down progressively (measured: 19 -> 2.1 it/s on the vision blocks).
+# It is pure debug tooling we never read, so turn it off for the server via
+# tt-metal's own switches (no tt-metal source changes).
+export TT_METAL_INSPECTOR="${TT_METAL_INSPECTOR:-0}"
+export TT_METAL_INSPECTOR_RPC="${TT_METAL_INSPECTOR_RPC:-0}"
+
 exec python "$(dirname "$0")/tt_infer_server.py"

@@ -341,22 +341,6 @@ class QwenVLEngine:
                 users_decoding = False
             gen_idx += 1
 
-        # Free this request's device tensors so they do NOT accumulate in device
-        # DRAM across captions — that accumulation is what makes each successive
-        # caption slower (per-request latency creeps up over a long run). These
-        # are all created fresh per request (the next request re-allocates them),
-        # so releasing them here is safe. Best-effort + guarded: anything that is
-        # not a live ttnn device tensor is simply ignored.
-        for _t in (batch_logits, pxm, ptm, dxm, dtm, masks):
-            try:
-                ttnn.deallocate(_t)
-            except Exception:  # noqa: BLE001 - non-ttnn / already-freed
-                pass
-        try:
-            ttnn.deallocate(logits)  # last decode logits (undefined-safe via except)
-        except Exception:  # noqa: BLE001
-            pass
-
         tokens_out = [t for t in all_outputs if t != tokenizer.pad_token_id]
         full = tokenizer.decode(tokens_out)
         prompt_str = tokenizer.decode(model_input.tokens.tolist())
