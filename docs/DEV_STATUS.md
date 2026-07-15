@@ -29,7 +29,7 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 | **seq0 캡션 생성 완료** | ✅ **272개 생성** (`captions_tt-qwen25-vl-3b_3_secs.json`, 6.1MB) |
 | **질문 JSON 생성** (form_question_jsons) | ✅ **30문항** (`data/questions/0/human_qa.json`) |
 | 서버 temperature 지원 | ✅ 완료 (`b2dab02`) — eval 무한 재시도 해소. 실측: temp=0 동일 / 0.7 매번 다름 |
-| **캡션 재생성** (품질 일관화) | ⏸️ 51/272에서 대기 — Tracy 재빌드 후 재개(체크포인트 보존) |
+| **캡션 재생성** (품질 일관화) | 🔄 **109/272** — Tracy 재빌드 후 재개, **36초/캡션 고정**(누수 0) |
 | **평가 실행** (eval.py, optimal+tt/) | ⬜ 캡션 재생성 후 |
 | 다중 프레임(논문 충실도) 캡션 | ⬜ 선택 과제 |
 
@@ -100,6 +100,12 @@ _최종 갱신: 2026-07-15 · 브랜치 `feat/tenstorrent-npu-backend`_
 ## 6. 변경 로그 (Changelog)
 
 ### 2026-07-15
+- `458bf09` **slowdown 2차 원인 = Tracy 프로파일링 빌드**: Inspector를 끄니 드러남(84→50 it/s).
+  **동일 이미지 12회**에 RSS +33MB/요청·지연 +1.0초/요청 **선형 증가**(입력이 같으니 캐시가 아니라 누적).
+  `build -> build_Release_tracy`(`ENABLE_TRACY=ON`, Tracy 심볼 705)라 Tracy가 `TRACY_ON_DEMAND` 없이
+  모든 zone을 계속 수집. **컴파일 타임 스위치라 env로 못 끔** → `./build_metal.sh`(기본 OFF)로 재빌드(7분).
+  **검증**: Tracy 심볼 705→0, 지연 **36.0초 8회 고정**, RSS **+0MB**. 272캡션 ~13h → **~2.9h**.
+  tt-metal 소스 무수정, 롤백은 `ln -nsf build_Release_tracy build`.
 - `b2dab02` **서버가 temperature 존중 → eval 무한 재시도 해소**: `chat_completions`가 `temperature`를
   읽지 않고, JSON 경로는 masked argmax, non-JSON은 `SamplingParams(temperature=0.0)`로 **greedy 고정**이었다.
   원본 eval은 `--temperature 0.7`로 재시도하면 답이 달라진다는 전제라, greedy면 재시도가 무한 반복된다.

@@ -158,10 +158,13 @@ python scripts/preprocess_captions.py \
 - **체크포인트/resume**: 캡션 1개마다 `..._secs.json.partial.jsonl`에 즉시 기록된다. 중단(kill,
   서버 문제) 후 **같은 명령을 재실행하면 이어서** 진행(이미 한 세그먼트는 skip). 전체 완료 시
   최종 JSON 저장 + partial 삭제. 처음부터 다시 하려면 partial을 지운다.
-- **점점 느려지는 문제는 해결됨**: 원인은 tt-metal **Inspector**(디버그 기능, 기본 ON)가 mesh workload마다
-  YAML을 flush해 캡션당 ~5,000회 동기 디스크 I/O를 내던 것. `run_server.sh`가 이제
-  `TT_METAL_INSPECTOR=0`/`TT_METAL_INSPECTOR_RPC=0`으로 끈다(tt-metal 소스 무수정).
-  실측: 비전 블록 19→2.1 it/s로 하락하던 것이 **~42 it/s 안정 유지**로 개선.
+- **점점 느려지는 문제는 해결됨 (원인이 2개였다)**:
+  **① tt-metal Inspector**(디버그, 기본 ON)가 mesh workload마다 YAML을 flush → 캡션당 ~5,000회 동기
+  디스크 I/O, YAML이 153MB까지 누적 → 비전 19→2.1 it/s. `run_server.sh`가 `TT_METAL_INSPECTOR=0`으로 끈다.
+  **② Tracy 프로파일러 빌드** — ①을 끄자 드러남(84→50 it/s). tt-metal이 `--enable-profiler`로 빌드돼
+  있으면 Tracy가 zone을 계속 쌓는다(동일 이미지 12회에 RSS +33MB/요청, 지연 +1.0초/요청).
+  **env로 못 끄니 기본 빌드로 재빌드**해야 한다 → [RUNBOOK 1-0](../tt_server/RUNBOOK.md).
+  둘 다 해결 후 실측: **36초/캡션 고정, RSS 증가 0**.
   혹시 다시 느려지면 서버 로그의 `32 x Qwen2_5_VLVisionBlock ... it/s` 값이 최고의 게이지다.
 - 결과: `data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json`.
 - 첫 캡션만 트레이스 컴파일로 느리고, 이후 캐시되어 빨라진다.
@@ -279,6 +282,8 @@ uptime -p                     # 재부팅 했는지
 | `remembr/scripts/preprocess_captions.py` | 캡셔닝(`--captioner tenstorrent` 지원) |
 | `remembr/scripts/question_scripts/form_question_jsons.py` | data.csv+캡션 → 질문 JSON |
 | `remembr/scripts/eval.py` | 평가(`tt/` 백엔드 라우팅) |
-| `remembr/tt_server/run_server.sh` | NPU 서버 기동 |
+| `remembr/tt_server/run_server.sh` | NPU 서버 기동 (Inspector 비활성 포함) |
+| `remembr/tt_server/npu_info.py` | NPU 스펙 덤프 (arch/DRAM/Tensix/L1) |
+| `remembr/scripts/viz.py` | (선택) 평가 결과를 주행 영상 위에 오버레이해 시각화 — 파이프라인 필수 아님 |
 | `docs/TENSTORRENT_INTEGRATION.md` | 아키텍처·설계 결정 |
 ```

@@ -23,6 +23,30 @@ end-to-end로 돌리는 절차입니다.
 
 ## 1. 사전 준비 (최초 1회)
 
+### 1-0. ⚠️ tt-metal이 **프로파일러 빌드가 아닌지** 확인 (성능에 치명적)
+
+```bash
+readlink /home/user/tt-metal/build          # build_Release 여야 함 (build_Release_tracy ✗)
+grep ENABLE_TRACY /home/user/tt-metal/build/CMakeCache.txt   # ENABLE_TRACY:BOOL=OFF 여야 함
+nm -D --defined-only /home/user/tt-metal/ttnn/ttnn/_ttnn.so | grep -ci tracy   # 0 이어야 함
+```
+
+`ENABLE_TRACY=ON`(= `build_metal.sh -p/--enable-profiler`로 빌드)이면 **추론이 요청마다 느려진다.**
+Tracy는 `TRACY_ON_DEMAND` 없이 컴파일되면 Tracy UI 연결 여부와 무관하게 **모든 zone을 메모리에 계속
+쌓고**, `decode_forward`가 디코딩 토큰마다(캡션당 ~256회) `ReadDeviceProfiler`를 호출한다.
+실측(동일 이미지 12회): **RSS +33MB/요청, 지연 55.8→67.8초 선형 증가**. 캡션 272개가 ~2.9h → ~13h로 늘어난다.
+**컴파일 타임 스위치라 env로 못 끈다.** 프로파일러 빌드라면 기본값으로 다시 빌드한다:
+
+```bash
+cd /home/user/tt-metal && source env_set.sh
+./build_metal.sh            # 기본 ENABLE_TRACY=OFF. 24코어 기준 ~7분
+#  -> build_Release 를 새로 만들고 build 심볼릭 링크를 그쪽으로 옮긴다.
+#     기존 build_Release_tracy 는 그대로 보존되므로 롤백은 아래 한 줄:
+#     ln -nsf build_Release_tracy build
+```
+재빌드 후 서버를 재기동해야 적용된다. 검증: 같은 이미지를 여러 번 캡션했을 때
+**지연이 일정하고 서버 RSS가 늘지 않으면** 정상(Tracy 빌드면 둘 다 단조 증가).
+
 ### 1-1. HF 토큰 (gated 모델)
 `meta-llama/Llama-3.2-3B-Instruct`는 gated. 토큰이 `~/.bashrc`에 `export HF_TOKEN=...`
 형태로 있어야 한다. `run_server.sh`가 비대화형 셸에서도 이 줄을 직접 읽어온다.
@@ -163,6 +187,7 @@ fuser -v /dev/bos/0                  # 결과 없으면 device 완전히 해제�
 
 | 증상 | 원인 / 해결 |
 |------|------------|
+| **캡션이 갈수록 느려짐 / 서버 RSS가 계속 증가** | 원인 2개. ① tt-metal **Inspector**(기본 ON)가 workload마다 YAML flush → `run_server.sh`가 `TT_METAL_INSPECTOR=0`으로 끔(이미 적용). ② **Tracy 프로파일러 빌드** → 1-0 참고, 기본 빌드로 재빌드해야 함(env로 못 끔). 게이지: 서버 로그의 `32 x Qwen2_5_VLVisionBlock ... it/s` 가 떨어지면 의심. |
 | **첫 캡션이 매우 느림(수 분), 클라이언트 타임아웃** | fresh 서버의 **첫 요청은 ttnn trace(prefill/decode)를 처음 컴파일**하는 일회성 비용. 데드락 아님(서버 CPU가 계속 돈다). 끝나면 이후 요청은 훨씬 빠르다. 클라이언트 타임아웃은 기본 900초이며 `TT_VLM_TIMEOUT`(초)로 조절. |
 | `address already in use (8100)` | 서버가 이미 떠 있음. 새로 안 띄워도 됨. 내리려면 4번 참고. |
 | `Padded prefill end idx 2048 exceeds max seq len` | 서버를 `TT_LLM_MAX_SEQ_LEN=2048`로 재기동. |
