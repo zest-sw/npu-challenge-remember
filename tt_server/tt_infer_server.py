@@ -52,6 +52,7 @@ from models.bos_model.llama32.demo_llama32 import create_tt_page_table
 from llama_models.llama3.api.datatypes import ImageMedia, UserMessage
 from models.bos_model.qwen25_vl.tt.common import hf_multimodal_encode
 from models.bos_model.qwen25_vl.tt.generator import Generator as QwenGenerator
+from models.bos_model.qwen25_vl.tt.model_config import DecodersPrecision as QwenDecodersPrecision
 from models.bos_model.qwen25_vl.demo_qwen25_vl import (
     get_batch_sampler,
     prepare_generator_args as qwen_prepare_generator_args,
@@ -305,6 +306,7 @@ class QwenVLEngine:
             mesh_device=self.mesh_device,
             max_batch_size=1,
             max_seq_len=self.max_seq_len,
+            optimizations=lambda margs: QwenDecodersPrecision.performance(margs.n_layers, margs.model_name),
         )
         self.model_args = model_args
         self.processor = AutoProcessor.from_pretrained(model_args[0].CKPT_DIR)
