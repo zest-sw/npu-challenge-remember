@@ -160,7 +160,7 @@ class LlamaEngine:
                 mesh_device=submesh,
                 instruct=True,
                 max_batch_size=1,
-                optimizations=lambda margs: DecodersPrecision.performance(margs.n_layers, margs.model_name),
+                optimizations= None, #lambda margs: DecodersPrecision.performance(margs.n_layers, margs.model_name),
                 max_seq_len=self.max_seq_len,
                 paged_attention_config=paged_attention_config,
                 dtype=ttnn.bfloat8_b,
