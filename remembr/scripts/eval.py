@@ -41,66 +41,58 @@ def parse_json(string):
     return eval(parsed)
 
 # we can have binary, position-based, time-based, or description-based. let's answer accordingly
+def _num_or_none(v):
+    """Parse a predicted numeric field (coordinate/minutes). Returns None if the
+    model gave null/None or an unparseable string, so the caller can mark the
+    question 'unanswered' instead of crashing on `float - None` (TypeError) or
+    `eval('null')` (NameError)."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            v = eval(v)
+        except Exception:  # noqa: BLE001  ('null', prose, etc.)
+            return None
+    return v
+
+
 def evaluate_output(qa_instance, predicted):
 
     out_error = {}
 
     q_type = qa_instance['type']
     if 'position' in q_type:
-
+        pred = _num_or_none(predicted.get('position'))
+        if pred is None:
+            return {'unanswered': True}
         answer = np.array(qa_instance['answers']['position'])
-
-        # compute L2 loss between predicted['binary'] and answer
-        if type(predicted['position']) == str:
-            predicted['position'] = eval(predicted['position'])
-        pred_pos = np.array(predicted['position'])
-
-        dist = np.linalg.norm(answer - pred_pos)
-
-        out_error['position_error'] = dist
+        out_error['position_error'] = float(np.linalg.norm(answer - np.array(pred)))
 
     elif 'binary' in q_type:
-
-        answer = qa_instance['answers']['text'][1] # we made this assumption in other examples that binary answer is the second one
-
-        if 'binary' in predicted and (predicted['binary'].lower() == "yes" or predicted['binary'].lower() == "no"):
-            # get correct/incorrect label
-            if predicted['binary'].lower() == answer.lower():
-                correct = 1
-            else:
-                correct = 0
-
-            out_error['binary_iscorrect'] = correct
+        # binary answer is the second one (assumption kept from other examples)
+        answer = qa_instance['answers']['text'][1]
+        pb = predicted.get('binary')
+        if isinstance(pb, str) and pb.lower() in ("yes", "no"):
+            out_error['binary_iscorrect'] = 1 if pb.lower() == answer.lower() else 0
+        else:
+            return {'unanswered': True}
 
     elif 'time' in q_type:
-
+        pred = _num_or_none(predicted.get('time'))
+        if pred is None:
+            return {'unanswered': True}
         answer = np.array(qa_instance['answers']['time'])
-
-        # compute L2 loss between predicted['binary'] and answer
-        if type(predicted['time']) == str:
-            predicted['time'] = eval(predicted['time'])
-        pred_time = np.array(predicted['time'])
-
-        dist = abs(answer - pred_time)
-
-        out_error['time_error'] = dist
+        out_error['time_error'] = float(np.ravel(np.abs(answer - np.array(pred)))[0])
 
     elif 'duration' in q_type:
-
+        pred = _num_or_none(predicted.get('duration'))
+        if pred is None:
+            return {'unanswered': True}
         answer = np.array(qa_instance['answers']['duration'])
-
-        # compute L2 loss between predicted['binary'] and answer
-        if type(predicted['duration']) == str:
-            predicted['duration'] = eval(predicted['duration'])
-        pred_time = np.array(predicted['duration'])
-
-        dist = abs(answer - pred_time)
-
-        out_error['duration_error'] = dist
+        out_error['duration_error'] = float(np.ravel(np.abs(answer - np.array(pred)))[0])
 
     elif 'text' in q_type:
-        answer = qa_instance['answers']['text']
-        out_error = {'answer': answer}
+        out_error = {'answer': qa_instance['answers']['text']}
 
     else:
         raise Exception("We do not support question type " + q_type)
@@ -108,12 +100,21 @@ def evaluate_output(qa_instance, predicted):
     return out_error
 
 
+# Cap retries per question. The 3B often can't fill the typed field for a
+# position/time question and returns null; without a cap the retry loop below
+# would re-ask forever. After MAX_ATTEMPTS we accept the last answer (marked
+# 'unanswered' by evaluate_output) and move on.
+MAX_ATTEMPTS = 5
+
+
 def answer_squad_question(model, question, qa_instance):
 
     print(f'Question: {question}')
 
     parsed = None
-    while True:
+    out_error = None
+    elapsed = 0.0
+    for attempt in range(MAX_ATTEMPTS):
         try:
 
             start_time = time.time()
@@ -130,15 +131,25 @@ def answer_squad_question(model, question, qa_instance):
         except Exception as e:
             print(parsed)
             print(e)
-            traceback.print_exception(*sys.exc_info()) 
+            traceback.print_exception(*sys.exc_info())
+            out_error = None
             continue
 
-        return_dict = {"response": parsed}
-        return_dict.update(parsed)
-        return_dict['error'] = out_error
-        return_dict['elapsed'] = elapsed
+        # a clean evaluation: stop if the model actually answered, else retry
+        # (a different sample may fill the field) until the attempt cap.
+        if not out_error.get('unanswered'):
+            break
 
-        return return_dict
+    if out_error is None:
+        out_error = {'unanswered': True}
+
+    return_dict = {"response": parsed}
+    if isinstance(parsed, dict):
+        return_dict.update(parsed)
+    return_dict['error'] = out_error
+    return_dict['elapsed'] = elapsed
+
+    return return_dict
 
 
 def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, ip_address='127.0.0.1'):
