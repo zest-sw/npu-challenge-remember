@@ -342,7 +342,9 @@ def main(args):
     out_path = os.path.join(args.out_dir, str(args.sequence_id), args.qa_file)
     os.makedirs(out_path, exist_ok=True)
 
-    name = args.model+'__'+args.caption_file+args.postfix
+    # sanitize '/' (e.g. from 'tt/Llama-3.2-3B-Instruct') so it doesn't get
+    # treated as a path separator and write into a non-existent subdirectory.
+    name = (args.model+'__'+args.caption_file+args.postfix).replace('/', '_')
     with open(os.path.join(out_path, f'{name}.json'), 'w') as f:
         # to_save = json.dumps(out_json, indent=4)
         json.dump(out_json, f, indent=4)

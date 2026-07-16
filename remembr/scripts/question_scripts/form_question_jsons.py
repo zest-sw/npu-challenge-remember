@@ -8,6 +8,16 @@ from time import strftime, localtime
 import numpy as np
 import argparse
 
+# The NaVQA data.csv answer timestamps are in US Pacific time, and the caption
+# times come from raw Unix pkl filenames. This script matches them via localtime/
+# mktime, which use the *machine's* timezone. On a non-Pacific machine (e.g. KST)
+# the parsed answer timestamp lands hours outside the caption window, so the
+# context lookup silently falls to the last caption and every position/time
+# answer becomes wrong (all ~origin). Pin the process timezone to the data's tz
+# so the parsing matches regardless of where this runs.
+os.environ["TZ"] = "America/Los_Angeles"
+time.tzset()
+
 DATA_CSV = "./data/navqa/data.csv"
 DATA_PATH = "./data"
 
@@ -172,8 +182,10 @@ for i, seq_id in enumerate(seq_ids):
                 full_time = mdy_date + ' ' + hms_time
                 timestamp = time.mktime(datetime.datetime.strptime(full_time,template).timetuple())
 
-                diff = caption_times - timestamp
-                caption_idx = np.argmax(diff > 0) - 1
+                # last caption whose time <= the answer timestamp, clamped so an
+                # out-of-range timestamp can't silently wrap to the last caption.
+                caption_idx = int(np.searchsorted(caption_times, timestamp, side="right") - 1)
+                caption_idx = max(0, min(caption_idx, len(captions) - 1))
                 context_captions.append(captions[caption_idx])
 
                 context_starts.append(captions[caption_idx]['file_start'])
@@ -194,8 +206,8 @@ for i, seq_id in enumerate(seq_ids):
             start_time = localtime(filled_qa['start_time'])
             start_time = strftime('%Y-%m-%d %H:%M:%S', start_time)   
 
-            diff = caption_times - filled_qa['end_time']
-            caption_idx = np.argmax(diff > 0) - 1
+            caption_idx = int(np.searchsorted(caption_times, filled_qa['end_time'], side="right") - 1)
+            caption_idx = max(0, min(caption_idx, len(captions) - 1))
             current_position = np.round(np.array(captions[caption_idx]['position']), 2).tolist()
 
             # Let's convert the question to have current information
