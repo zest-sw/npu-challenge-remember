@@ -15,8 +15,11 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
   서버 재기동해 perf/acc 측정. seq_len은 3B와 동일(1024) 유지 → 비교 공정.
 - **핵심 결과**: 8B-perf가 종합정답 2배(4→8/25), **position 검색이 질적으로 살아남**(3B 0개→8B 4개 정답).
   단 binary는 퇴보(75%→25%), time은 여전히 불안정. "용량 병목" 가설 지지.
+- **동시구동 (7/18)**: **3B+VLM은 seq 2048/1024로 12GB에 fit해 정상 구동**(3B 측정은 VLM 켠 채 수행).
+  반면 **8B+VLM은 서버가 기동 못 함**(로딩 한참 무응답, 2회 시도) → 8B는 VLM 끈 채로만 측정 (§3.6).
+  perf_test는 8B-perf 재실행으로 Overall 32%↔48% **run-to-run 분산**을 보여줌 (소표본 불안정 실증).
 - eval 파이프라인 버그 3종 모두 처리 (타임존·저장경로·무한재시도).
-- 서버: 8B는 **performance 모드**(line 163)로 측정. VLM은 껐음(eval은 캡션만 사용).
+- 서버: 3B는 VLM 켠 채, 8B는 VLM 끈 채 measured. 8B는 **performance 모드**(line 163). seq_len 2048/1024.
 - 결과 파일: `out/0/human_qa/..._{perf,acc}.json` 4개 (라벨 3.1/3.2 혼재 — §3.5 주의).
 - 커밋: `9c49297`(버그수정 2종), `1200fa0`(Llama accuracy 실험), `09fe687`(재시도 캡).
 
@@ -89,8 +92,10 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 
 ## 3.5. ★ 8B 추가 측정 — 3B vs 8B (4-way, 7/18)
 
-8B(Llama-3.1-8B)를 `TT_ENABLE_VLM=0 TT_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct`로 서버 재기동해
-같은 캡션·질문·eval 코드·seq_len(1024)로 perf/acc 측정. 3B와 유일한 차이는 모델 크기(+정밀도 모드).
+8B(Llama-3.1-8B)를 `TT_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct`로 서버 재기동해 같은 캡션·질문·
+eval 코드·**seq_len 2048(LLM)/1024(VLM)**로 perf/acc 측정. 3B와의 차이는 모델 크기 + **VLM 상태**:
+**3B는 VLM 켠 채, 8B는 VLM 끈 채**(8B+VLM은 12GB에 안 들어가 동시구동 불가 — §3.6). 단 eval은 캡션
+파일만 읽고 VLM을 호출하지 않으므로 **정확도 비교엔 VLM 상태가 무관**(VLM이 LLM 답변에 관여 안 함).
 
 ### 4-way 정량 (seq0, non-text 25문항, 캡 eval)
 
@@ -148,6 +153,37 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 
 ---
 
+## 3.6. ★ 동시구동(VLM+LLM) 가능 여부 & perf 재실행 (7/18)
+
+### 동시구동 — 3B는 되고, 8B는 안 됨 (메모리)
+서버는 LLM+VLM을 한 프로세스에 함께 올림(TT_ENABLE_VLM=1 기본). seq 2048(LLM)/1024(VLM), 12GB DRAM 기준:
+- **3B + VLM: 정상 구동** ✅ — 둘이 함께 올라가 캡셔닝·eval 완주. (7/17 3B 측정이 실제로 이 구성 = VLM 켠 채.)
+- **8B + VLM: 서버 기동 실패** ❌ — 더 작은 3B였다면 진작 떴을 시간을 **한참 기다려도 `/health` 무응답**
+  (2회 시도, 프로세스는 살아있으나 로딩 단계에서 6분+ 진행 안 됨 = crash가 아닌 hang/극저속).
+  OOM 로그를 직접 캡처하진 못했으나, **3B는 되고 8B만 안 되는** 정황상 **8B+VLM이 seq 2048/1024로는
+  12GB DRAM에 안 들어가는 것**으로 판단.
+- → 그래서 **8B는 VLM을 끈 채로만 측정 가능**했음 (§3.5의 8B perf/acc/perf_test 전부 VLM off).
+  8B에서 VLM 켠 동시구동을 하려면 seq_len을 낮춰야 하는데, 그러면 8B-perf(seq 2048)와 컨텍스트 조건이
+  달라져 정확도 비교가 오염됨 → 별도 설계 필요(미결).
+
+### perf vs perf_test — 동일 8B/perf 설정 재실행 (run-to-run 분산)
+`perf_test`는 8B-performance를 한 번 더 돌린 것 (perf와 같은 8B/perf/VLM off/seq2048).
+
+| 지표 | perf | perf_test |
+|---|---|---|
+| 총 LLM 추론 | 833s | 829s (**0.99x** — 동일 설정이라 당연) |
+| **Overall 정답/25** | 8 (32%) | **12 (48%)** |
+| position 오차(m)/n | 68.4 / 10 | 26.7 / 9 |
+| binary | 1/4 | 2/4 |
+| latency | 33.3s | 33.2s |
+
+- **정확도 32%↔48%는 순수 run-to-run 분산** — 사실상 동일 설정을 두 번 돌렸는데 ±16%p 튐 (temperature
+  0.7 + 재시도 무작위성). → §3.5의 "표본 극소 → 강한 결론 금지"를 **정면 실증**.
+- 8B-perf 중심 추정은 두 run 평균 (8+12)/2 ≈ **40%**. 3B→8B 비교(4→8)도 이 분산폭 감안 시 "방향은 맞지만
+  크기 과신 금물"(단 두 8B run 모두 3B의 4점보다 높아 용량 이득 자체는 유지).
+
+---
+
 ## 4. 미결 / 보류 항목
 
 | 항목 | 상태 | 비고 |
@@ -166,6 +202,9 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 2. **git push 인증 설정** (gh auth login / PAT / SSH 중 택) → 대기 커밋 push.
 3. ✅ **8B 측정 완료 (7/18)** — §3.5. "용량 병목" 가설 검증됨. 다음 레버는 (a) **time 산술 보조**
    (프롬프트에 "현재시각−과거시각" 계산을 명시/후처리), (b) **binary 프롬프트 재설계**(8B 부정편향 완화).
+3b. ⬜ **8B+VLM 동시구동** — seq 2048/1024로는 12GB 초과로 서버 미기동(§3.6). 시도하려면 `TT_LLM_MAX_SEQ_LEN`을
+   낮춰 fit시켜야 하나, 그러면 8B-perf(seq 2048)와 컨텍스트가 달라져 비교 오염 → seq 맞춘 대조 설계 필요.
+   (당장은 캡셔닝→eval 분리 워크플로라 8B 동시구동이 꼭 필요하진 않음.)
 4. **(선택) 더 많은 시퀀스/문항** — seq0 25문항은 통계적으로 약함. 8B의 position 도약·binary 퇴보가
    진짜인지 확인하려면 다른 시퀀스 캡션·평가 필요 (특히 binary·duration은 유형당 2~4문항이라 노이즈).
 5. **(향후) 라이브 파이프라인 배선** — chat_demo/nova_carter 백엔드를 `tt/`로 (현재 VILA·GPU).
@@ -183,6 +222,7 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 
 ### 참고 파일
 - 수정: `scripts/question_scripts/form_question_jsons.py`, `scripts/eval.py`, `tt_server/tt_infer_server.py`
-- 결과(4-way): `out/0/human_qa/optimal+tt_Llama-3.{1,2}-{3B,8B}-Instruct__captions_tt-qwen25-vl-3b_3_secs_{perf,acc}.json`
-  (라벨 3.1/3.2 혼재 — §3.5 "파일명 라벨 주의". 실질 구분은 크기+모드: 3B-acc / 3B-perf / 8B-acc / 8B-perf)
+- 결과(5개): `out/0/human_qa/optimal+tt_Llama-3.{1,2}-{3B,8B}-Instruct__captions_tt-qwen25-vl-3b_3_secs_{acc,perf,perf_test}.json`
+  - 3B-acc / 3B-perf (7/17, **VLM on**), 8B-acc / 8B-perf / 8B-perf_test (7/18, **VLM off**)
+  - 라벨은 3B=3.2, 8B=3.1로 정리 완료. `perf_test`는 8B-perf 재실행(§3.6, run-to-run 분산 확인용).
 - 데이터: `data/questions/0/human_qa.json`(수정본), `human_qa.BROKEN-TZ.json`(옛 백업)
