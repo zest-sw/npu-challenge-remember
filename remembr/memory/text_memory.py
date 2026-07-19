@@ -38,6 +38,14 @@ class TextMemory(Memory):
   
 
     def memory_to_string(self, memory_item_list: list[MemoryItem]) -> str:
+        # get_working_memory() returns a plain string (not MemoryItems) when the
+        # memory holds pre-formatted context — eval.py's `optimal+` path inserts
+        # qa_instance['context'], which is already a rendered context string. Pass
+        # it straight through; iterating it here would walk it character by
+        # character and fail on `doc.time`.
+        if isinstance(memory_item_list, str):
+            return memory_item_list
+
         out_string = ""
         for doc in memory_item_list:
             t = doc.time
