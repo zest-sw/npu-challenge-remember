@@ -4,9 +4,9 @@ All the glue code needed to run ReMEmbR on a Tenstorrent board lives in **this
 repo**. The tt-metal SDK is used as-is (imported at runtime via `PYTHONPATH`);
 nothing is copied into or modified inside the tt-metal source tree.
 
-See also: [../docs/DEV_STATUS.md](../docs/DEV_STATUS.md) (진행 상태), [RUNBOOK.md](RUNBOOK.md)
-(기동/venv/종료), [../docs/PAPER_EVAL_RUNBOOK.md](../docs/PAPER_EVAL_RUNBOOK.md) (논문 평가),
-[../docs/TENSTORRENT_INTEGRATION.md](../docs/TENSTORRENT_INTEGRATION.md) (아키텍처).
+See also: [../docs/DEV_STATUS.md](../docs/DEV_STATUS.md) (project status), [RUNBOOK.md](RUNBOOK.md)
+(setup / start / stop), [../docs/PAPER_EVAL_RUNBOOK.md](../docs/PAPER_EVAL_RUNBOOK.md) (paper eval),
+[../docs/TENSTORRENT_INTEGRATION.md](../docs/TENSTORRENT_INTEGRATION.md) (architecture).
 
 ## Layout of what was added
 
@@ -26,8 +26,8 @@ remembr/
 └── examples/tt_smoke_test.py                      # end-to-end: image -> caption -> memory -> query
 ```
 
-> **HW note**: 이 장비는 **BOS 칩**(Tenstorrent 아님). device 노드 `/dev/bos/0`, 모듈 `bos`.
-> 점유 확인: `fuser -v /dev/bos/0`, `lsmod | grep bos`.
+> **HW note**: this machine is a **BOS chip** (not Tenstorrent). Device node `/dev/bos/0`,
+> kernel module `bos`. Check who holds it: `fuser -v /dev/bos/0`, `lsmod | grep bos`.
 
 ## Architecture
 

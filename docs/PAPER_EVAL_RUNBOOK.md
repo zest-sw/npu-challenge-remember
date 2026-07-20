@@ -1,23 +1,24 @@
-# 원 논문 데이터(NaVQA/CODa) 테스트 실행 가이드 — NPU
+# Original Paper Data (NaVQA/CODa) Test Execution Guide — NPU
 
-ReMEmbR 논문의 **NaVQA 벤치마크**를 우리 Tenstorrent NPU 구조(Qwen2.5-VL 캡셔너 +
-Llama-3.2-3B LLM)로 돌리는 전체 절차. 데이터 확보 → 전처리 → 캡셔닝 → 질문 생성 →
-평가까지를 한 문서에 정리한다.
+The full procedure for running the **NaVQA benchmark** from the ReMEmbR paper on our
+Tenstorrent NPU stack (Qwen2.5-VL captioner + Llama-3.2-3B LLM). Data acquisition →
+preprocessing → captioning → question generation → evaluation, all in one document.
 
-> ⚠️ **먼저 읽을 것 — 5번 "NPU 안전 수칙".** 캡셔닝 중 서버를 잘못 죽이면 보드가
-> wedged 상태가 되어 **재부팅이 필요**해진다. 실제로 한 번 겪었다.
+> ⚠️ **Read this first — section 5, "NPU safety rules".** If you kill the server the wrong
+> way during captioning, the board ends up wedged and **needs a reboot**. This has actually
+> happened to us once.
 
 ---
 
-## 0. 파이프라인 한눈에
+## 0. The pipeline at a glance
 
 ```
-CODa seq .zip ──(선택 압축해제)──► 2d_rect/cam0 + poses/dense
+CODa seq .zip ──(selective unzip)──► 2d_rect/cam0 + poses/dense
       │                                   │
-      │                    preprocess_coda_rosfree.py (ROS 불필요)
+      │                    preprocess_coda_rosfree.py (no ROS needed)
       ▼                                   ▼
    coda_data/{seq}/{ts}.pkl  ──► preprocess_captions.py --captioner tenstorrent
-                                         │  (NPU Qwen2.5-VL, 서버 필요)
+                                         │  (NPU Qwen2.5-VL, server required)
                                          ▼
                     data/captions/{seq}/captions/captions_<name>_<sec>_secs.json
                                          │
@@ -26,76 +27,79 @@ CODa seq .zip ──(선택 압축해제)──► 2d_rect/cam0 + poses/dense
                     data/questions/{seq}/human_qa.json
                                          │
                                          ▼
-   eval.py --model optimal+tt/Llama-3.2-3B-Instruct  (NPU LLM, 서버 필요)
+   eval.py --model optimal+tt/Llama-3.2-3B-Instruct  (NPU LLM, server required)
                                          ▼
-                                    out/ (채점 결과)
+                                    out/ (scored results)
 ```
 
 ---
 
-## 1. 현재 확보 상태 (2026-07 기준)
+## 1. Current acquisition status (as of 2026-07)
 
-| 자산 | 위치 | 상태 |
+| Asset | Location | Status |
 |---|---|---|
-| NaVQA 정답키 `data.csv` (210문항) | `remembr/data/navqa/data.csv` | ✅ 확보 |
-| NaVQA 질문 세그먼트 | `remembr/data/navqa/{0,3,4,6,16,21,22}/qa_unfilled.json` | ✅ 리포 포함 |
-| CODa seq 0 원본 zip (42GB) | `/home/user/coda_raw/0.zip` | ✅ 다운로드·검증 |
-| cam0 8213장 + pose | `/home/user/coda_raw/seq0/` | ✅ 압축해제 |
-| `.pkl` 프레임 8213개 | `/home/user/coda_raw/coda_data/0/` | ✅ 추출 |
-| ROS-free 추출기 | `remembr/scripts/preprocess_coda_rosfree.py` | ✅ |
-| **seq0 캡션** | `remembr/data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json` | 🔄 재생성 중 (품질 일관화) |
-| **seq0 질문 30문항** | `remembr/data/questions/0/human_qa.json` | ⚠️ 캡션 재생성 후 **다시 생성 필요** |
+| NaVQA answer key `data.csv` (210 questions) | `remembr/data/navqa/data.csv` | ✅ Acquired |
+| NaVQA question segments | `remembr/data/navqa/{0,3,4,6,16,21,22}/qa_unfilled.json` | ✅ Included in repo |
+| CODa seq 0 original zip (42GB) | `/home/user/coda_raw/0.zip` | ✅ Downloaded & verified |
+| 8213 cam0 images + pose | `/home/user/coda_raw/seq0/` | ✅ Extracted |
+| 8213 `.pkl` frames | `/home/user/coda_raw/coda_data/0/` | ✅ Extracted |
+| ROS-free extractor | `remembr/scripts/preprocess_coda_rosfree.py` | ✅ |
+| **seq0 captions** | `remembr/data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json` | 🔄 Regenerating (quality consistency) |
+| **seq0 30 questions** | `remembr/data/questions/0/human_qa.json` | ⚠️ **Must be regenerated** after captions are regenerated |
 
-**남은 것**: 캡션 재생성(품질 일관화) → 질문 JSON 재생성 → **4-3 평가**.
-temperature 미지원으로 막혀 있던 문제는 해결됐다(서버가 OpenAI `temperature`를 존중).
+**What's left**: regenerate captions (quality consistency) → regenerate question JSON →
+**4-3 evaluation**. The blocker caused by unsupported temperature is now resolved (the
+server honors the OpenAI `temperature` parameter).
 
-### 논문 대비 충실도 (무엇이 같고 무엇이 다른가)
+### Fidelity vs. the paper (what matches and what differs)
 
-| 항목 | 논문 원본 | 우리(NPU) | 충실도 |
+| Item | Paper original | Ours (NPU) | Fidelity |
 |---|---|---|---|
-| 데이터셋 / 정답키 | NaVQA · CODa | 동일 (seq 0) | ✅ |
-| `seconds_per_caption` | 3초 | 3초 | ✅ |
-| 캡션 프롬프트 | 캠퍼스 프롬프트(video) | 문구 보존, `video→image`만 중화 | ✅ 거의 충실 |
-| 텍스트 임베딩 | mxbai-embed-large-v1 | 동일 | ✅ |
-| 평가·채점 (`eval.py`) | 동일 | 동일 라우팅(`tt/` 백엔드) | ✅ |
-| **캡셔너 모델** | VILA 1.5 (13B) | Qwen2.5-VL 3B | ⚠️ 다름 (NPU 이식) |
-| **프레임/캡션** | ~6프레임(비디오 윈도우) | **1프레임(스냅샷)** | ⚠️ 편차 (속도/안정성 절충) |
-| **추론 LLM** | GPT-4o / llama3.1 8B | Llama-3.2-3B | ⚠️ 다름 (NPU 이식) |
+| Dataset / answer key | NaVQA · CODa | Same (seq 0) | ✅ |
+| `seconds_per_caption` | 3 seconds | 3 seconds | ✅ |
+| Caption prompt | Campus prompt (video) | Wording preserved, only `video→image` neutralized | ✅ Nearly faithful |
+| Text embedding | mxbai-embed-large-v1 | Same | ✅ |
+| Evaluation & scoring (`eval.py`) | Same | Same routing (`tt/` backend) | ✅ |
+| **Captioner model** | VILA 1.5 (13B) | Qwen2.5-VL 3B | ⚠️ Different (NPU port) |
+| **Frames per caption** | ~6 frames (video window) | **1 frame (snapshot)** | ⚠️ Deviation (speed/stability trade-off) |
+| **Inference LLM** | GPT-4o / llama3.1 8B | Llama-3.2-3B | ⚠️ Different (NPU port) |
 
-> 캡셔너·LLM 모델 차이는 **NPU 이식의 본질**(작은 로컬 모델)이라 불가피하다. 반면
-> **프레임 수(6→1)** 는 우리가 고른 절충이므로, 논문 충실도를 높이려면 여기부터
-> 올린다(4-1 참고). 프롬프트는 원문을 최대한 보존했다.
+> The captioner and LLM model differences are **inherent to the NPU port** (small local
+> models), so they are unavoidable. The **frame count (6→1)**, on the other hand, is a
+> trade-off we chose, so if you want to improve fidelity to the paper, start here (see 4-1).
+> The prompts preserve the original text as closely as possible.
 
 ---
 
-## 2. 데이터 확보 (다른 시퀀스 추가 시 재현 절차)
+## 2. Data acquisition (reproduction procedure for adding other sequences)
 
-seq 0은 이미 완료. 다른 시퀀스(3,4,6,16,21,22)가 필요하면 아래를 반복.
+seq 0 is already done. If you need other sequences (3, 4, 6, 16, 21, 22), repeat the steps below.
 
-### 2-1. 정답키 (한 번만)
+### 2-1. Answer key (once only)
 ```bash
 curl -sL -o /home/user/remembr/remembr/data/navqa/data.csv \
   https://raw.githubusercontent.com/NVIDIA-AI-IOT/remembr/main/remembr/data/navqa/data.csv
 ```
 
-### 2-2. CODa 시퀀스 다운로드 (용량 주의)
-필요 시퀀스별 zip 크기: **0=42GB, 3=72GB, 4=46GB, 6=68GB, 16=92GB, 21=111GB, 22=78GB** (합계 ≈509GB).
+### 2-2. Download CODa sequences (mind the size)
+zip size per sequence you may need: **0=42GB, 3=72GB, 4=46GB, 6=68GB, 16=92GB, 21=111GB, 22=78GB** (total ≈509GB).
 ```bash
 SEQ=0
 curl -C - -L --retry 5 -o /home/user/coda_raw/${SEQ}.zip \
   https://web.corral.tacc.utexas.edu/texasrobotics/web_CODa/sequences/${SEQ}.zip
 ```
 
-### 2-3. 필요한 부분만 선택 압축해제 (cam0 + pose)
-전체 zip엔 LiDAR(3d_raw 등)가 대부분이지만 **우리는 cam0 + pose만 필요**.
+### 2-3. Selectively extract only what's needed (cam0 + pose)
+The full zip is mostly LiDAR (3d_raw etc.), but **we only need cam0 + pose**.
 ```bash
 cd /home/user/coda_raw
 unzip -q -o ${SEQ}.zip "2d_rect/cam0/${SEQ}/*" "poses/dense/${SEQ}.txt" -d seq${SEQ}/
 ```
 
-### 2-4. ROS-free `.pkl` 추출
-원본 `preprocess_coda.py`는 ROS(rospy/cv_bridge/tf) 의존이라 무겁다. 우리 추출기는
-평문 pose txt + cam0 PNG만 읽어 동일한 `.pkl`을 만든다 (ROS 불필요).
+### 2-4. ROS-free `.pkl` extraction
+The original `preprocess_coda.py` is heavy because it depends on ROS (rospy/cv_bridge/tf).
+Our extractor reads only the plain-text pose txt + cam0 PNGs and produces identical `.pkl`
+files (no ROS required).
 ```bash
 cd /home/user/remembr
 source ~/remembr_venv/bin/activate
@@ -105,35 +109,35 @@ python remembr/scripts/preprocess_coda_rosfree.py \
   --out_dir  /home/user/coda_raw/coda_data/${SEQ} \
   --frame_skip 1
 ```
-- 출력: `{ts}.pkl` = `{cam0(BGR), position, rotation(xyzw), timestamp}`.
-- pose 행 ↔ cam0 프레임은 index로 1:1 대응(검증됨).
+- Output: `{ts}.pkl` = `{cam0(BGR), position, rotation(xyzw), timestamp}`.
+- pose rows ↔ cam0 frames correspond 1:1 by index (verified).
 
 ---
 
-## 3. NPU 서버 기동 (터미널 A, tt-metal 환경)
+## 3. Starting the NPU server (terminal A, tt-metal environment)
 
 ```bash
 cd /home/user/tt-metal
 TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
   bash /home/user/remembr/tt_server/run_server.sh
 ```
-- `TT_LLM_MAX_SEQ_LEN=2048` **필수**(NonAgent 프롬프트가 2048까지 패딩).
-- `Application startup complete.` 뜰 때까지 대기.
-- 확인: `curl -s http://localhost:8100/health` → `{"ready":true,"llm":true,"vlm":true}`
-- **서버가 뜨지 않고 `Device 0 init: failed to initialize FW! Try resetting the board.`가 나오면 → 6번 복구 절차.**
+- `TT_LLM_MAX_SEQ_LEN=2048` is **required** (the NonAgent prompt pads up to 2048).
+- Wait until `Application startup complete.` appears.
+- Check: `curl -s http://localhost:8100/health` → `{"ready":true,"llm":true,"vlm":true}`
+- **If the server fails to come up and you get `Device 0 init: failed to initialize FW! Try resetting the board.` → see the recovery procedure in section 6.**
 
 ---
 
-## 4. 테스트 실행 (터미널 B, remembr_venv, **inner** 디렉토리)
+## 4. Running the test (terminal B, remembr_venv, **inner** directory)
 
 ```bash
 source ~/remembr_venv/bin/activate
-cd /home/user/remembr/remembr           # inner: 스크립트가 ./data 상대경로 사용
+cd /home/user/remembr/remembr           # inner: scripts use ./data relative paths
 export OPENAI_API_KEY=local PYTHONPATH=/home/user/remembr
-export TT_VLM_TIMEOUT=3600               # 첫 컴파일 여유
+export TT_VLM_TIMEOUT=3600               # headroom for the first compile
 ```
 
-### 4-1. NPU 캡셔닝
+### 4-1. NPU captioning
 ```bash
 python scripts/preprocess_captions.py \
   --captioner tenstorrent \
@@ -143,44 +147,50 @@ python scripts/preprocess_captions.py \
   --data_path /home/user/coda_raw/coda_data \
   --out_path data/captions/0/captions
 ```
-- **`--num-video-frames 1` = 안정성/속도 절충 (⚠️ 논문 대비 충실도 편차).**
-  논문은 3초 윈도우를 **~6프레임(비디오)** 으로 캡션하지만, 우리는 각 윈도우를
-  **1프레임(스냅샷)** 으로만 캡션한다 → 시간적 정보가 줄어드는 **명백한 편차**.
-  대신 기본값(6장)은 Qwen 멀티이미지 shape의 **첫 트레이스 컴파일이 15분+** 걸려
-  클라이언트 타임아웃 + 보드 wedged 사고를 유발했다(실제 발생). 재현 안정성을 위해
-  1프레임을 쓰되, **논문 수준 충실도가 필요하면** 프레임 수를 올리고(예: 3~6) 첫
-  컴파일(수십 분)을 **절대 중간에 죽이지 말고** 기다린다.
-- 캡션 프롬프트는 논문 원문을 그대로 쓰되, VILA 비디오 문구만 중화한다
-  (`<video>` 제거, "the few seconds of the video" → "the image"). 나머지("Think
-  step by step", focus 리스트)는 논문 그대로.
-- **문장 잘림 방지**: 캡셔너가 `max_gen_len=256`(기본, `TT_VLM_MAX_GEN_LEN`으로 조절)을 보낸다.
-  서버 기본 128이면 verbose 캡션이 중간에 잘린다.
-- **체크포인트/resume**: 캡션 1개마다 `..._secs.json.partial.jsonl`에 즉시 기록된다. 중단(kill,
-  서버 문제) 후 **같은 명령을 재실행하면 이어서** 진행(이미 한 세그먼트는 skip). 전체 완료 시
-  최종 JSON 저장 + partial 삭제. 처음부터 다시 하려면 partial을 지운다.
-- **점점 느려지는 문제는 해결됨 (원인이 2개였다)**:
-  **① tt-metal Inspector**(디버그, 기본 ON)가 mesh workload마다 YAML을 flush → 캡션당 ~5,000회 동기
-  디스크 I/O, YAML이 153MB까지 누적 → 비전 19→2.1 it/s. `run_server.sh`가 `TT_METAL_INSPECTOR=0`으로 끈다.
-  **② Tracy 프로파일러 빌드** — ①을 끄자 드러남(84→50 it/s). tt-metal이 `--enable-profiler`로 빌드돼
-  있으면 Tracy가 zone을 계속 쌓는다(동일 이미지 12회에 RSS +33MB/요청, 지연 +1.0초/요청).
-  **env로 못 끄니 기본 빌드로 재빌드**해야 한다 → [RUNBOOK 1-0](../tt_server/RUNBOOK.md).
-  둘 다 해결 후 실측: **36초/캡션 고정, RSS 증가 0**.
-  혹시 다시 느려지면 서버 로그의 `32 x Qwen2_5_VLVisionBlock ... it/s` 값이 최고의 게이지다.
-- 결과: `data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json`.
-- 첫 캡션만 트레이스 컴파일로 느리고, 이후 캐시되어 빨라진다.
+- **`--num-video-frames 1` = a stability/speed trade-off (⚠️ a fidelity deviation from the paper).**
+  The paper captions each 3-second window from **~6 frames (video)**, whereas we caption each
+  window from only **1 frame (snapshot)** → a **clear deviation** that reduces temporal
+  information. On the other hand, the default (6 images) made the **first trace compile of the
+  Qwen multi-image shape take 15+ minutes**, which caused client timeouts and a wedged board
+  (this actually happened). We use 1 frame for reproducibility and stability, but **if you need
+  paper-level fidelity**, raise the frame count (e.g. 3–6) and wait out the first compile (tens
+  of minutes) — **never kill it partway through**.
+- The caption prompt uses the paper's original text verbatim, neutralizing only the VILA video
+  wording (remove `<video>`, "the few seconds of the video" → "the image"). Everything else
+  ("Think step by step", the focus list) is exactly as in the paper.
+- **Preventing truncated sentences**: the captioner sends `max_gen_len=256` (default, tunable via
+  `TT_VLM_MAX_GEN_LEN`). With the server default of 128, verbose captions get cut off mid-way.
+- **Checkpoint/resume**: every single caption is written immediately to
+  `..._secs.json.partial.jsonl`. After an interruption (kill, server problem), **re-run the same
+  command and it resumes** (already-done segments are skipped). On full completion it saves the
+  final JSON and deletes the partial. To start over from scratch, delete the partial.
+- **The progressive slowdown is fixed (there were two causes)**:
+  **① the tt-metal Inspector** (debug, ON by default) flushed YAML on every mesh workload → ~5,000
+  synchronous disk I/Os per caption, with the YAML growing to 153MB → vision dropped from 19 to
+  2.1 it/s. `run_server.sh` disables it with `TT_METAL_INSPECTOR=0`.
+  **② the Tracy profiler build** — revealed once ① was off (84→50 it/s). If tt-metal is built with
+  `--enable-profiler`, Tracy keeps accumulating zones (+33MB RSS per request and +1.0s latency per
+  request over 12 runs of the same image).
+  **It can't be disabled via env, so you must rebuild with the default build** → [RUNBOOK 1-0](../tt_server/RUNBOOK.md).
+  Measured after fixing both: **a steady 36 seconds/caption, zero RSS growth**.
+  If it ever slows down again, the `32 x Qwen2_5_VLVisionBlock ... it/s` value in the server log is
+  the best gauge.
+- Result: `data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json`.
+- Only the first caption is slow due to trace compilation; afterwards it's cached and fast.
 
-### 4-2. 질문 JSON 생성 (정답키 + 캡션 → human_qa.json)
+### 4-2. Generating the question JSON (answer key + captions → human_qa.json)
 ```bash
 python scripts/question_scripts/form_question_jsons.py \
   --caption_file captions_tt-qwen25-vl-3b_3_secs
 ```
-- `./data/navqa/data.csv` + 위 캡션 → `data/questions/0/human_qa.json`.
-- 캡션이 있는 seq만 처리, 나머지는 자동 skip.
-- ⚠️ **캡션을 다시 만들면 이 단계도 다시 돌려야 한다.** 질문 JSON에는 캡션에서 뽑은 "optimal
-  context"(정답에 필요한 캡션들)가 박혀 있어서, 캡션이 바뀌면 그 컨텍스트도 갱신해야 한다.
+- `./data/navqa/data.csv` + the captions above → `data/questions/0/human_qa.json`.
+- Only sequences that have captions are processed; the rest are skipped automatically.
+- ⚠️ **If you regenerate the captions, you must re-run this step too.** The question JSON embeds the
+  "optimal context" extracted from the captions (the captions needed to answer), so when the
+  captions change, that context has to be refreshed as well.
 
-### 4-3. 평가
-**권장 — optimal(오라클) 컨텍스트 + NonAgent** (seq_len에 맞고 tool-calling 불필요):
+### 4-3. Evaluation
+**Recommended — optimal (oracle) context + NonAgent** (fits within seq_len, no tool-calling needed):
 ```bash
 python scripts/eval.py \
   --model optimal+tt/Llama-3.2-3B-Instruct \
@@ -189,101 +199,110 @@ python scripts/eval.py \
   --coda_dir /home/user/coda_raw/coda_data \
   --postfix _0
 ```
-**전체 RAG(선택) — Milvus 검색 + 에이전트** (3B tool-calling 불안정):
+**Full RAG (optional) — Milvus retrieval + agent** (3B tool-calling is unstable):
 ```bash
 python scripts/eval.py \
   --model remembr+tt/Llama-3.2-3B-Instruct \
   --sequence_id 0 --caption_file captions_tt-qwen25-vl-3b_3_secs \
   --coda_dir /home/user/coda_raw/coda_data --postfix _0
 ```
-- 결과는 `./out/`. binary/position/time/duration 채점, text 질문은 skip(원 코드 동작).
-  seq0은 30문항 중 text 5개를 빼고 **25문항 채점**.
-- ⚠️ **순수 `tt/...`(접두어 없이)는 피할 것** — TextMemory가 윈도우 전체 캡션을 넣어
-  긴 질문에서 seq_len 초과.
-- **재시도 루프 주의**: 3B가 time 질문에 `type='text', time=None`으로 답하면 `evaluate_output`이
-  `abs(answer - None)`에서 크래시하고 `answer_squad_question`의 `while True`가 재시도한다. 이 재시도가
-  진전하려면 **매번 다른 답**이 나와야 하므로 `--temperature`를 0으로 두지 말 것(기본 0.7 권장).
-  서버는 이제 OpenAI `temperature`를 존중한다(0이면 greedy이라 무한 루프가 되니 주의).
+- Results go to `./out/`. binary/position/time/duration are scored; text questions are skipped
+  (original code behavior). For seq0, 5 text questions are excluded from the 30, leaving
+  **25 questions scored**.
+- ⚠️ **Avoid plain `tt/...` (without a prefix)** — TextMemory feeds in the captions for the entire
+  window, which exceeds seq_len on long questions.
+- **Beware the retry loop**: if the 3B answers a time question with `type='text', time=None`,
+  `evaluate_output` crashes at `abs(answer - None)` and the `while True` in
+  `answer_squad_question` retries. For that retry to make progress, **a different answer must come
+  out each time**, so do not set `--temperature` to 0 (the default 0.7 is recommended). The server
+  now honors the OpenAI `temperature` parameter (note that 0 means greedy, which turns this into an
+  infinite loop).
 
-### 모델별 메모리 방식
-| `--model` | 메모리 | 컨텍스트 | NPU 3B 적합성 |
+### Memory modes by model
+| `--model` | Memory | Context | Suitability for the 3B on NPU |
 |---|---|---|---|
-| `optimal+tt/...` | 오라클 컨텍스트 | 작음(정답 캡션만) | ✅ 권장 |
-| `remembr+tt/...` | Milvus RAG top-k | 제한됨 | △ tool-calling 약함 |
-| `tt/...` | TextMemory 전체 | **초과 위험** | ✗ |
+| `optimal+tt/...` | Oracle context | Small (answer captions only) | ✅ Recommended |
+| `remembr+tt/...` | Milvus RAG top-k | Limited | △ Weak tool-calling |
+| `tt/...` | Entire TextMemory | **Overflow risk** | ✗ |
 
 ---
 
-## 5. NPU 안전 수칙 (반드시)
+## 5. NPU safety rules (mandatory)
 
-device가 실행/컴파일 중일 때 teardown 없이 죽으면 코어·NoC·ARC 상태가 정리되지 않아
-**하드웨어 데드락(wedged)** 에 빠진다. 재기동 시 `failed to initialize FW`가 나고 복구가
-번거롭다(이 PC는 재부팅 시 NPU를 먼저 켜야 인식되는 제약도 있음). 규칙:
+If a process dies without teardown while the device is running or compiling, the core, NoC, and ARC
+state is never cleaned up and you end up in a **hardware deadlock (wedged)**. On restart you get
+`failed to initialize FW` and recovery is a hassle (this PC also has the constraint that on reboot
+the NPU must be powered on first to be detected). The rules:
 
-1. **서버 종료는 `Ctrl-C` 한 번(또는 SIGTERM) 후 기다린다.** 서버가 워커를 join해
-   `close_mesh_device()`로 device를 깨끗이 닫는다. 아래 로그가 뜨면 완료:
+1. **Shut the server down with a single `Ctrl-C` (or SIGTERM), then wait.** The server joins its
+   workers and cleanly closes the device via `close_mesh_device()`. It's done when you see these
+   logs:
    ```
    Shutting down: releasing the NPU cleanly ...
    NPU released cleanly. Safe to exit.
    ```
-   teardown 중 **추가 Ctrl-C는 무시**되므로 연타해도 안전(예전 버그 수정됨).
-2. **`kill -9`(SIGKILL)는 절대 금지.** 이것만은 teardown을 건너뛰어 보드를 wedged로 만든다.
-   유일하게 위험한 종료 방식.
-3. **클라이언트(캡셔닝)는 죽여도 안전**하고 체크포인트로 이어진다. 단 클라이언트 kill이
-   서버를 죽이는 건 아니므로, 급하게 서버까지 `-9`하지 말 것.
-4. **첫 컴파일(느린 구간)은 죽이지 말고 기다린다.** `--num-video-frames 1`로 이 창을 짧게 유지.
-   `TT_VLM_TIMEOUT=3600`으로 클라이언트 타임아웃도 넉넉히.
-5. device 점유 확인: `fuser -v /dev/bos/0` (빈 결과 = 프리), `lsmod | grep bos`(usage 0 = 미사용).
+   **Additional Ctrl-C presses during teardown are ignored**, so mashing the key is safe (the old
+   bug is fixed).
+2. **Never use `kill -9` (SIGKILL).** This is the one thing that skips teardown and wedges the
+   board. It's the only genuinely dangerous way to terminate.
+3. **Killing the client (captioning) is safe** and it resumes from the checkpoint. But killing the
+   client does not kill the server, so don't hastily `-9` the server too.
+4. **Don't kill the first compile (the slow stretch) — wait it out.** Use `--num-video-frames 1` to
+   keep this window short, and `TT_VLM_TIMEOUT=3600` to give the client a generous timeout.
+5. Check device occupancy: `fuser -v /dev/bos/0` (empty result = free), `lsmod | grep bos` (usage 0 = unused).
 
 ---
 
-## 6. 보드 wedged 복구 (FW init 실패 시)
+## 6. Recovering a wedged board (when FW init fails)
 
-증상: 서버 기동 시
+Symptom: on server startup
 ```
 Device 0: Timeout waiting for physical cores to finish
 Device 0 init: failed to initialize FW! Try resetting the board.
 ```
 
-### 진단 (⚠️ device 노드는 `/dev/bos` — Tenstorrent 아님)
+### Diagnosis (⚠️ the device node is `/dev/bos` — not Tenstorrent)
 ```bash
-fuser -v /dev/bos/0            # 누가 device 쥐고 있나 (빈 결과 = 프리)
-lsmod | grep bos              # bos 모듈 usage count (0 = 아무도 안 씀)
-pgrep -af tt_infer_server     # 서버 프로세스 남아있나
-uptime -p                     # 재부팅 했는지
-# 보드가 실제로 죽었는지 결정적 테스트 (서버 내린 뒤):
+fuser -v /dev/bos/0            # who is holding the device (empty result = free)
+lsmod | grep bos              # bos module usage count (0 = nobody is using it)
+pgrep -af tt_infer_server     # is a server process still around
+uptime -p                     # did it reboot
+# Definitive test for whether the board is actually dead (after bringing the server down):
 #   python3 -m ttnn.examples.usage.run_op_on_device
-#   -> tensor 출력 나오면 보드 정상, FW init 에러면 wedged
+#   -> tensor output means the board is fine; an FW init error means wedged
 ```
 
-### 복구 순서
-1. **먼저 좀비 서버 확인·정리.** hang된 서버가 device를 **안 쥐고 있으면**(`fuser`에 없거나
-   op가 device를 열 수 있으면) `kill -9 <pid>`로 정리해도 **안전**하다(끊길 device 연산이 없음).
-   → 정리 후 서버 재기동만으로 복구되는 경우가 많다(실제 사례).
-2. **보드가 정말 wedged면(FW init 실패)** → 워엄 리셋 필요. 이 환경 제약:
-   `tt-smi` 미설치 + sudo 비번 필요 + `/sys/bus/pci/rescan` root 전용이라, sudo 계정이
-   있을 때만 `sudo <bos reset 도구>` 가능.
-3. **sudo 불가 시 → 재부팅.** 단 **이 PC는 NPU를 먼저 켜고 부팅해야 인식**되므로, 단순
-   `sudo reboot`이 아니라 올바른 전원 순서(전원 차단 → NPU on → PC on)가 필요할 수 있다.
-   심하게 wedged면 warm reboot로 안 풀려 cold power cycle이 필요.
-4. 복구 확인: `fuser -v /dev/bos/0`(프리) + `python3 -m ttnn.examples.usage.run_op_on_device`(정상 연산).
+### Recovery order
+1. **First check for and clean up zombie servers.** If a hung server is **not holding the device**
+   (it's absent from `fuser`, or an op can open the device), it is **safe** to clean it up with
+   `kill -9 <pid>` (there's no device operation to interrupt).
+   → After cleanup, restarting the server alone often fixes it (this has happened for real).
+2. **If the board really is wedged (FW init failure)** → a warm reset is needed. Constraints in this
+   environment: `tt-smi` is not installed, sudo requires a password, and `/sys/bus/pci/rescan` is
+   root-only, so `sudo <bos reset tool>` is only possible if you have a sudo account.
+3. **If sudo isn't available → reboot.** But **this PC only detects the NPU if the NPU is powered on
+   first**, so a plain `sudo reboot` may not be enough — you may need the correct power sequence
+   (cut power → NPU on → PC on). If it's badly wedged, a warm reboot won't clear it and a cold power
+   cycle is required.
+4. Confirm recovery: `fuser -v /dev/bos/0` (free) + `python3 -m ttnn.examples.usage.run_op_on_device`
+   (op runs normally).
 
-> 이 환경 제약: **`bos` reset 도구 미설치 + sudo 비번 필요 + `/sys/bus/pci/rescan` root 전용**.
-> 그래서 "NPU만 명령으로 리셋"은 sudo 계정이 있을 때만 가능. 대부분은 **좀비 서버 정리 + 재기동**으로
-> 해결된다(보드가 실제로 죽은 경우가 아니라면).
+> Constraints in this environment: **the `bos` reset tool is not installed, sudo requires a password,
+> and `/sys/bus/pci/rescan` is root-only**. So "reset just the NPU from the command line" is only
+> possible with a sudo account. Most of the time, **cleaning up the zombie server and restarting**
+> resolves it (unless the board is genuinely dead).
 
 ---
 
-## 7. 관련 파일
+## 7. Related files
 
-| 파일 | 역할 |
+| File | Role |
 |---|---|
-| `remembr/scripts/preprocess_coda_rosfree.py` | ROS-free CODa→.pkl 추출기 |
-| `remembr/scripts/preprocess_captions.py` | 캡셔닝(`--captioner tenstorrent` 지원) |
-| `remembr/scripts/question_scripts/form_question_jsons.py` | data.csv+캡션 → 질문 JSON |
-| `remembr/scripts/eval.py` | 평가(`tt/` 백엔드 라우팅) |
-| `remembr/tt_server/run_server.sh` | NPU 서버 기동 (Inspector 비활성 포함) |
-| `remembr/tt_server/npu_info.py` | NPU 스펙 덤프 (arch/DRAM/Tensix/L1) |
-| `remembr/scripts/viz.py` | (선택) 평가 결과를 주행 영상 위에 오버레이해 시각화 — 파이프라인 필수 아님 |
-| `docs/TENSTORRENT_INTEGRATION.md` | 아키텍처·설계 결정 |
-```
+| `remembr/scripts/preprocess_coda_rosfree.py` | ROS-free CODa→.pkl extractor |
+| `remembr/scripts/preprocess_captions.py` | Captioning (supports `--captioner tenstorrent`) |
+| `remembr/scripts/question_scripts/form_question_jsons.py` | data.csv + captions → question JSON |
+| `remembr/scripts/eval.py` | Evaluation (`tt/` backend routing) |
+| `remembr/tt_server/run_server.sh` | NPU server startup (includes disabling the Inspector) |
+| `remembr/tt_server/npu_info.py` | NPU spec dump (arch/DRAM/Tensix/L1) |
+| `remembr/scripts/viz.py` | (Optional) Visualizes evaluation results overlaid on the driving video — not required for the pipeline |
+| `docs/TENSTORRENT_INTEGRATION.md` | Architecture & design decisions |
