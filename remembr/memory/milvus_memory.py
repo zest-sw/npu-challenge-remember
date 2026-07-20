@@ -8,96 +8,106 @@ import numpy as np
 
 from remembr.memory.memory import Memory, MemoryItem
 
-from langchain_community.vectorstores import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
 
-from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Collection, utility
+from pymilvus import MilvusClient, DataType
 
 
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
 
+# Vector fields and their index settings. `position` and `time` are searched as
+# vectors so that "what was near (x,y,z)" and "what happened around t" are ordinary
+# nearest-neighbour lookups; nlist is small because both are low-dimensional.
+_INDEX_SPECS = (
+    ("text_embedding", 1024),
+    ("position", 2),
+    ("time", 2),
+)
+
+# Fields returned by a search; everything except the embedding, which is large and
+# unused downstream. memory_to_string() reads `position` and `time`, and the caption
+# becomes the Document's page_content.
+_OUTPUT_FIELDS = ["id", "position", "theta", "time", "caption"]
+
+
+def _to_documents(results):
+    """Convert a MilvusClient search result into the langchain Documents the rest of
+    ReMEmbR expects (page_content = caption, metadata = position/time/theta/id)."""
+    docs = []
+    for hit in (results[0] if results else []):
+        entity = hit.get("entity", hit)
+        docs.append(
+            Document(
+                page_content=entity.get("caption", ""),
+                metadata={k: entity[k] for k in _OUTPUT_FIELDS if k in entity},
+            )
+        )
+    return docs
 
 
 class MilvusWrapper:
+    """Thin MilvusClient wrapper.
+
+    Uses the MilvusClient API rather than the ORM-style Collection/connections/utility
+    API, which PyMilvus deprecated and removes in 3.1.
+    """
 
     def __init__(self, collection_name='test', ip_address='127.0.0.1', port=19530, drop_collection=False):
         self.collection_name = collection_name
-        self.collection = self.connect_to_milvus_collection(collection_name, 1024, address=ip_address, port=port, drop_collection=drop_collection)
-
+        self.client = MilvusClient(uri=f"http://{ip_address}:{port}")
+        self.connect_to_milvus_collection(collection_name, 1024, drop_collection=drop_collection)
 
     def drop_collection(self):
-        utility.drop_collection(self.collection_name)
+        self.client.drop_collection(self.collection_name)
 
-    def connect_to_milvus_collection(self, collection_name, dim, address='127.0.0.1', port=19530, drop_collection=False):
-        connections.connect(host=address, port=port)
-        
-        if drop_collection:
-            utility.drop_collection(collection_name)
-        
-        fields = [
-            FieldSchema(name='id', dtype=DataType.VARCHAR, description='ids', is_primary=True, auto_id=False, max_length=1000),
-            FieldSchema(name='text_embedding', dtype=DataType.FLOAT_VECTOR, description='embedding vectors', dim=dim),
-            FieldSchema(name='position', dtype=DataType.FLOAT_VECTOR, description='position of robot', dim=3),
-            FieldSchema(name='theta', dtype=DataType.FLOAT, description='rotation of robot', dim=1),
-            FieldSchema(name='time', dtype=DataType.FLOAT_VECTOR, description='time', dim=2),
-            FieldSchema(name='caption', dtype=DataType.VARCHAR, description='caption string', max_length=3000),
+    def connect_to_milvus_collection(self, collection_name, dim, drop_collection=False):
+        if drop_collection and self.client.has_collection(collection_name):
+            self.client.drop_collection(collection_name)
 
-        ]
-        schema = CollectionSchema(fields=fields, description='text image search')
-        collection = Collection(name=collection_name, schema=schema)
+        # Attach to the existing collection when there is one -- the eval loads a
+        # database that preprocessing already populated, so creating unconditionally
+        # would either fail or discard those memories.
+        if not self.client.has_collection(collection_name):
+            schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=False)
+            schema.add_field('id', DataType.VARCHAR, is_primary=True, max_length=1000)
+            schema.add_field('text_embedding', DataType.FLOAT_VECTOR, dim=dim)
+            schema.add_field('position', DataType.FLOAT_VECTOR, dim=3)
+            schema.add_field('theta', DataType.FLOAT)
+            schema.add_field('time', DataType.FLOAT_VECTOR, dim=2)
+            schema.add_field('caption', DataType.VARCHAR, max_length=3000)
 
-        # create IVF_FLAT index for collection.
-        index_params = {
-            'metric_type':'L2',
-            'index_type':"IVF_FLAT",
-            'params':{"nlist":1024}
-        }
-        collection.create_index(field_name="text_embedding", index_params=index_params)
+            index_params = self.client.prepare_index_params()
+            for field_name, nlist in _INDEX_SPECS:
+                index_params.add_index(
+                    field_name=field_name,
+                    index_type='IVF_FLAT',
+                    metric_type='L2',
+                    params={'nlist': nlist},
+                )
 
-        index_params = {
-            'metric_type':'L2',
-            'index_type':"IVF_FLAT",
-            'params':{"nlist":2}
-        }
-        collection.create_index(field_name="position", index_params=index_params)
+            self.client.create_collection(
+                collection_name=collection_name,
+                schema=schema,
+                index_params=index_params,
+            )
 
-        index_params = {
-            'metric_type':'L2',
-            'index_type':"IVF_FLAT",
-            'params':{"nlist":2}
-        }
-        collection.create_index(field_name="time", index_params=index_params)
+        self.client.load_collection(collection_name)
+        return collection_name
 
-        return collection
-    
     def insert(self, data_list):
-        res = self.collection.insert(data_list)
+        self.client.insert(collection_name=self.collection_name, data=data_list)
 
-    def search(self, data):
-
-        self.collection.load()
-
-        BATCH_SIZE = 2
-        LIMIT = 10
-
-        param = {
-            "metric_type": "L2",
-            "params": {
-                "nprobe": 1024,
-            }
-        }
-
-        res = self.collection.search(
-            data=[data],
-            anns_field="text_embedding",
-            param=param,
-            batch_size=BATCH_SIZE,
-            limit=LIMIT,
-            # expr="id > 3",
-            output_fields=["id", "text_embedding"]
+    def search(self, data, anns_field='text_embedding', limit=10, nprobe=1024):
+        """Nearest-neighbour search over one of the vector fields, as Documents."""
+        results = self.client.search(
+            collection_name=self.collection_name,
+            data=[list(data)],
+            anns_field=anns_field,
+            search_params={'metric_type': 'L2', 'params': {'nprobe': nprobe}},
+            limit=limit,
+            output_fields=_OUTPUT_FIELDS,
         )
-
-        return res
+        return _to_documents(results)
 
 
 
@@ -143,38 +153,13 @@ class MilvusMemory(Memory):
 
         self.milv_wrapper = MilvusWrapper(self.db_collection_name, self.db_ip, self.db_port, drop_collection=drop_collection)
 
-        text_vector_db = Milvus(
-            self.embedder,
-            connection_args={"host": self.db_ip, "port": self.db_port},
-            collection_name=self.db_collection_name,
-            vector_field='text_embedding',
-            text_field='caption',
-        )
-        self.text_retriever = text_vector_db.as_retriever(search_kwargs={"k": 5})
-
-
-        self.position_vector_db = Milvus(
-            self.embedder, # we will ignore this
-            connection_args={"host": self.db_ip, "port": self.db_port},
-            collection_name=self.db_collection_name,
-            vector_field='position',
-            text_field='caption',
-        )
-
-        self.time_vector_db = Milvus(
-            self.embedder, # we will ignore this
-            connection_args={"host": self.db_ip, "port": self.db_port},
-            collection_name=self.db_collection_name,
-            vector_field='time',
-            text_field='caption',
-        )
-
 
     def search_by_position(self, query: tuple) -> str:
-        # docs = pos_db.similarity_search_by_vector(np.array(query))
-        docs = similarity_search_with_score_by_vector(self.position_vector_db, np.array(query).astype(float))
+        docs = self.milv_wrapper.search(
+            np.array(query).astype(float), anns_field='position', limit=4
+        )
 
-        self.working_memory += docs 
+        self.working_memory += docs
 
         docs = self.memory_to_string(docs)
 
@@ -204,7 +189,9 @@ class MilvusMemory(Memory):
         # convert from hms_time to something searchable
 
 
-        docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([query, 0]))
+        docs = self.milv_wrapper.search(
+            np.array([query, 0]), anns_field='time', limit=4
+        )
 
         self.working_memory += docs
 
@@ -217,15 +204,17 @@ class MilvusMemory(Memory):
 
     def search_by_text(self, query: str) -> str:
 
-        docs = self.text_retriever.invoke(query)
-        
+        docs = self.milv_wrapper.search(
+            self.embedder.embed_query(query), anns_field='text_embedding', limit=5
+        )
+
         self.working_memory += docs
 
         docs = self.memory_to_string(docs)
 
         """Look up things online."""
         return docs
-    
+
 
     ### Doc formatting for the last LLM
     def memory_to_string(self, memory_list: list[MemoryItem], ref_time: float=None):
@@ -238,7 +227,7 @@ class MilvusMemory(Memory):
                 t = doc.metadata['time'][0]
             else:
                 t = doc.metadata['time']
-            
+
             if ref_time:
                 t += ref_time
             t = localtime(t)
@@ -248,67 +237,3 @@ class MilvusMemory(Memory):
             s += f"The robot saw the following: {doc.page_content}\n\n"
             out_string += s
         return out_string
-
-
-# NOTE: This version of the code returns the vector
-def similarity_search_with_score_by_vector(
-        pos_db,
-        embedding: List[float],
-        k: int = 4,
-        param: Optional[dict] = None,
-        expr: Optional[str] = None,
-        timeout: Optional[float] = None,
-        **kwargs: Any,
-    ) -> List[Tuple[Document, float]]:
-        """Perform a search on a query string and return results with score.
-
-        For more information about the search parameters, take a look at the pymilvus
-        documentation found here:
-        https://milvus.io/api-reference/pymilvus/v2.2.6/Collection/search().md
-
-        Args:
-            embedding (List[float]): The embedding vector being searched.
-            k (int, optional): The amount of results to return. Defaults to 4.
-            param (dict): The search params for the specified index.
-                Defaults to None.
-            expr (str, optional): Filtering expression. Defaults to None.
-            timeout (float, optional): How long to wait before timeout error.
-                Defaults to None.
-            kwargs: Collection.search() keyword arguments.
-
-        Returns:
-            List[Tuple[Document, float]]: Result doc and score.
-        """
-        if pos_db.col is None:
-            print("No existing collection to search.")
-            return []
-
-        if param is None:
-            param = pos_db.search_params
-
-        # Determine result metadata fields with PK.
-        output_fields = pos_db.fields[:]
-        # output_fields.remove(pos_db._vector_field) # NOTE: Only thing removed
-        timeout = pos_db.timeout or timeout
-        # Perform the search.
-        res = pos_db.col.search(
-            data=[embedding],
-            anns_field=pos_db._vector_field,
-            param=param,
-            limit=k,
-            expr=expr,
-            output_fields=output_fields,
-            timeout=timeout,
-            **kwargs,
-        )
-        # Organize results.
-        ret = []
-        for result in res[0]:
-            data = {x: result.entity.get(x) for x in output_fields}
-            doc = pos_db._parse_document(data)
-            pair = (doc, result.score)
-            ret.append(pair)
-
-        return [doc for doc, _ in ret]
-
-

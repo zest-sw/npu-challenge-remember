@@ -92,6 +92,12 @@ def evaluate_output(qa_instance, predicted):
         out_error['duration_error'] = float(np.ravel(np.abs(answer - np.array(pred)))[0])
 
     elif 'text' in q_type:
+        # No metric to compute here -- free text is graded afterwards by
+        # score_navqa.py's LLM judge, so we only carry the reference answer through.
+        # An empty answer is still 'unanswered', matching the typed branches above, so
+        # answer_squad_question retries rather than recording a blank.
+        if not str(predicted.get('text') or '').strip():
+            return {'unanswered': True}
         out_error = {'answer': qa_instance['answers']['text']}
 
     else:
@@ -285,11 +291,6 @@ def main(args):
         start_time = qa_instance['start_time']
         answers = qa_instance['answers']
         id = qa_instance['id']
-
-        if (qa_instance['type'] == 'text'):
-            print("Skipping text questions for now")
-            responses.append({}) # this means skipped!
-            continue
 
         memory, instance_captions = load_memory(args, data[i], use_milvus=use_milvus, use_optimal_context=use_optimal_context, ip_address=args.db_ip)
         if len(instance_captions) == 0: # ISSUE

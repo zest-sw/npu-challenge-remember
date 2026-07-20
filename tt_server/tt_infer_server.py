@@ -35,7 +35,7 @@ import uuid
 import torch
 import ttnn
 from loguru import logger
-from PIL import Image
+from PIL import Image, ImageOps
 
 # ---- llama32 (LLM) imports -------------------------------------------------
 from models.bos_model.llama32.tt.common import (
@@ -160,7 +160,7 @@ class LlamaEngine:
                 mesh_device=submesh,
                 instruct=True,
                 max_batch_size=1,
-                optimizations= None, #lambda margs: DecodersPrecision.performance(margs.n_layers, margs.model_name),
+                optimizations= lambda margs: DecodersPrecision.performance(margs.n_layers, margs.model_name),
                 max_seq_len=self.max_seq_len,
                 paged_attention_config=paged_attention_config,
                 dtype=ttnn.bfloat8_b,
@@ -316,10 +316,15 @@ class QwenVLEngine:
         qwen_warmup_model(self.generator, model_args, self.xattn_caches, HF_MODEL=True, processor=self.processor)
         logger.info("[VLM] ready.")
 
-    def describe(self, images, prompt: str, max_gen_len: int = 128) -> str:
+    def describe(self, images, prompt: str, max_gen_len: int = 128, temperature: float = 0.0) -> str:
         processor, tokenizer, generator = self.processor, self.tokenizer, self.generator
         model_args, xattn_caches = self.model_args, self.xattn_caches
-        sampler = get_batch_sampler(0, 0.9, model_args[0].tokenizer)  # greedy
+        # temperature 0 = greedy (the old hardcoded behavior). Greedy is fine for
+        # prose captions but collapses into token loops on terse list-style
+        # prompts ("near sign, near sign, ..." until max_gen_len), so /caption
+        # forwards the caller's temperature; the paper's VILA captioner sampled
+        # at 0.2 as well.
+        sampler = get_batch_sampler(temperature, 0.9, model_args[0].tokenizer)
 
         content = [ImageMedia(image=im) for im in images] + [prompt]
         dialog = [UserMessage(content=content)]
@@ -354,6 +359,16 @@ class QwenVLEngine:
         skip_tokens = {"<|eot_id|>", "<|eom_id|>", "<|im_end|>", "<|im_start|>", "addCriterion"}
         users_decoding = True
         gen_idx = 0
+        # Repeated-phrase stop. A 3B asked for a terse comma list falls into a
+        # decode loop on visually sparse frames ("fluorescent light, hallway,
+        # fluorescent light, ..." to the token cap), which sampling at 0.2 does
+        # not break. Stop at the first phrase that has already been emitted:
+        # unlike a token-level n-gram guard this cannot fire on legitimately
+        # repeated words inside distinct phrases, and it ends the loop instead of
+        # spending the whole budget on it (~16s -> ~3s per affected caption).
+        # Prose captions have few commas and are unaffected.
+        seen_phrases = set()
+        pending = []
         while users_decoding and gen_idx < max_gen_len - 1:
             position_id = prefill_lens + gen_idx
             next_token_tensor = next_tokens.reshape(1, 1)
@@ -366,6 +381,14 @@ class QwenVLEngine:
             all_outputs.append(tok)
             if tokenizer.decode([tok]) in skip_tokens:
                 users_decoding = False
+            pending.append(tok)
+            if "," in tokenizer.decode([tok]):
+                phrase = tokenizer.decode(pending).strip(" ,").lower()
+                if phrase and phrase in seen_phrases:
+                    all_outputs = all_outputs[: len(all_outputs) - len(pending)]
+                    users_decoding = False
+                seen_phrases.add(phrase)
+                pending = []
             gen_idx += 1
 
         tokens_out = [t for t in all_outputs if t != tokenizer.pad_token_id]
@@ -456,8 +479,24 @@ def _messages_to_prompt(messages) -> str:
 
 
 def _decode_image(b64: str) -> Image.Image:
+    """Decode to the 224x224 the vision encoder is fed, WITHOUT distorting the frame.
+
+    224x224 is forced: the encoding must stay within the 256-token prefill shape (the
+    512 shape raises TT_FATAL in update_cache_op -- num_blocks_of_work exceeds the
+    compute grid -- so it is a kernel limit, not a setting), and one 224x224 image is
+    ~66 of those tokens.
+
+    The size is fixed but the aspect ratio need not be thrown away: CODa frames are
+    1224x1024, and squashing them to a square stretched everything vertically. Padding
+    to a square first keeps geometry intact at the same token cost, and measurably
+    helped -- a frame the model called "indoor concrete floor" when squashed was
+    correctly read as "outdoor concrete ground" once padded, and it stopped inventing
+    a manhole cover's identity. It does not fix the 5.5x downscale itself, which is
+    the source of the remaining invented objects.
+    """
     raw = base64.b64decode(b64)
-    return Image.open(io.BytesIO(raw)).convert("RGB").resize((224, 224))
+    im = Image.open(io.BytesIO(raw)).convert("RGB")
+    return ImageOps.pad(im, (224, 224), color=(0, 0, 0))
 
 
 @app.get("/health")
@@ -506,7 +545,8 @@ def caption(req: dict):
         raise HTTPException(400, "no images provided")
     prompt = req.get("prompt", DEFAULT_VLM_PROMPT)
     max_gen_len = int(req.get("max_gen_len") or 128)
-    text = _submit(_engines["vlm"].describe, images, prompt, max_gen_len)
+    temperature = float(req.get("temperature") or 0.0)
+    text = _submit(_engines["vlm"].describe, images, prompt, max_gen_len, temperature)
     return {"caption": text}
 
 

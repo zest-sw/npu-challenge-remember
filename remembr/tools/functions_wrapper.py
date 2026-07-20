@@ -67,9 +67,74 @@ DEFAULT_RESPONSE_FUNCTION = {
     },
 }
 
+# Strict tool-selection template used ONLY when we can grammar-constrain the backend
+# (the tt server). It matches build_tool_call_schema() below: a single {tool_name,
+# arguments} object with no room for the free-form reasoning a 3B model tends to ramble.
+STRICT_TOOL_SYSTEM_TEMPLATE = """You have access to the following tools:
+
+{tools}
+
+You MUST respond with ONLY a single JSON object (no prose, no reasoning, no markdown)
+that selects exactly one tool and matches this schema:
+
+{{
+  "tool_name": <one of the tool names listed above>,
+  "arguments": <an object holding that tool's parameters>
+}}
+
+To answer the user directly instead of searching, use:
+{{"tool_name": "__conversational_response", "arguments": {{"response": "<your answer>"}}}}
+Output that JSON object and nothing else."""  # noqa: E501
+
+
 _BM = TypeVar("_BM", bound=BaseModel)
 _DictOrPydanticClass = Union[Dict[str, Any], Type[_BM]]
 _DictOrPydantic = Union[Dict, _BM]
+
+
+def _openai_backend(llm: Any) -> bool:
+    """True when the wrapped LLM is the OpenAI-compatible client (our tt server), which
+    supports response_format json_schema / json_object for constrained decoding. Ollama
+    and other backends fall back to the original prompt-only behavior."""
+    try:
+        return isinstance(llm, langchain_openai.ChatOpenAI)
+    except Exception:
+        return False
+
+
+def _tool_arguments_schema(fn: Dict[str, Any]) -> Dict[str, Any]:
+    """The JSON schema for a tool's `arguments` object (its OpenAI-function parameters)."""
+    params = fn.get("parameters") or {}
+    if params.get("type") == "object":
+        return params
+    return {"type": "object"}
+
+
+def build_tool_call_schema(functions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Strict JSON schema for a single {tool_name, arguments} tool call, handed to the
+    server for grammar-constrained (token-masked) decoding.
+
+    `tool_name` is pinned (via `const`) to an available tool and `arguments` to that
+    tool's parameter schema, so a weak model physically cannot emit a wrong tool name,
+    stray reasoning keys, or a bare scalar -- exactly the shapes that used to crash the
+    parser with 'float object is not subscriptable' / 'string indices must be integers'.
+    """
+    options = []
+    for fn in functions:
+        options.append(
+            {
+                "type": "object",
+                "properties": {
+                    "tool_name": {"const": fn["name"]},
+                    "arguments": _tool_arguments_schema(fn),
+                },
+                "required": ["tool_name", "arguments"],
+                "additionalProperties": False,
+            }
+        )
+    if len(options) == 1:
+        return options[0]
+    return {"anyOf": options}
 
 
 def _is_pydantic_class(obj: Any) -> bool:
@@ -317,111 +382,132 @@ class FunctionsWrapper(BaseChatModel, BaseLanguageModel):
         if len(functions) > 0 and _is_pydantic_class(functions[0]):
             functions = [convert_to_ollama_tool(fn) for fn in functions]
         functions.insert(0, DEFAULT_RESPONSE_FUNCTION)
-        system_message_prompt_template = SystemMessagePromptTemplate.from_template(
-            self.tool_system_prompt_template
-        )
-        system_message = system_message_prompt_template.format(
+
+        # Decide whether we can hard-constrain generation to the tool schema. Only the
+        # OpenAI-compatible backend (our tt server) supports response_format, and we only
+        # constrain the *tool-selection* step -- i.e. when at least one real retrieval
+        # tool is bound. The final-answer step (only __conversational_response bound) is
+        # left as plain json_object so the richer answer object described in
+        # generate_system_prompt is not flattened into a single string.
+        real_tools = [
+            fn for fn in functions if fn["name"] != DEFAULT_RESPONSE_FUNCTION["name"]
+        ]
+        constrain_tools = _openai_backend(self.llm) and len(real_tools) > 0
+
+        template = STRICT_TOOL_SYSTEM_TEMPLATE if constrain_tools else self.tool_system_prompt_template
+        system_message = SystemMessagePromptTemplate.from_template(template).format(
             tools=json.dumps(functions, indent=2)
         )
 
-        response_message = self.llm.invoke([system_message] + messages)
+        llm = self.llm
+        if _openai_backend(self.llm):
+            if constrain_tools:
+                response_format = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "tool_call",
+                        "schema": build_tool_call_schema(functions),
+                    },
+                }
+            else:
+                response_format = {"type": "json_object"}
+            # Passed per-call (not in model_kwargs) so the schema can vary per step.
+            llm = self.llm.bind(response_format=response_format)
+
+        response_message = llm.invoke([system_message] + messages)
         chat_generation_content = response_message.content
 
         if not isinstance(chat_generation_content, str):
-            raise ValueError("OllamaFunctions does not support non-string output.")
-        
+            raise ValueError("FunctionsWrapper does not support non-string output.")
 
-        # if it contains ```json, let's parse that out. NOTE THIS IS HACKY
-        # This only executes for the Command-R model
+        return self._chat_result_from_content(chat_generation_content, functions)
+
+    def _chat_result_from_content(
+        self, chat_generation_content: str, functions: List[Dict[str, Any]]
+    ) -> ChatResult:
+        """Turn the model's raw reply into either tool calls or a conversational answer.
+
+        Defensive by construction: a weak model may emit valid-but-wrong-shaped JSON -- a
+        bare float/string, a list of numbers, a hallucinated tool name, or extra reasoning
+        keys. Rather than indexing blindly (which raised 'float object is not
+        subscriptable' / 'string indices must be integers'), anything unusable becomes a
+        conversational response so the graph proceeds to its answer step instead of
+        crash-looping through try_except_continue.
+        """
+        default_name = DEFAULT_RESPONSE_FUNCTION["name"]
+        known_names = {fn["name"] for fn in functions}
+
+        def _as_answer(text: str) -> ChatResult:
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content=text))]
+            )
+
+        # 1) Parse JSON, tolerating a ```json ... ``` fence around it.
         try:
             if "```json" in chat_generation_content:
-                parser = JsonOutputParser()
-                parsed_chat_result = parser.invoke(chat_generation_content)
-                # chat_generation_content = chat_generation_content.replace("\'", "\"")
+                parsed = JsonOutputParser().invoke(chat_generation_content)
             else:
-                parsed_chat_result = json.loads(chat_generation_content)
+                parsed = json.loads(chat_generation_content)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # Not JSON at all -> treat the whole reply as the answer text.
+            return _as_answer(chat_generation_content)
 
-        except json.JSONDecodeError:
-            # import pdb; pdb.set_trace()
-            raise ValueError(
-                f"""Model did not respond with valid JSON. 
-                Please try again. 
-                Response: {chat_generation_content}"""
-            )
+        # 2) Normalize to a list of candidate tool-call dicts.
+        if isinstance(parsed, dict):
+            items = [parsed]
+        elif isinstance(parsed, list):
+            items = parsed
+        else:
+            # A bare scalar (float/int/str/bool) -> answer; never subscript it.
+            return _as_answer(str(parsed))
 
-
-        if type(parsed_chat_result) != list:
-            parsed_chat_result = [parsed_chat_result]
-
-        # print("CHAT CONTENT:", parsed_chat_result)
-      
         tool_calls = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue  # skip stray scalars inside a list
+            # Accept the strict {tool_name, arguments} shape and the legacy
+            # {tool, tool_input} shape interchangeably.
+            name = item.get("tool_name") or item.get("tool")
+            args = item.get("arguments")
+            if args is None:
+                args = item.get("tool_input")
+            if not isinstance(name, str):
+                continue
 
-        for tool in parsed_chat_result:
-            called_tool_name = tool["tool"]
-            called_tool = next(
-                (fn for fn in functions if fn["name"] == called_tool_name), None
-            )
-
-            if called_tool is None:
-                # import pdb; pdb.set_trace()
-                raise ValueError(
-                    f"Failed to parse a function call from output: "
-                    f"{chat_generation_content}"
-                )
-            
-            if called_tool["name"] == DEFAULT_RESPONSE_FUNCTION["name"]:
-                if len(parsed_chat_result) != 1:
-                    print("NOTE: There are other tools that are being called that we are skipping.")
-                    print("This is due to the default response being called along with other tool calls.")
-
-                if ("tool_input" in tool):
-                    if type(tool['tool_input']) == str:
-                        response = tool['tool_input']
-                    elif type(tool['tool_input']) == dict and "response" in tool["tool_input"]:
-                        response = tool["tool_input"]["response"]
-                    else:
-                        raise ValueError(
-                            f"Failed to parse a response from output: "
-                            f"{chat_generation_content}"
-                        )
-                elif "response" in tool:
-                    response = tool["response"]
+            if name == default_name:
+                if isinstance(args, str):
+                    response = args
+                elif isinstance(args, dict):
+                    response = args.get("response", args)
+                elif "response" in item:
+                    response = item["response"]
                 else:
-                    # print("*"*10, "No tool being used. Assuming this is a conversation response without a tool wrap", "*"*10)
-                    import pdb; pdb.set_trace()
-                    raise ValueError(
-                        f"Failed to parse a response from output: "
-                        f"{chat_generation_content}"
-                    )
-                return ChatResult(
-                    generations=[
-                        ChatGeneration(
-                            message=AIMessage(
-                                content=str(response),
-                            )
-                        )
-                    ]
+                    response = item
+                return _as_answer(
+                    response if isinstance(response, str) else str(response)
                 )
 
-            called_tool_arguments = tool["tool_input"]
-
-            tool_call = ToolCall(
-                name=called_tool_name,
-                args=called_tool_arguments if called_tool_arguments else {},
-                id=f"call_{str(uuid.uuid4()).replace('-', '')}",
+            if name not in known_names:
+                continue  # ignore hallucinated tool names
+            if not isinstance(args, dict):
+                args = {} if args is None else {"x": args}
+            tool_calls.append(
+                ToolCall(
+                    name=name,
+                    args=args,
+                    id=f"call_{str(uuid.uuid4()).replace('-', '')}",
+                )
             )
 
-            tool_calls.append(tool_call)
-
-
-        response_message_with_functions = AIMessage(
-            content="",
-            tool_calls=tool_calls
-        )
+        if not tool_calls:
+            # Valid JSON but nothing usable -> answer using the python-repr of the parsed
+            # object so the downstream eval-based parser in generate() can cope with it.
+            return _as_answer(str(parsed))
 
         return ChatResult(
-            generations=[ChatGeneration(message=response_message_with_functions)]
+            generations=[
+                ChatGeneration(message=AIMessage(content="", tool_calls=tool_calls))
+            ]
         )
 
     @property

@@ -158,6 +158,74 @@ python scripts/preprocess_captions.py \
 - The caption prompt uses the paper's original text verbatim, neutralizing only the VILA video
   wording (remove `<video>`, "the few seconds of the video" → "the image"). Everything else
   ("Think step by step", the focus list) is exactly as in the paper.
+- **`--caption_style dense` (⚠️ a deliberate fidelity deviation)** replaces the paper query with
+  `DENSE_CAPTION_PROMPT` (`captioners/captioner.py`): comma-separated observation phrases instead
+  of ~196-word "Certainly! Let's break down…" prose. Motivation: the boilerplate dominated the
+  mxbai sentence vector (embedding memory selection 30.1 m vs keyword 17.6 m — see
+  `_select_memory`). The captions filename automatically gets a `-dense` suffix
+  (`captions_<name>-dense_…`), so paper-style captions are never overwritten; pass the suffixed
+  name as `--caption_file` to `eval.py` when evaluating dense captions.
+  **Measured on seq0 (272 captions, ~25 min):** 196 → 19 words, boilerplate opener 100% → 5%,
+  mean pairwise caption cosine 0.906 → 0.699, context for k=20 memories 5,123 → 533 tokens.
+  **But end-to-end position accuracy is worse, so dense captions are NOT the default.**
+  Measured with the search phrases the 3B actually emits (`retrieve_from_text`'s argument, e.g.
+  'a red fire hydrant' — not the question text, which is what an earlier sweep wrongly used):
+
+  | captions | retrieval | selector | end-to-end |
+  |---|---|---|---|
+  | paper | caption-level top-5 | content words | **16.0 m 9/12** ← current default |
+  | paper | top-20 → best-phrase re-rank | content words | 31.9 m 5/12 |
+  | dense | caption-level top-5 | content words | 50.4 m 4/12 |
+  | dense | top-20 → best-phrase re-rank | top-1 | 28.4 m 7/12 |
+  | dense | top-20 → best-phrase re-rank | LLM picks | 38.7 m 5/12 |
+
+  Dense captions genuinely retrieve better — hit@5 (some retrieved memory within 15 m) is 11-12/12
+  vs 10/12 for the default — but nothing converts that into answers. Every heuristic selector tops
+  out at 8/12, and letting the 3B choose among the retrieved memories (only affordable with dense
+  captions) is worse at 5/12.
+
+  **hit@5 is the wrong metric**: every caption set retrieves only ~1.5 usable memories out of 5,
+  so what decides the answer is picking the right one, and word overlap can only do that on
+  word-rich text.
+
+  | captions | good of top-5 | blind pick | keyword selector |
+  |---|---|---|---|
+  | paper | 1.75 | 38.5 m | **16.0 m** |
+  | dense-v1 | 1.33 | 44.9 m | 50.7 m |
+  | dense-v2 | 1.67 | 40.1 m | 40.3 m |
+
+  The selector more than halves the error on paper captions and performs **at or below chance** on
+  dense ones (13–16 content words per caption vs 79.5). **A caption prompt for this pipeline
+  should be optimised for discriminative word content, not brevity or embedding cleanliness.**
+  See `_select_memory` in `remembr/agents/remembr_agent.py` for every variant measured.
+- **Two ideas that sound right and are not**, both measured: (a) *more frames per segment* to catch
+  objects the single captioned frame misses — the campus sculpture is already large in the frame
+  that gets captioned, and the VLM calls it "a tree" when asked what the upper-left object is, so
+  this is a perception failure at 224×224, not a sampling one; (b) *a short "only caption salient
+  things" prompt* to buy vision tokens for those extra frames — at 72–85 tokens the format example
+  is copied into essentially every caption (its phrases appeared in 4/4 probes), and fewer words
+  starve the selector further, which is the opposite of what the table above asks for.
+- **Prompt length is hard-capped by the VLM prefill.** The encoding (prompt + ~21 template
+  tokens + ~66 vision tokens per image) must stay ≤ 256 or the server returns 500 immediately.
+  The next shape up (512) is not a setting — it raises
+  `TT_FATAL @ update_cache_op.cpp:56 (num_blocks_of_work <= compute_grid)`, i.e. the KV-cache
+  update needs more work blocks than the board's core grid has. The paper prompt encodes to ~140
+  and never hit this; `DENSE_CAPTION_PROMPT` sits at ~248 with one image. Re-check with the Qwen
+  tokenizer before lengthening it, and note that a second image costs another ~66 tokens.
+- **Consequence: frames are seen at 224×224**, a 5.5× downscale of CODa's 1224×1024. This, not
+  prompt wording, is the main source of invented objects — phantom people and a "red fire hose"
+  survive every prompt revision, and the paper prompt hallucinates on the same frames (it just
+  hedges with "appears to be"). Raising caption fidelity further means raising resolution, which
+  is blocked by the prefill limit above. `_decode_image` now pads frames to a square instead of
+  squashing them, which keeps geometry correct at the same token cost and measurably fixed some
+  indoor/outdoor confusions. ⚠️ That changes captioning for **both** styles, so captions
+  regenerated now will differ slightly from the stored sets.
+- **`--num-video-frames` now means exactly what it says.** The old sampling (`images[::30//n]`)
+  assumed every segment held 30 frames; CODa segments hold 30 **or 31**, so 40 of the 272 seq0
+  segments quietly sent n+1 images. That is what pushed the dense prompt over the prefill limit
+  at segment 55. Sampling is now `np.linspace` to an exact count. ⚠️ Paper-style captions
+  regenerated after this change will differ slightly from
+  `captions_tt-qwen25-vl-3b_3_secs.json` on those 40 segments (2 frames → 1).
 - **Preventing truncated sentences**: the captioner sends `max_gen_len=256` (default, tunable via
   `TT_VLM_MAX_GEN_LEN`). With the server default of 128, verbose captions get cut off mid-way.
 - **Checkpoint/resume**: every single caption is written immediately to

@@ -41,9 +41,15 @@ class TenstorrentCaptioner(Captioner):
     """
 
     def __init__(self, url: str = None, prompt: str = DEFAULT_PROMPT, timeout: float = None,
-                 max_gen_len: int = None):
+                 max_gen_len: int = None, temperature: float = None):
         self.url = url or os.environ.get("TT_VLM_URL", "http://localhost:8100/caption")
         self.prompt = prompt
+        # Decoding temperature. 0 = greedy, which loops badly on list-style
+        # prompts (DENSE_CAPTION_PROMPT); the paper's VILA captioner sampled at
+        # 0.2, so that is the default here too.
+        if temperature is None:
+            temperature = float(os.environ.get("TT_VLM_TEMPERATURE", "0.2"))
+        self.temperature = temperature
         # First caption after a fresh server launch compiles ttnn traces
         # (prefill+decode) — a one-time cost that can take several minutes on a
         # cold co-resident VLM. Default the timeout high enough to survive it;
@@ -64,6 +70,7 @@ class TenstorrentCaptioner(Captioner):
             "images": [_encode_image(im) for im in images],
             "prompt": self.prompt,
             "max_gen_len": self.max_gen_len,
+            "temperature": self.temperature,
         }
         response = requests.post(self.url, json=payload, timeout=self.timeout)
         response.raise_for_status()
