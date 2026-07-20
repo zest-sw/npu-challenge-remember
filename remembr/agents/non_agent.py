@@ -27,46 +27,6 @@ class NonAgent(Agent):
         if llm_type == 'gpt-4o':
             # TODO: ADD OpenAI key here!
             pass
-        elif llm_type.startswith('tt/'):
-            # Tenstorrent NPU backend: talk to the local unified inference server
-            # (tt_infer_server.py) via its OpenAI-compatible /v1/chat/completions endpoint.
-            # llm_type format: 'tt/<model_name>', e.g. 'tt/Llama-3.2-3B-Instruct'.
-            from langchain_openai import ChatOpenAI
-            base_url = os.environ.get('TT_LLM_BASE_URL', 'http://localhost:8100/v1')
-            # max_tokens here = max GENERATED tokens (not context); keep modest so
-            # prefill+decode fits the server's max_seq_len.
-            # A JSON *schema* triggers the server's grammar-constrained decoding
-            # (the equivalent of Ollama's format="json", but stronger): it forces
-            # the required keys, caps free-text length, and forbids extra keys so a
-            # small model can't ramble in a reasoning field and blow the budget.
-            answer_schema = {
-                'type': 'object',
-                'properties': {
-                    'type': {'type': 'string'},
-                    'text': {'type': 'string', 'maxLength': 300},
-                    'binary': {'type': ['string', 'null']},
-                    'position': {'type': ['string', 'null']},
-                    'orientation': {'type': ['string', 'null']},
-                    'time': {'type': ['number', 'string', 'null']},
-                    'duration': {'type': ['number', 'string', 'null']},
-                },
-                # AgentOutput requires all of these (no defaults), so force the model
-                # to emit every key — otherwise AgentOutput.from_dict() raises and
-                # NonAgent.query retries forever.
-                'required': ['type', 'text', 'binary', 'position', 'orientation', 'time', 'duration'],
-                'additionalProperties': False,
-            }
-            self.chain = ChatOpenAI(
-                model=llm_type[len('tt/'):],
-                base_url=base_url,
-                api_key='local',
-                temperature=temperature,
-                max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
-                model_kwargs={'response_format': {
-                    'type': 'json_schema',
-                    'json_schema': {'name': 'agent_output', 'schema': answer_schema},
-                }},
-            )
         else:
             self.chain = ChatOllama(model=llm_type, num_ctx=num_ctx, temperature=temperature)
         self.prompt = file_to_string(str(os.path.dirname(__file__)) + '/../' + 'prompts/non_agent_system_prompt.txt')

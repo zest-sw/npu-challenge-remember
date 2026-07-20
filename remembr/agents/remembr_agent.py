@@ -6,9 +6,7 @@ import sys, re
 from langchain_huggingface import HuggingFaceEmbeddings
 
 from langchain_community.chat_models import ChatOllama
-# NOTE: ChatNVIDIA (langchain_nvidia_ai_endpoints) is only needed for the NVIDIA
-# NIM backend ('nim/...'). Import it lazily inside llm_selector so eval.py can
-# import ReMEmbRAgent (e.g. for the tt/ or optimal paths) without that package.
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
 from langchain_core.prompts import PromptTemplate
 from langchain.prompts import (
@@ -130,7 +128,6 @@ class ReMEmbRAgent(Agent):
 
         # Support for NIMs
         elif 'nim/' in llm_type:
-            from langchain_nvidia_ai_endpoints import ChatNVIDIA  # lazy: optional dep
             llm_name = llm_type[4:]
             llm = ChatNVIDIA(model=llm_name)
 
