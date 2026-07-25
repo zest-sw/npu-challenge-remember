@@ -1,240 +1,108 @@
-# 작업 로그 — 2026-07-17~18: NPU eval 파이프라인 디버깅 & 3B/8B × perf/acc 4-way 비교
+# 작업 로그 — NPU eval 파이프라인 디버깅 & 3B/8B × perf/acc 4-way 비교
 
 NPU 포트(Qwen2.5-VL 캡셔너 + Llama LLM)의 NaVQA eval을 **처음으로 유효하게 완주**시키고,
-Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval이 그동안 결과를 못 남긴
-원인들(정답 타임존, 저장 경로, 무한 재시도)을 모두 찾아 고쳤고, 네 구성의 결과를 확보.
-7/18에 **8B(Llama-3.1-8B) 추가 측정** → "병목은 수치 정밀도가 아니라 모델 용량" 가설을 직접 검증
-(결과: 가설 지지 — §3.5).
+Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval이 결과를 못 남기던 원인 3종
+(정답 타임존·저장경로·무한 재시도)을 모두 고쳤고, 네 구성 결과를 확보(3B ×5회, 8B ×3회).
 
 ---
 
-## 현재 상태 한눈에
+## 1. eval 파이프라인 버그 3종 ★
 
-- **4-way 비교 완료** — 3B/8B × perf/acc 네 결과 모두 동일 채점 방식(캡 eval)으로 확보 (§3, §3.5).
-- **8B(Llama-3.1-8B) 측정 완료 (7/18)** — `TT_ENABLE_VLM=0 TT_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct`로
-  서버 재기동해 perf/acc 측정. seq_len은 3B와 동일(1024) 유지 → 비교 공정.
-- **핵심 결과**: 8B-perf가 종합정답 2배(4→8/25), **position 검색이 질적으로 살아남**(3B 0개→8B 4개 정답).
-  단 binary는 퇴보(75%→25%), time은 여전히 불안정. "용량 병목" 가설 지지.
-- **동시구동 (7/18)**: **3B+VLM은 seq 2048/1024로 12GB에 fit해 정상 구동**(3B 측정은 VLM 켠 채 수행).
-  반면 **8B+VLM은 서버가 기동 못 함**(로딩 한참 무응답, 2회 시도) → 8B는 VLM 끈 채로만 측정 (§3.6).
-  perf_test는 8B-perf 재실행으로 Overall 32%↔48% **run-to-run 분산**을 보여줌 (소표본 불안정 실증).
-- eval 파이프라인 버그 3종 모두 처리 (타임존·저장경로·무한재시도).
-- 서버: 3B는 VLM 켠 채, 8B는 VLM 끈 채 measured. 8B는 **performance 모드**(line 163). seq_len 2048/1024.
-- 결과 파일: `out/0/human_qa/..._{perf,acc}.json` 4개 (라벨 3.1/3.2 혼재 — §3.5 주의).
-- 커밋: `9c49297`(버그수정 2종), `1200fa0`(Llama accuracy 실험), `09fe687`(재시도 캡).
-
----
-
-## 1. 완료된 작업
-
-### 1-1. Qwen VLM performance 전환 + seq0 재캡셔닝 (7/16)
-- 272 캡션(2h21m), `captions_tt-qwen25-vl-3b_3_secs.json`. 백업은 `.../json_folder/`.
-
-### 1-2. eval 파이프라인 버그 3종 ★ 이번 세션 핵심
-
-| # | 버그 | 증상 | 수정 | 상태 |
+| # | 버그 | 증상 | 수정 | 커밋 |
 |---|---|---|---|---|
-| ① | **GT 타임존** (`form_question_jsons.py`) | CSV 정답 timestamp(US/Pacific)를 머신 로컬(KST)로 파싱 → 캡션 창 밖 → 컨텍스트·정답이 항상 마지막 캡션(≈원점) | `TZ=America/Los_Angeles` 고정 + `searchsorted`+clamp | ✅ 커밋 `9c49297` |
-| ② | **저장 경로 `/`** (`eval.py`) | 모델명 `tt/Llama...`의 `/`가 경로로 해석 → 완주해도 저장 크래시(결과 유실) | 파일명 `/`→`_` sanitize | ✅ 커밋 `9c49297` |
-| ③ | **무한 재시도 / None 크래시** (`eval.py`) | `while True`가 3B의 null 답에 무한 재시도, `evaluate_output`이 None에 TypeError/NameError 폭주 | 재시도 캡(5회) + None을 `unanswered`로 처리 | ✅ (이 커밋에 포함) |
+| ① | **GT 타임존** (`form_question_jsons.py`) | CSV 정답(US/Pacific)을 머신 로컬(KST)로 파싱 → 캡션 창 밖 → 컨텍스트·정답이 항상 마지막 캡션(≈원점) | `TZ=America/Los_Angeles` 고정 + `searchsorted`+clamp | `9c49297` |
+| ② | **저장 경로 `/`** (`eval.py`) | 모델명 `tt/Llama...`의 `/`가 경로로 해석 → 완주해도 저장 크래시(결과 유실) | 파일명 `/`→`_` sanitize | `9c49297` |
+| ③ | **무한 재시도 / None 크래시** (`eval.py`) | `while True`가 3B의 null 답에 무한 재시도, `evaluate_output`이 None에 TypeError 폭주 | 재시도 캡(5회) + None→`unanswered` 처리 | `09fe687` |
 
-- ①은 정답뿐 아니라 **모델이 보는 컨텍스트도** 오염시켜서(둘 다 같은 인덱스 사용), 수정 후 재시도가
-  크게 줄고 position/time GT가 실제 좌표로 정상화됨.
-- ②는 **지금까지 `out/`이 비어 있던 진짜 원인** (temperature 버그와 별개).
-- ③으로 eval이 무한루프 없이 완주(perf 1h10m → 캡 적용 후 ~26분), None 문항은 `unanswered`로
-  분리 집계 가능.
-
-### 1-3. Llama accuracy 실험 준비 (커밋 `1200fa0`, 이후 perf 재실행 위해 되돌림)
-- `tt_infer_server.py:163`을 `optimizations=None`(→accuracy)로 두고 서버 재시작 → accuracy로 `_acc` 실행.
-- 이후 line 163을 performance 람다로 복원 + 서버 재시작 → 같은 캡 eval로 `_perf` 실행.
+①은 정답뿐 아니라 **모델이 보는 컨텍스트도** 오염(둘 다 같은 인덱스) → 수정 후 position/time GT 정상화.
+②가 그동안 `out/`이 비어 있던 진짜 원인. ③으로 무한루프 없이 완주(perf ~26분).
 
 ---
 
-## 2. §3 비교의 채점 방식 (캡 eval)
+## 2. 통합 4-way 비교 (3B ×5회, 8B ×3회) ★
 
-두 실행 모두 **재시도 캡 + `unanswered` 분리** 방식으로 채점:
-- 유형별로 **응답률**(모델이 유효 필드를 낸 비율)과 **답한 것의 오차**를 분리 보고.
-- None/`'null'`/산문 답은 `unanswered`로 오차 평균에서 제외 (옛 no-cap 방식은 재시도 끝에 쓰레기
-  좌표로 채점해 오차를 왜곡했음).
-- 유일한 차이는 **Llama 정밀도(performance vs accuracy)** — 캡션·질문·서버구성·eval코드 동일.
+모든 결과 파일을 하나의 채점 스크립트로 재집계. 캡션·질문·eval코드·서버구성 동일, 차이는 **모델 크기 + Llama 정밀도**뿐.
+지표: **응답률**(유효 필드 낸 비율) / **정답률**(score_navqa 임계: position≤15m, time·duration≤2min, binary 정확일치,
+미응답=오답 — NaVQA 논문 정의) / **loss**(답한 것만의 평균 오차; eval.py는 임계 판정 없이 raw 오차만 기록).
 
----
+### Overall (non-text 25문항)
 
-## 3. performance vs accuracy 비교 결과 ★ (3회 평균)
-
-seq0에서 각 모드 **3회씩** 실행(원본 7/17 + 재실행 7/25 ×2)한 결과를 집계. 캡션·질문·eval코드·서버구성
-동일, 유일한 차이는 Llama 정밀도(performance vs accuracy). non-text 25문항, 캡 eval(응답률 + 답한 것의 오차).
-
-| 유형 (문항 ×3회) | performance | accuracy |
-|---|---|---|
-| **position** (36) | 응답률 **42%**, 오차 138.5 | 응답률 36%, 오차 142.3 |
-| **binary** (12) | 응답률 **92%**, 정답률 **73%** | 응답률 83%, 정답률 70% |
-| **time** (21) | 응답률 **95%**, 오차 **7.7** | 응답률 57%, 오차 10.6 |
-| **duration** (6) | 응답률 **100%**, 오차 25.3 | 응답률 67%, 오차 **9.9** |
-| text (5 ×3) | 스킵 (자동 채점 불가) | 스킵 |
-
-*(응답률 = 유효 필드를 낸 비율, 오차 = 답한 문항만의 평균. binary는 정답률. 회차별 응답수 예: time
-perf 7/6/7 vs acc 4/4/4 — 회차간 일관.)*
-
-### 결론 — **performance가 더 나음** (3회 모두 일관)
-단일 실행에선 "이득 없음(노이즈)" 수준이었으나, **3회 집계로 방향이 뚜렷**해짐:
-- **응답률 전 유형 performance 우세** (특히 time 95%↔57%로 격차 큼).
-- **답한 것의 오차/정답률도 4중 3에서 performance 우세** (position·binary·time). duration만 accuracy 우세인데
-  6개짜리 초소형 표본.
-- accuracy는 **더 적게 답하고도**(선별적) time 오차가 더 높음 → 자기가 고른 쉬운 부분집합에서조차 못함.
-
-### 왜 accuracy가 더 나쁜가 (증거 기반)
-- 실제 출력상 accuracy가 유형 필드를 **null로 비워두는 경우가 많음** (예: time Q1/Q14/Q23에서 perf는 숫자,
-  acc는 `time=None`).
-- "accuracy" 정밀도는 **원본 full-precision 모델에 충실**한 것 → 원본 3B의 "얼버무리는(답 안 하는)" 약점까지
-  충실히 재현 → 응답률↓. performance의 양자화 노이즈는 그 분포를 교란해 값을 **더 덜컥 뱉게** 만듦 → 응답률↑.
-- **캡(5회) 때문에 감점되는 게 아님**: 미응답은 오차 채점에서 제외(오답 처리 X), 캡과 무관한 "답한 것의 오차"
-  에서도 performance가 이김. 즉 정밀도가 3B의 근본 약점을 못 고침.
-
-### 통계적 한계
-- 여전히 **seq0 한정**, 유형당 실질 문항 적음(duration 2개). 다만 **3회 반복 + 회차간 일관성**으로 단일
-  실행보다 신뢰도↑.
-
-### 시사점 — 병목은 "정밀도"가 아니라 "용량(3B)"
-- 정밀도(bfp4→bf16)를 올려도 안 나아지고 오히려 응답률↓ → Llama의 **수치 정밀도가 아니라 근본 능력(3B 크기)**
-  이 병목. 다음 레버는 accuracy가 아니라 **8B**(용량↑) — §3.5 참조.
-- 3B의 주된 position 실패는 **"좌표를 아예 안 냄"(형식)** 이 1차, "낸 것도 부정확"이 2차.
-
----
-
-## 3.5. ★ 8B 추가 측정 — 3B vs 8B (4-way, 7/18)
-
-8B(Llama-3.1-8B)를 `TT_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct`로 서버 재기동해 같은 캡션·질문·
-eval 코드·**seq_len 2048(LLM)/1024(VLM)**로 perf/acc 측정. 3B와의 차이는 모델 크기 + **VLM 상태**:
-**3B는 VLM 켠 채, 8B는 VLM 끈 채**(8B+VLM은 12GB에 안 들어가 동시구동 불가 — §3.6). 단 eval은 캡션
-파일만 읽고 VLM을 호출하지 않으므로 **정확도 비교엔 VLM 상태가 무관**(VLM이 LLM 답변에 관여 안 함).
-
-### 4-way 정량 (seq0, non-text 25문항, 캡 eval)
-
-| 지표 | 3B-acc | 3B-perf | 8B-acc | 8B-perf |
+| 지표 | 3B-perf | 3B-acc | 8B-perf | 8B-acc |
 |---|---|---|---|---|
-| **응답률** | 48% | 80% | 92% | **92%** |
-| **Overall 정답**(15m/2min) | 5/25 (20%) | 4/25 (16%) | 5/25 (20%) | **8/25 (32%)** |
-| position 오차(m) / 응답수 | 116.0 / 3 | 144.1 / 7 | 71.5 / 10 | **68.4 / 10** |
-| time 오차(min) / 응답수 | 5.42 / 4 | 7.58 / 7 | **3.02** / 7 | 7.92 / 7 |
-| duration 오차(min) / 응답수 | **0.30** / 1 | 45.35 / 2 | 4.64 / 2 | 6.63 / 2 |
-| binary 정답률 | 50% (2/4) | **75% (3/4)** | 25% (1/4) | 25% (1/4) |
-| 평균 latency | 15.3s | 14.9s | 37.0s | 33.3s |
+| **응답률** | 70% | 57% | 85% | **92%** |
+| **정답률**(임계) | 13% | 21% | **47%** | 37% |
 
-**Overall 정답의 유형별 내역** (무엇을 맞혀서 점수가 났나 — 이게 핵심):
-- 3B-perf 4점 = binary 3 + time 1  (**position 0**)
-- 8B-perf 8점 = **position 4** + time 3 + binary 1
+### 유형별 (응답률 / loss / 정답률)
 
-### 핵심 발견
+| 유형 | 지표 | 3B-perf | 3B-acc | 8B-perf | 8B-acc |
+|---|---|---|---|---|---|
+| **position** (12) | 응답률 | 45% | 40% | 69% | **83%** |
+| | loss(m)↓ | 128.7 | 110.0 | **44.2** | 60.2 |
+| | 정답률 | 0% | 3% | **33%** | 22% |
+| **binary** (4) | 응답률 | 90% | 85% | 100% | 100% |
+| | 정답률 | 60% | 65% | **67%** | 58% |
+| **time** (7) | 응답률 | 91% | 69% | 100% | 100% |
+| | loss(min)↓ | 13.5 | 6.3 | 4.7 | **3.9** |
+| | 정답률 | 11% | 29% | **57%** | 48% |
+| **duration** (2) | 응답률 | 100% | 60% | 100% | 100% |
+| | loss(min)↓ | 21.3 | 9.7 | 4.9 | **4.6** |
+| | 정답률 | 0% | 10% | 50% | 50% |
 
-1. **position에서 질적 도약 — 8B-perf가 "진짜 기억 검색"을 함.** 3B는 거의 전부 질문에 주어진
-   현재 좌표를 복창(오차 수십~수백 m)해 사실상 검색 실패였는데, 8B-perf는 캡션 메모리에서 과거
-   좌표를 실제로 꺼내옴:
-   - 노란 비상전화 기둥: 오차 **0.003m** (3B는 현재좌표 복창으로 77m)
-   - Gates 동상(MEDIUM): 오차 **0.0007m**
-   - 앉을 곳(MEDIUM): 오차 **0.0004m**
-   - 안 빈 자전거 거치대: 오차 **2.1m**
-   position Overall 정답이 **3B 0개 → 8B-perf 4개**. 이게 종합점수 2배(4→8)의 유일한 원동력.
+### 종합 정리
 
-2. **binary는 오히려 퇴보 (perf 75%→25%).** 8B가 캡션에 과도하게 문자 그대로 충실해져 **부정 편향**
-   발생 — GT가 yes인 3문항 중 2개(자전거탄사람·로딩존)를 "현재 위치가 표지판 위치와 안 맞는다"는
-   식으로 과잉추론해 no로 틀림. 3B-perf는 단순하게 표지판 보고 yes로 맞혔음. (단 binary 4문항 극소표본.)
+- **3B — accuracy가 정확도 우세, performance가 커버리지 우세.** 정답률 acc 21%>perf 13%, loss도 acc가 전 유형에서
+  낮음(pos 110<129, time 6.3<13.5, dur 9.7<21.3). 대신 응답률은 perf 70%>acc 57%. → **품질(정답률·loss)로는 acc가 낫다.**
+- **8B — perf/acc 대체로 대등(혼조), 확정적 승자 없음 + 분산 큼.**
+  - 정답률(임계)은 **오히려 perf가 약간 앞섬(47% vs 37%)** → "acc 우세"는 성립 안 함.
+  - loss는 갈림: position·binary는 **perf**(44<60, 67%>58%), time·duration은 **acc**(3.9<4.7, 4.6<4.9).
+  - 응답률은 **8B에선 acc가 더 높음(92% vs 85%)** — 3B(perf 우위)와 반대. 8B는 둘 다 형식은 거의 다 채우고,
+    차이는 position 응답률(acc 83%>perf 69%)에서 남. 단 acc는 많이 답해도 임계 통과율은 perf보다 낮음.
+  - §4의 동일 설정 재실행이 **32%↔48%(±16%p)** 로 튐 → 3회로는 우열 확정 불가, **추가 테스트 필요.**
+- **모드 무관, 최대 레버는 용량(3B→8B).** 정답률 13~21%→37~47%, position loss ~110~129→44~60. 정밀도는 3B에선
+  커버리지↔정확도 트레이드오프, 8B에선 사실상 무의미.
 
-3. **time은 bimodal — 평균은 안 좋아짐.** 8B-perf는 일부를 거의 정확히 맞히면서(빨간소파 0.28,
-   벽돌길 1.09) 동시에 세션 길이를 넘는 붕괴도 냄(건물 첫진입 "44분 전"=오차 40, 체류 "11.35분"인데
-   세션은 11분). "현재시각 − 과거시각" 산술이 크기를 키워도 여전히 불안정. threshold 통과 수는 늘었지만
-   (1→3) 평균 오차는 3B와 비슷.
-
-4. **acc vs perf: 3B든 8B든 perf 우위 재확인.** 8B에서도 Overall perf 32% > acc 20%. 특히 position
-   검색이 perf(4개 정답)에서 acc(0개)보다 크게 나음. "정밀도(acc)는 이득 없다"가 8B로도 유지 — 8B-acc는
-   position에서 8B-perf만큼 좌표를 꺼내오지 못하고 복창/무응답으로 회귀.
-
-5. **비용: 8B latency ~2배** (33~37s vs 15s). 정확도 향상의 대가.
-
-### 결론 — "용량 병목" 가설 검증됨 (단, 크기가 만병통치는 아님)
-- 3B→8B로 **응답률(80→92%)·position 검색·종합정답(4→8)이 뚜렷이 향상** → WORKLOG의 "병목은 수치
-  정밀도가 아니라 모델 용량"이 **직접 확인**됨. 특히 죽어 있던 공간 기억 검색(position)이 살아난 게 결정적.
-- 다만 **binary 부정편향·time 산술 붕괴**는 8B에서도 남거나 악화 → 크기만으로 다 해결되진 않음.
-  다음 레버는 (a) 시간 산술을 프롬프트/후처리로 보조, (b) binary 프롬프트 재설계.
-- ⚠️ **표본 한계 그대로**: seq0 25문항, 유형당 2~10개(binary·duration은 2~4). 방향성 신호일 뿐 강한 결론 금지.
-
-### 파일명 라벨 주의
-`out/`의 파일명이 `Llama-3.1-3B`·`Llama-3.2-8B`로 뒤섞여 있음(3.2엔 8B 없고 3.1엔 3B 없음 → `--model`
-라벨 오타). 실제 구분은 **크기(3B/8B) + 모드(acc/perf)**이며, 실제 로드 모델은 서버의 `TT_LLM_MODEL`이
-결정하므로 결과 자체엔 영향 없음. 다음에 재실행 시 `--model` 라벨을 3B는 3.2, 8B는 3.1로 맞출 것.
+> ⚠️ "8B는 acc 우세 / 응답률은 perf 우세"로 뭉뚱그리면 틀림. 두 방향 모두 3B↔8B에서 반대로 나타남.
+> 확실한 두 문장: **3B = acc 정확·perf 다응답 / 8B = 대등·혼조(분산 큼).**
 
 ---
 
-## 3.6. ★ 동시구동(VLM+LLM) 가능 여부 & perf 재실행 (7/18)
+## 3. 8B 심화 관찰 (position 도약이 종합점수 견인)
 
-### 동시구동 — 3B는 되고, 8B는 안 됨 (메모리)
-서버는 LLM+VLM을 한 프로세스에 함께 올림(TT_ENABLE_VLM=1 기본). seq 2048(LLM)/1024(VLM), 12GB DRAM 기준:
-- **3B + VLM: 정상 구동** ✅ — 둘이 함께 올라가 캡셔닝·eval 완주. (7/17 3B 측정이 실제로 이 구성 = VLM 켠 채.)
-- **8B + VLM: 서버 기동 실패** ❌ — 더 작은 3B였다면 진작 떴을 시간을 **한참 기다려도 `/health` 무응답**
-  (2회 시도, 프로세스는 살아있으나 로딩 단계에서 6분+ 진행 안 됨 = crash가 아닌 hang/극저속).
-  OOM 로그를 직접 캡처하진 못했으나, **3B는 되고 8B만 안 되는** 정황상 **8B+VLM이 seq 2048/1024로는
-  12GB DRAM에 안 들어가는 것**으로 판단.
-- → 그래서 **8B는 VLM을 끈 채로만 측정 가능**했음 (§3.5의 8B perf/acc/perf_test 전부 VLM off).
-  8B에서 VLM 켠 동시구동을 하려면 seq_len을 낮춰야 하는데, 그러면 8B-perf(seq 2048)와 컨텍스트 조건이
-  달라져 정확도 비교가 오염됨 → 별도 설계 필요(미결).
+- **position에서 질적 도약.** 3B는 질문에 주어진 현재 좌표를 복창(오차 수십~수백 m)해 사실상 검색 실패였으나,
+  8B-perf는 캡션 메모리에서 **과거 좌표를 실제로 꺼내옴**(노란 비상전화 0.003m, Gates 동상 0.0007m 등).
+  position 임계 정답 3B ≈0 → 8B-perf 33%. 이게 종합 정답률 2배의 유일한 원동력.
+- **binary는 오히려 퇴보.** 8B가 캡션에 과도하게 문자적으로 충실 → **부정 편향**(GT=yes를 "위치 안 맞음"으로
+  과잉추론해 no). 3B-perf는 단순히 표지판 보고 yes로 맞힘. (단 binary 4문항 극소표본.)
+- **time은 bimodal.** 일부는 거의 정확(0.28·1.09min), 동시에 세션 길이 초과하는 붕괴도 냄. 임계 통과는 늘지만
+  평균은 여전히 불안정.
+- **비용: 8B latency ~2배** (33~37s vs 15s).
 
-### perf vs perf_test — 동일 8B/perf 설정 재실행 (run-to-run 분산)
-`perf_test`는 8B-performance를 한 번 더 돌린 것 (perf와 같은 8B/perf/VLM off/seq2048).
-
-| 지표 | perf | perf_test |
-|---|---|---|
-| 총 LLM 추론 | 833s | 829s (**0.99x** — 동일 설정이라 당연) |
-| **Overall 정답/25** | 8 (32%) | **12 (48%)** |
-| position 오차(m)/n | 68.4 / 10 | 26.7 / 9 |
-| binary | 1/4 | 2/4 |
-| latency | 33.3s | 33.2s |
-
-- **정확도 32%↔48%는 순수 run-to-run 분산** — 사실상 동일 설정을 두 번 돌렸는데 ±16%p 튐 (temperature
-  0.7 + 재시도 무작위성). → §3.5의 "표본 극소 → 강한 결론 금지"를 **정면 실증**.
-- 8B-perf 중심 추정은 두 run 평균 (8+12)/2 ≈ **40%**. 3B→8B 비교(4→8)도 이 분산폭 감안 시 "방향은 맞지만
-  크기 과신 금물"(단 두 8B run 모두 3B의 4점보다 높아 용량 이득 자체는 유지).
+**결론 — "병목은 정밀도가 아니라 용량" 가설 검증.** 3B→8B로 응답률·position 검색·종합정답이 뚜렷이 향상.
+단 binary 부정편향·time 산술 붕괴는 크기만으로 안 풀림. ⚠️ seq0 25문항·유형당 2~12문항이라 방향성 신호로만.
 
 ---
 
-## 4. 미결 / 보류 항목
+## 4. 동시구동 & run-to-run 분산
 
-| 항목 | 상태 | 비고 |
-|---|---|---|
-| **git push** | ⬜ 막힘 | remote가 HTTPS인데 `credential.helper` 없음 → GitHub 인증 필요 (gh/PAT/SSH) |
-| **tt-metal fork 커밋** | ⬜ | `demo_qwen25_vl.py`(Qwen optimizations 파라미터) 미커밋. 서버가 의존하는 load-bearing 변경이라 로컬 커밋 권장 |
-| **line 163 상태** | ℹ️ | 현재 performance로 복원됨. accuracy 실험 커밋(`1200fa0`)과 현재 코드가 다름(의도된 되돌림) |
-| **응답률 별도 지표화** | 🅿️ | eval.py 콘솔 러닝 지표엔 unanswered 카운트 미출력. 최종 분석은 저장 JSON의 `unanswered` 플래그로 산출 중 |
-| **theta = 3.14 더미** | ⬜ | 회전 미구현(placeholder). eval엔 영향 없음 |
-
----
-
-## 5. 앞으로 할 일 (순서)
-
-1. **재시도 캡 + WORKLOG 커밋** (이 문서 작성 직후).
-2. **git push 인증 설정** (gh auth login / PAT / SSH 중 택) → 대기 커밋 push.
-3. ✅ **8B 측정 완료 (7/18)** — §3.5. "용량 병목" 가설 검증됨. 다음 레버는 (a) **time 산술 보조**
-   (프롬프트에 "현재시각−과거시각" 계산을 명시/후처리), (b) **binary 프롬프트 재설계**(8B 부정편향 완화).
-3b. ⬜ **8B+VLM 동시구동** — seq 2048/1024로는 12GB 초과로 서버 미기동(§3.6). 시도하려면 `TT_LLM_MAX_SEQ_LEN`을
-   낮춰 fit시켜야 하나, 그러면 8B-perf(seq 2048)와 컨텍스트가 달라져 비교 오염 → seq 맞춘 대조 설계 필요.
-   (당장은 캡셔닝→eval 분리 워크플로라 8B 동시구동이 꼭 필요하진 않음.)
-4. **(선택) 더 많은 시퀀스/문항** — seq0 25문항은 통계적으로 약함. 8B의 position 도약·binary 퇴보가
-   진짜인지 확인하려면 다른 시퀀스 캡션·평가 필요 (특히 binary·duration은 유형당 2~4문항이라 노이즈).
-5. **(향후) 라이브 파이프라인 배선** — chat_demo/nova_carter 백엔드를 `tt/`로 (현재 VILA·GPU).
+- **동시구동(VLM+LLM)**: seq 2048(LLM)/1024(VLM), 12GB DRAM 기준 **3B+VLM은 정상 구동**(3B 측정은 VLM 켠 채),
+  **8B+VLM은 서버 미기동**(12GB 초과 추정) → **8B는 VLM 끈 채로만 측정**. eval은 캡션 파일만 읽고 VLM을 호출
+  안 하므로 정확도 비교엔 VLM 상태 무관.
+- **run-to-run 분산**: 동일 8B-perf 설정 재실행이 Overall 정답 **32%↔48%** 로 튐(temperature 0.7 + 재시도
+  무작위성). §2의 "소표본 → 강한 결론 금지"를 정면 실증.
 
 ---
 
 ## 부록
 
 ### 참고 커밋
-- `9c49297` fix(eval): correct answer-timestamp timezone and sanitize result filename (버그 ①②)
-- `1200fa0` test: run Llama in accuracy mode (perf/acc comparison) — 이후 performance로 되돌림
-- (이 커밋) fix(eval): cap retries and mark unanswered (버그 ③)
-- `0029849` qwen accuracy → performance (7/16)
-- `b2dab02` 서버 temperature 존중 → eval 무한 재시도(1차 원인) 해소
+- `9c49297` fix(eval): 정답 타임존 + 저장 파일명 sanitize (버그 ①②)
+- `09fe687` fix(eval): 재시도 캡 + unanswered 처리 (버그 ③)
+- `1200fa0` test: Llama accuracy 모드 실행 (이후 performance로 되돌림)
+- `0029849` qwen accuracy → performance / `b2dab02` 서버 temperature 존중(무한 재시도 1차 원인 해소)
 
 ### 참고 파일
 - 수정: `scripts/question_scripts/form_question_jsons.py`, `scripts/eval.py`, `tt_server/tt_infer_server.py`
-- 결과(5개): `out/0/human_qa/optimal+tt_Llama-3.{1,2}-{3B,8B}-Instruct__captions_tt-qwen25-vl-3b_3_secs_{acc,perf,perf_test}.json`
-  - 3B-acc / 3B-perf (7/17, **VLM on**), 8B-acc / 8B-perf / 8B-perf_test (7/18, **VLM off**)
-  - 라벨은 3B=3.2, 8B=3.1로 정리 완료. `perf_test`는 8B-perf 재실행(§3.6, run-to-run 분산 확인용).
+- 결과: `out/0/human_qa/jung_results/optimal+eval/llm{3b,8b}models/*_{perf,acc}[(N)].json`
+  (3B ×5 + 8B ×3). 파일명 라벨 3.1/3.2 혼재 — 실제 구분은 **크기(3B/8B)+모드(acc/perf)**, 로드 모델은
+  서버 `TT_LLM_MODEL`이 결정하므로 결과엔 무관.
 - 데이터: `data/questions/0/human_qa.json`(수정본), `human_qa.BROKEN-TZ.json`(옛 백업)
