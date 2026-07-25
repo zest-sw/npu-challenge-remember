@@ -160,7 +160,7 @@ class LlamaEngine:
                 mesh_device=submesh,
                 instruct=True,
                 max_batch_size=1,
-                optimizations= None, #lambda margs: DecodersPrecision.performance(margs.n_layers, margs.model_name),
+                optimizations=lambda margs: DecodersPrecision.performance(margs.n_layers, margs.model_name),
                 max_seq_len=self.max_seq_len,
                 paged_attention_config=paged_attention_config,
                 dtype=ttnn.bfloat8_b,
@@ -177,7 +177,10 @@ class LlamaEngine:
         )
         self.tokenizer = model_args[0].tokenizer
         self.generator = LlamaGenerator(model, model_args, self.mesh_device, tokenizer=self.tokenizer)
-        logger.info("[LLM] ready.")
+        # Record model + precision so a run can be verified via /health later
+        # (neither is otherwise exposed anywhere).
+        self.precision = getattr(getattr(model_args[0], "optimizations", None), "__name__", None)
+        logger.info(f"[LLM] ready. model={LLM_MODEL}  precision={self.precision}")
 
     def generate(self, prompt: str, max_new_tokens: int = 256, force_json: bool = False, json_schema=None,
                  temperature: float = 0.0) -> str:
@@ -462,7 +465,14 @@ def _decode_image(b64: str) -> Image.Image:
 
 @app.get("/health")
 def health():
-    return {"ready": _ready.is_set(), "llm": _engines["llm"] is not None, "vlm": _engines["vlm"] is not None}
+    llm = _engines["llm"]
+    return {
+        "ready": _ready.is_set(),
+        "llm": llm is not None,
+        "vlm": _engines["vlm"] is not None,
+        "llm_model": LLM_MODEL if llm is not None else None,
+        "llm_precision": getattr(llm, "precision", None) if llm is not None else None,
+    }
 
 
 @app.post("/v1/chat/completions")
