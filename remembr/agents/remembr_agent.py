@@ -134,6 +134,24 @@ class ReMEmbRAgent(Agent):
             llm_name = llm_type[4:]
             llm = ChatNVIDIA(model=llm_name)
 
+        # Tenstorrent NPU backend: same local unified server as NonAgent, but here
+        # the LLM is wrapped by FunctionsWrapper (prompt-based tool calling), so it
+        # just needs to return valid JSON text. Use the server's generic json_object
+        # mode (== Ollama format="json") rather than a fixed schema, because the
+        # agent node emits {"tool", "tool_input"} while generate emits the answer
+        # dict — the shape varies per call.
+        elif llm_type.startswith('tt/'):
+            from langchain_openai import ChatOpenAI  # lazy: optional dep
+            base_url = os.environ.get('TT_LLM_BASE_URL', 'http://localhost:8100/v1')
+            llm = ChatOpenAI(
+                model=llm_type[len('tt/'):],
+                base_url=base_url,
+                api_key='local',
+                temperature=temperature,
+                max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
+                model_kwargs={'response_format': {'type': 'json_object'}},
+            )
+
         # Support for Ollama functions
         elif llm_type == 'command-r':
             llm = ChatOllama(model=llm_type, temperature=temperature, num_ctx=num_ctx)
