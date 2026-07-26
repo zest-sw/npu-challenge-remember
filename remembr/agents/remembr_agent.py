@@ -81,17 +81,23 @@ def should_continue(state: AgentState):
         return "continue"
     
 
-def try_except_continue(state, func):
-    while True:
+# Cap retries per node call. The original `while True` re-ran forever when the LLM
+# couldn't produce parseable tool/answer JSON (common with small models: they truncate
+# the verbose reasoning array or emit a wrong-shaped value), hanging eval on one
+# question. After 3 tries we re-raise so the exception propagates to
+# eval.answer_squad_question, whose MAX_ATTEMPTS=5 cap + None->unanswered handling then
+# govern the question exactly as they do for the optimal+ (NonAgent) path.
+def try_except_continue(state, func, max_retries=3):
+    last_exc = None
+    for _ in range(max_retries):
         try:
-            ret = func(state)
-            return ret
+            return func(state)
         except Exception as e:
+            last_exc = e
             print("I crashed trying to run:", func)
-            print("Here is my error")
-            print(e)
             traceback.print_exception(*sys.exc_info())
             continue
+    raise last_exc
 
 class ReMEmbRAgent(Agent):
 
