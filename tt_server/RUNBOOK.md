@@ -1,8 +1,8 @@
-# ReMEmbR on Tenstorrent NPU — Runbook (from scratch)
+# ReMEmbR on Tenstorrent NPU — Runbook (처음부터)
 
-This is the procedure for bringing up VLM (captioning) = Qwen2.5-VL-3B and LLM (reasoning) = Llama-3.2-3B
-on **a single Tenstorrent board**, and running the remembr core pipeline
-(`image → caption → memory insert → question answering`) end-to-end.
+이 문서는 VLM(captioning) = Qwen2.5-VL-3B 와 LLM(reasoning) = Llama-3.2-3B 를
+**단일 Tenstorrent 보드**에서 기동하고, remembr 코어 파이프라인
+(`image → caption → memory insert → question answering`)을 end-to-end로 실행하는 절차이다.
 
 ---
 
@@ -15,16 +15,16 @@ on **a single Tenstorrent board**, and running the remembr core pipeline
                                                                  single worker + queue serializes all NPU execution
 ```
 
-- **Two venvs** are used. The server runs in tt-metal's `python_env` (ttnn/transformers); remembr runs in
-  its own dedicated venv (langchain/pymilvus). Their versions conflict, so they are separated over HTTP.
-- The NPU only runs one graph at a time → captioning and the LLM are automatically serialized by the queue
-  (concurrent requests are safe).
+- **venv 두 개**를 사용한다. 서버는 tt-metal의 `python_env`(ttnn/transformers)에서 돌고, remembr는
+  자체 전용 venv(langchain/pymilvus)에서 돈다. 버전이 충돌하므로 HTTP로 분리한다.
+- NPU는 한 번에 그래프 하나만 실행 → captioning과 LLM이 queue에 의해 자동으로 직렬화된다
+  (동시 요청도 안전하다).
 
 ---
 
 ## 1. First-time setup (once)
 
-### 1-0. ⚠️ Check tt-metal is **NOT a profiler build** (critical for performance)
+### 1-0. ⚠️ tt-metal이 **profiler 빌드가 아닌지** 확인 (성능에 치명적)
 
 ```bash
 readlink /home/user/tt-metal/build          # must be build_Release (build_Release_tracy ✗)
@@ -32,12 +32,12 @@ grep ENABLE_TRACY /home/user/tt-metal/build/CMakeCache.txt   # must be ENABLE_TR
 nm -D --defined-only /home/user/tt-metal/ttnn/ttnn/_ttnn.so | grep -ci tracy   # must be 0
 ```
 
-If `ENABLE_TRACY=ON` (i.e. built with `build_metal.sh -p/--enable-profiler`), **inference gets slower with every request.**
-When Tracy is compiled without `TRACY_ON_DEMAND`, it **keeps accumulating every zone in memory** regardless of whether a
-Tracy UI is connected, and `decode_forward` calls `ReadDeviceProfiler` on every decoded token (~256 times per caption).
-Measured (same image, 12 times): **RSS +33MB per request, latency growing linearly from 55.8 → 67.8 s**. 272 captions
-would stretch from ~2.9h to ~13h.
-**It is a compile-time switch, so it cannot be turned off via env.** If you have a profiler build, rebuild with the defaults:
+`ENABLE_TRACY=ON`이면(즉 `build_metal.sh -p/--enable-profiler`로 빌드한 경우), **요청을 거듭할수록 추론이 느려진다.**
+Tracy가 `TRACY_ON_DEMAND` 없이 컴파일되면, Tracy UI 연결 여부와 무관하게 **모든 zone을 메모리에 계속 누적**하며,
+`decode_forward`는 디코딩되는 토큰마다(캡션당 ~256회) `ReadDeviceProfiler`를 호출한다.
+측정 결과(같은 이미지, 12회): **요청당 RSS +33MB, latency가 55.8 → 67.8 s로 선형 증가**. 캡션 272개면
+~2.9h에서 ~13h로 늘어난다.
+**컴파일 타임 스위치라서 env로는 끌 수 없다.** profiler 빌드라면 기본값으로 재빌드하라:
 
 ```bash
 cd /home/user/tt-metal && source env_set.sh
@@ -46,13 +46,13 @@ cd /home/user/tt-metal && source env_set.sh
 #     The existing build_Release_tracy is left intact, so rolling back is one line:
 #     ln -nsf build_Release_tracy build
 ```
-The server must be restarted after the rebuild for it to take effect. To verify: caption the same image several times —
-**if latency stays flat and server RSS does not grow**, you are fine (with a Tracy build, both increase monotonically).
+재빌드 후에는 서버를 재시작해야 반영된다. 확인 방법: 같은 이미지를 여러 번 caption 해보라 —
+**latency가 평평하게 유지되고 서버 RSS가 늘지 않으면** 정상이다(Tracy 빌드에서는 둘 다 단조 증가한다).
 
 ### 1-1. HF token (gated model)
-`meta-llama/Llama-3.2-3B-Instruct` is gated. The token must be present in `~/.bashrc` in the form
-`export HF_TOKEN=...`. `run_server.sh` reads that line directly, even in a non-interactive shell.
-(Qwen2.5-VL-3B is open, so no token is needed.)
+`meta-llama/Llama-3.2-3B-Instruct`는 gated 모델이다. 토큰이 `~/.bashrc`에
+`export HF_TOKEN=...` 형태로 있어야 한다. `run_server.sh`는 비대화형 셸에서도 그 줄을 직접 읽는다.
+(Qwen2.5-VL-3B는 open 모델이라 토큰이 필요 없다.)
 
 ### 1-2. Milvus (memory DB)
 ```bash
@@ -60,9 +60,9 @@ The server must be restarted after the rebuild for it to take effect. To verify:
 bash /home/user/remembr/launch_milvus_container.sh start   # path is relative to the repo
 docker ps | grep milvus                                    # confirm it is up
 ```
-On the first run, the embedding model `mxbai-embed-large-v1` is downloaded automatically.
+최초 실행 시 임베딩 모델 `mxbai-embed-large-v1`이 자동으로 다운로드된다.
 
-### 1-3. Create the remembr-only venv
+### 1-3. remembr 전용 venv 생성
 ```bash
 python3 -m venv ~/remembr_venv
 source ~/remembr_venv/bin/activate
@@ -75,28 +75,28 @@ pip install "langchain-core==0.2.40" "langchain-community==0.2.16" \
             "numpy<2" "opencv-python-headless<5" \
             pillow requests pymilvus "sentence-transformers==3.1.0"
 ```
-> **Mind the `opencv`/`numpy` version pins.** `opencv-python-headless` is required for CODa preprocessing
-> (`preprocess_coda_rosfree.py`, `cv2.imread`). A plain `pip install
-> opencv-python-headless` pulls in opencv 5.x, which **drags in numpy 2.x** and breaks langchain 0.2.16 /
-> sentence-transformers 3.1.0 (both require numpy<2). You must pin `numpy<2` +
-> `opencv-python-headless<5` (4.x). (Use the GUI-less `-headless` build.)
-> **Mind the `langgraph`/`langsmith` version pins.** `langgraph` is a core dependency of
-> `ReMEmbRAgent` (the RAG agent) that `eval.py` imports. A plain `pip install langgraph` pulls in
-> the latest langgraph, which **bumps langchain-core to 0.3.x and breaks every 0.2.x pin above.**
-> You must pin `langgraph==0.2.40` + `langsmith==0.1.147`, which are compatible with core 0.2.40.
+> **`opencv`/`numpy` 버전 핀에 주의하라.** `opencv-python-headless`는 CODa 전처리
+> (`preprocess_coda_rosfree.py`, `cv2.imread`)에 필요하다. 그냥 `pip install
+> opencv-python-headless`를 하면 opencv 5.x가 딸려오고, 이것이 **numpy 2.x를 끌어와** langchain 0.2.16 /
+> sentence-transformers 3.1.0을 깨뜨린다(둘 다 numpy<2 요구). 반드시 `numpy<2` +
+> `opencv-python-headless<5`(4.x)로 핀해야 한다. (GUI 없는 `-headless` 빌드를 써라.)
+> **`langgraph`/`langsmith` 버전 핀에 주의하라.** `langgraph`는 `eval.py`가 import하는
+> `ReMEmbRAgent`(RAG agent)의 핵심 의존성이다. 그냥 `pip install langgraph`를 하면
+> 최신 langgraph가 딸려오고, 이것이 **langchain-core를 0.3.x로 올려 위의 모든 0.2.x 핀을 깨뜨린다.**
+> 반드시 core 0.2.40과 호환되는 `langgraph==0.2.40` + `langsmith==0.1.147`로 핀해야 한다.
 >
-> **Do not install the NVIDIA NIM backend (`langchain_nvidia_ai_endpoints`).** This NPU
-> setup only uses the local NPU, so it is unnecessary; the code lazy-imports it only on the `nim/` path.
-> If pip dies with `AssertionError: len(weights) == expected_node_count`, that is the old pip
-> resolver bug. Doing `pip install --upgrade pip` first, as above, fixes it. If it still fails,
-> add the `--use-deprecated=legacy-resolver` flag or install the packages in smaller batches.
+> **NVIDIA NIM 백엔드(`langchain_nvidia_ai_endpoints`)는 설치하지 마라.** 이 NPU
+> 구성은 로컬 NPU만 사용하므로 불필요하다; 코드는 `nim/` 경로에서만 lazy-import 한다.
+> pip가 `AssertionError: len(weights) == expected_node_count`로 죽으면, 그것이 옛 pip
+> resolver 버그다. 위처럼 `pip install --upgrade pip`를 먼저 하면 해결된다. 그래도 실패하면
+> `--use-deprecated=legacy-resolver` 플래그를 추가하거나 패키지를 더 작은 배치로 나눠 설치하라.
 
-### 1-4. Extra server-side dependencies (once, into the tt-metal python_env)
+### 1-4. 서버 측 추가 의존성 (한 번, tt-metal python_env에)
 ```bash
 source /home/user/tt-metal/env_set.sh          # activate python_env
 pip install fastapi "uvicorn[standard]" lm-format-enforcer
 ```
-`lm-format-enforcer` is required for JSON-constrained decoding (the replacement for Ollama's `format="json"`).
+`lm-format-enforcer`는 JSON 제약 디코딩(Ollama의 `format="json"` 대체)에 필요하다.
 
 ---
 
@@ -108,32 +108,32 @@ TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
   bash /home/user/remembr/tt_server/run_server.sh
 ```
 
-- **`TT_LLM_MAX_SEQ_LEN=2048` is mandatory.** NonAgent prompts are padded up to 2048, so with the
-  default (1024) you get the error `Padded prefill end idx 2048 exceeds max seq len`.
-- 1024 is enough for the VLM (images are resized to 224×224 on the server).
-- Loading both models + building the weight cache takes **several minutes**. It is ready when this log line appears:
+- **`TT_LLM_MAX_SEQ_LEN=2048`은 필수다.** NonAgent 프롬프트는 2048까지 패딩되므로, 기본값
+  (1024)이면 `Padded prefill end idx 2048 exceeds max seq len` 에러가 난다.
+- VLM에는 1024로 충분하다(이미지는 서버에서 224×224로 리사이즈된다).
+- 두 모델 로딩 + weight cache 빌드에 **몇 분**이 걸린다. 이 로그 줄이 나오면 준비 완료다:
   ```
   INFO:     Application startup complete.
   ```
 
-### Checking readiness (from another terminal)
+### 준비 여부 확인 (다른 터미널에서)
 ```bash
 curl -s http://localhost:8100/health
 # -> {"ready":true,"llm":true,"vlm":true}
 ```
 
-### Standalone sanity check (optional)
+### 단독 sanity check (선택)
 ```bash
 # LLM
 curl -s http://localhost:8100/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Reply with JSON {\"ok\":true}"}]}'
 ```
 
-### API documentation
-- **Swagger UI: <http://localhost:8100/docs>** (also `/redoc`, `/openapi.json`)
-  — but the handlers take a raw `dict`, so **the auto-generated schema does not show the fields**.
-- **For request/response fields and examples, see [the HTTP API section of the README](README.md#http-api)**
-  (`/health`, `/caption`, and `/v1/chat/completions` are all documented there).
+### API 문서
+- **Swagger UI: <http://localhost:8100/docs>** (`/redoc`, `/openapi.json`도 있음)
+  — 다만 핸들러가 raw `dict`를 받으므로 **자동 생성된 스키마에는 필드가 표시되지 않는다**.
+- **request/response 필드와 예시는 [README의 HTTP API 섹션](README.md#http-api)을 참고하라**
+  (`/health`, `/caption`, `/v1/chat/completions` 모두 거기에 문서화되어 있다).
 
 ---
 
@@ -146,14 +146,14 @@ export OPENAI_API_KEY=local
 PYTHONPATH=$(pwd) python examples/tt_smoke_test.py <image_path_1> <image_path_2> ...
 ```
 
-Example image paths (using the demo images in the repo):
+예시 이미지 경로 (repo의 데모 이미지 사용):
 ```bash
 PYTHONPATH=$(pwd) python examples/tt_smoke_test.py \
   /home/user/tt-metal/models/bos_model/qwen25_vl/demo/images/*.jpg
 ```
-Run it with no arguments and it checks the path only, using synthetic (solid-color) frames.
+인자 없이 실행하면 합성(단색) 프레임으로 경로만 점검한다.
 
-Expected output:
+기대 출력:
 ```
 [1/4] Captioning ... on the NPU (Qwen2.5-VL)...
       caption: <the actual caption>
@@ -168,22 +168,22 @@ OK: end-to-end path completed.
 
 ## 4. Shutdown
 
-**Press `Ctrl-C` once in the server console and wait.** (Or `kill -TERM <pid>` / `pkill -f tt_infer_server.py` = SIGTERM.)
-The server signals the worker to stop and exits **after closing the device cleanly with `close_mesh_device()`**.
-It came down safely if these log lines appear:
+**서버 콘솔에서 `Ctrl-C`를 한 번만 누르고 기다려라.** (또는 `kill -TERM <pid>` / `pkill -f tt_infer_server.py` = SIGTERM.)
+서버는 worker에게 정지 신호를 보내고 **`close_mesh_device()`로 device를 깨끗이 닫은 뒤** 종료한다.
+이 로그 줄들이 나오면 안전하게 내려간 것이다:
 ```
 Shutting down: releasing the NPU cleanly ...
 NPU released cleanly. Safe to exit.
 ```
-During device teardown (which waits for any in-flight op to finish, up to 180 s), **further Ctrl-C presses are ignored**.
+device teardown 동안(진행 중인 op가 끝나기를 최대 180 s 대기), **추가 Ctrl-C 입력은 무시된다**.
 
-> ⚠️ **Do not spam `Ctrl-C` / do not use `-9` (SIGKILL).**
-> Previously the shutdown code that closed the device lived in the **daemon worker's finally block**, so it did not
-> run at interpreter exit, and **spamming Ctrl-C → aborted teardown → wedged board**. The shutdown path has since
-> been fixed to join the worker and ignore SIGINT/SIGTERM during that window, so spamming is now safe.
-> But **`-9` (SIGKILL) alone is killed outright by the kernel and skips this cleanup** → the device is left active
-> and the board is wedged. Never use `-9` (last resort only for a truly stuck process that will not die — expect a
-> board reset afterwards).
+> ⚠️ **`Ctrl-C`를 연타하지 마라 / `-9`(SIGKILL)를 쓰지 마라.**
+> 예전에는 device를 닫는 shutdown 코드가 **daemon worker의 finally 블록**에 있어서 인터프리터 종료 시
+> 실행되지 않았고, **Ctrl-C 연타 → teardown 중단 → 보드 wedged**로 이어졌다. 이후 shutdown 경로는
+> worker를 join하고 그 구간 동안 SIGINT/SIGTERM을 무시하도록 수정되어, 이제 연타는 안전하다.
+> 하지만 **`-9`(SIGKILL) 단독은 커널이 곧바로 죽여버려 이 cleanup을 건너뛴다** → device가 활성 상태로
+> 남고 보드가 wedged 된다. 절대 `-9`를 쓰지 마라(정말 죽지 않는 프로세스에 대한 최후의 수단으로만 —
+> 그 뒤에는 board reset을 각오하라).
 
 ```bash
 lsof -i :8100                        # no output means it is fully down
@@ -196,14 +196,14 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 
 | Symptom | Cause / fix |
 |------|------------|
-| **Captions get slower over time / server RSS keeps growing** | Two causes. ① tt-metal's **Inspector** (ON by default) flushes YAML per workload → `run_server.sh` disables it with `TT_METAL_INSPECTOR=0` (already applied). ② A **Tracy profiler build** → see 1-0, you must rebuild with the default build (it cannot be turned off via env). Gauge: suspect this if `32 x Qwen2_5_VLVisionBlock ... it/s` in the server log drops. |
-| **The first caption is very slow (several minutes), client times out** | On a fresh server, the **first request compiles the ttnn traces (prefill/decode) for the first time** — a one-time cost. It is not a deadlock (the server CPU keeps spinning). Once it finishes, subsequent requests are much faster. The client timeout defaults to 900 s and is tunable via `TT_VLM_TIMEOUT` (seconds). |
-| `address already in use (8100)` | The server is already up. No need to start another one. To bring it down, see section 4. |
-| `Padded prefill end idx 2048 exceeds max seq len` | Restart the server with `TT_LLM_MAX_SEQ_LEN=2048`. |
-| LLM emits code fences / broken JSON, NonAgent retries in an infinite loop | JSON-constrained decoding is not in effect. Check that `lm-format-enforcer` is installed (1-4). |
-| HF 403 / gated error | Check `HF_TOKEN` in `~/.bashrc`. `run_server.sh` reads it from there. |
-| OOM | This board only exposes ~12GB of DRAM (3 banks). 3B+3B co-fits, but an 8B LLM does not → use the time-sharing fallback (caption with `TT_ENABLE_VLM=1 TT_ENABLE_LLM=0` → then swap) or a smaller model. |
-| pip `AssertionError ... expected_node_count` | Old pip resolver bug. Run `pip install --upgrade pip` and reinstall (1-3). |
+| **Captions get slower over time / server RSS keeps growing** | 원인 두 가지. ① tt-metal의 **Inspector**(기본 ON)가 워크로드마다 YAML을 flush → `run_server.sh`가 `TT_METAL_INSPECTOR=0`으로 비활성화한다(이미 적용됨). ② **Tracy profiler 빌드** → 1-0 참고, 기본 빌드로 재빌드해야 한다(env로는 끌 수 없다). 판단 기준: 서버 로그의 `32 x Qwen2_5_VLVisionBlock ... it/s`가 떨어지면 의심하라. |
+| **The first caption is very slow (several minutes), client times out** | 새로 띄운 서버에서는 **첫 요청이 ttnn 트레이스(prefill/decode)를 처음으로 컴파일**한다 — 일회성 비용이다. 데드락이 아니다(서버 CPU는 계속 돌고 있다). 끝나면 이후 요청은 훨씬 빠르다. 클라이언트 타임아웃 기본값은 900 s이며 `TT_VLM_TIMEOUT`(초)로 조정 가능하다. |
+| `address already in use (8100)` | 서버가 이미 떠 있다. 새로 띄울 필요 없다. 내리려면 4장 참고. |
+| `Padded prefill end idx 2048 exceeds max seq len` | `TT_LLM_MAX_SEQ_LEN=2048`로 서버를 재시작하라. |
+| LLM emits code fences / broken JSON, NonAgent retries in an infinite loop | JSON 제약 디코딩이 적용되지 않은 것이다. `lm-format-enforcer`가 설치되었는지 확인하라(1-4). |
+| HF 403 / gated error | `~/.bashrc`의 `HF_TOKEN`을 확인하라. `run_server.sh`가 거기서 읽는다. |
+| OOM | 이 보드는 DRAM을 ~12GB(3 banks)만 노출한다. 3B+3B는 함께 올라가지만 8B LLM은 안 된다 → 타임셰어링 fallback(`TT_ENABLE_VLM=1 TT_ENABLE_LLM=0`으로 caption → 이후 교체)이나 더 작은 모델을 써라. |
+| pip `AssertionError ... expected_node_count` | 옛 pip resolver 버그. `pip install --upgrade pip` 후 재설치하라(1-3). |
 
 ---
 
@@ -215,9 +215,9 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 |-----|--------|------|
 | `TT_LLM_MODEL` | `meta-llama/Llama-3.2-3B-Instruct` | LLM |
 | `TT_VLM_MODEL` | `Qwen/Qwen2.5-VL-3B-Instruct` | VLM |
-| `TT_LLM_MAX_SEQ_LEN` | `1024` (→ **run with 2048**) | NonAgent needs 2048 |
+| `TT_LLM_MAX_SEQ_LEN` | `1024` (→ **2048로 실행**) | NonAgent needs 2048 |
 | `TT_VLM_MAX_SEQ_LEN` | `1024` | captioning |
-| `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | load only one when falling back |
+| `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | fallback 시 하나만 로드 |
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
 | `TT_PORT` | `8100` | |
 
@@ -229,3 +229,4 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 | `TT_VLM_URL` | `http://localhost:8100/caption` | Captioner → server |
 | `TT_VLM_TIMEOUT` | `900` | caption client timeout (seconds) |
 | `TT_LLM_MAX_TOKENS` | `256` | max tokens the LLM generates |
+

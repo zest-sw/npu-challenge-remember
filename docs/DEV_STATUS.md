@@ -1,18 +1,18 @@
 # Development Status (DEV STATUS)
 
-> **What this document is for**: the **living tracking document** for the ReMEmbR × NPU porting project.
-> The single source of truth for "where we are, what's been verified, what's left, and why we decided things this way."
-> Update the **① status board** and **⑥ changelog** below every time you work on this.
-> For detailed procedures and design, see the individual documents in the [document map](#7-document-map).
+> **이 문서의 목적**: ReMEmbR × NPU 포팅 프로젝트의 **살아있는 추적 문서**.
+> "현재 어디까지 왔는지, 무엇이 검증되었는지, 무엇이 남았는지, 왜 이렇게 결정했는지"에 대한 단일 진실 공급원.
+> 작업할 때마다 아래 **① 상태 보드**와 **⑥ 변경 이력**을 갱신할 것.
+> 상세 절차와 설계는 [문서 맵](#7-document-map)의 개별 문서를 참고.
 
-_Last updated: 2026-07-15 · branch `feat/tenstorrent-npu-backend`_
+_최종 수정: 2026-07-21 · branch `main`_
 
 ---
 
 ## 1. Status board (at a glance)
 
-**Goal**: run the ReMEmbR pipeline (captioning → vector memory → QA) end-to-end on the **BOS NPU** with 3B models
-(Qwen2.5-VL captioner + Llama-3.2-3B LLM), and evaluate it on the paper's NaVQA/CODa.
+**목표**: ReMEmbR 파이프라인(captioning → vector memory → QA)을 3B 모델
+(Qwen2.5-VL captioner + Llama-3.2-3B LLM)로 **BOS NPU** 위에서 end-to-end로 구동하고, 논문의 NaVQA/CODa로 평가한다.
 
 | Milestone | Status |
 |---|---|
@@ -22,14 +22,14 @@ _Last updated: 2026-07-15 · branch `feat/tenstorrent-npu-backend`_
 | end-to-end smoke test | ✅ Done |
 | Original paper data acquired (data.csv + CODa seq0) | ✅ Done |
 | ROS-free CODa→.pkl extraction | ✅ Done (8213 frames) |
-| Captioning pipeline (checkpoint/resume) | ✅ Done (resume verified on a full run) |
+| Captioning pipeline (checkpoint/resume) | ✅ Done (전체 실행에서 resume 검증됨) |
 | Server stabilization (clean shutdown) | ✅ Done |
-| Slowdown fix ① Inspector | ✅ Done (`TT_METAL_INSPECTOR=0`) — eliminated the 19→2.1 it/s decay |
-| Slowdown fix ② Tracy build | ✅ Done — swapped in the default build (`ENABLE_TRACY=OFF`, Tracy symbols 705→0). Measured: RSS +33MB/request → **+0~1MB**, latency +1.0s/request → **flat 36s** |
-| **Question JSON generation** (form_question_jsons) | ⚠️ 30 questions generated — **must be regenerated** after the captions are rebuilt (the optimal context is extracted from the captions) |
-| Server temperature support | ✅ Done (`b2dab02`) — resolved eval's infinite retry loop. Measured: temp=0 identical / 0.7 differs every time |
-| **Caption regeneration** (quality consistency) | 🔄 **109/272** — resumed after the Tracy rebuild, **flat 36s/caption** (zero leak) |
-| **Evaluation run** (eval.py, optimal+tt/) | ⬜ After caption regeneration |
+| Slowdown fix ① Inspector | ✅ Done (`TT_METAL_INSPECTOR=0`) — 19→2.1 it/s 감쇠 제거 |
+| Slowdown fix ② Tracy build | ✅ Done — 기본 빌드로 교체(`ENABLE_TRACY=OFF`, Tracy symbols 705→0). 측정: RSS +33MB/request → **+0~1MB**, latency +1.0s/request → **flat 36s** |
+| **Question JSON generation** (form_question_jsons) | ⚠️ 30 questions 생성됨 — captions 재생성 후 **반드시 재생성해야 함**(optimal context가 captions에서 추출되므로) |
+| Server temperature support | ✅ Done (`b2dab02`) — eval의 무한 retry 루프 해결. 측정: temp=0 동일 / 0.7 매번 다름 |
+| **Caption regeneration** (quality consistency) | 🔄 **109/272** — Tracy 재빌드 후 재개, **flat 36s/caption**(누수 없음) |
+| **Evaluation run** (eval.py, optimal+tt/) | ⬜ caption 재생성 이후 |
 | Multi-frame captions (paper fidelity) | ⬜ Optional |
 
 ### Measured hardware specs (`tt_server/npu_info.py`)
@@ -38,109 +38,109 @@ _Last updated: 2026-07-15 · branch `feat/tenstorrent-npu-backend`_
 |---|---|
 | arch / devices | `BLACKHOLE` / 1 device (`/dev/bos/0`, module `bos` 2.3.0) |
 | **DRAM** | **12 GiB** = 4 GiB × **3 banks** (`dram_grid_size (3,1)`) |
-| Tensix compute grid | **5×4 = 20 cores** (harvesting mask `0x0` = all cores healthy) |
+| Tensix compute grid | **5×4 = 20 cores** (harvesting mask `0x0` = 모든 코어 정상) |
 | L1 / worker core | 1.5 MB (eth cores 512 KB) |
 | PCIe | `0000:01:00.0` Co-processor (Synopsys DWC) |
 
-> The **12 GiB** figure is the basis for "3B+3B can be co-resident, 8B can't." Using 8B during evaluation
-> would require loading a single model per stage (`TT_ENABLE_VLM=0`).
+> **12 GiB**라는 수치가 "3B+3B는 공존 가능, 8B는 불가"의 근거다. 평가 시 8B를 쓰려면
+> 단계별로 모델을 하나씩만 로드해야 한다(`TT_ENABLE_VLM=0`).
 
 ---
 
 ## 2. What works today (verified)
 
-- **NPU server**: Llama-3.2-3B + Qwen2.5-VL-3B co-resident, single worker + queue serialization, `/health` `/caption` `/v1/chat/completions`.
-- **JSON-constrained decoding**: NonAgent gets JSON responses that parse 100% of the time, no retry loop (~10–12s/query).
-- **Captioning**: single CODa frame → proper caption (no refusals), stable across 3 consecutive requests.
+- **NPU server**: Llama-3.2-3B + Qwen2.5-VL-3B 공존, 단일 worker + queue 직렬화, `/health` `/caption` `/v1/chat/completions`.
+- **JSON-constrained decoding**: NonAgent이 100% 파싱되는 JSON 응답을 받음, retry 루프 없음(~10–12s/query).
+- **Captioning**: 단일 CODa frame → 정상 caption(거부 없음), 연속 3 요청에서 안정적.
 - **Data**: `data.csv` (210 questions) + 8213 CODa seq0 `.pkl` files (`/home/user/coda_raw/coda_data/0/`).
-- **Board recovery**: cleaning up zombie processes from a wedged state → restart recovered it successfully (without a reboot).
+- **Board recovery**: wedged 상태의 좀비 프로세스 정리 → 재시작으로 복구 성공(리부팅 없이).
 
 ## 3. In progress / next steps
 
-1. 🔄 **Waiting for caption regeneration to finish** — everything unified at 256 tokens (~2.9h). On completion it writes the final JSON and auto-deletes the partial.
-2. **Regenerate the question JSONs** — the captions changed, so `form_question_jsons.py` has to be re-run to refresh the optimal context.
-3. **Run the evaluation** — `eval.py --model optimal+tt/Llama-3.2-3B-Instruct --sequence_id 0 ...` (temperature defaults to 0.7).
-4. (Optional) Improve paper fidelity with **multi-frame captions** — procedure in [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 4-1.
+1. 🔄 **caption 재생성 완료 대기** — 모두 256 tokens로 통일(~2.9h). 완료 시 최종 JSON을 쓰고 partial을 자동 삭제.
+2. **question JSON 재생성** — captions가 바뀌었으므로 optimal context를 갱신하려면 `form_question_jsons.py`를 다시 돌려야 함.
+3. **평가 실행** — `eval.py --model optimal+tt/Llama-3.2-3B-Instruct --sequence_id 0 ...` (temperature 기본값 0.7).
+4. (Optional) **multi-frame captions**로 논문 fidelity 개선 — 절차는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 4-1.
 
 ## 4. Known issues / gotchas
 
 | Issue | Status / response |
 |---|---|
-| **Server slowdown** (two causes) | **① tt-metal Inspector** (debug, ON by default): a YAML `flush()` per workload → ~5,000 synchronous I/O calls per caption, accumulating 153MB / 5.34M lines → 19→2.1 it/s. Fixed with `TT_METAL_INSPECTOR=0` ([8be8bc6]).<br>**② Tracy profiling build**: surfaced once Inspector was off (84→50 it/s). Over 12 runs of the same image, **RSS +33MB/request and latency +1.0s/request, growing linearly**. `build -> build_Release_tracy` (`ENABLE_TRACY=ON`), so Tracy kept accumulating zones. **It's a compile-time switch, so env vars can't turn it off** → ✅ swapped in the default build (`./build_metal.sh`, TRACY OFF) ([458bf09], symbols 705→0). Measured: **flat 36s, RSS +0MB**. Rollback: `ln -nsf build_Release_tracy build`. |
-| **Caption sentences truncated** | Truncated at the server's default max_gen_len=128. Fixed by making the captioner send 256 ([8caa7c9]). Takes effect after a restart. |
-| **Board wedged** | Cause = force-killing during captioning/compilation (especially mashing Ctrl-C). Added shutdown cleanup logic ([f9bc7bf]). **Never use `-9`.** Recovery is [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) section 6. |
-| **Reboot constraint** | This PC only detects the NPU if the NPU is powered on before boot. When wedged, try process cleanup + restart before rebooting. |
-| **Device node = `/dev/bos/0`** | Not Tenstorrent (there's no `/dev/tenstorrent`). Check with `fuser -v /dev/bos/0`, `lsmod \| grep bos`. |
-| ~~**eval infinite retry**~~ | ✅ **Fixed** ([b2dab02]). Cause = the server ignored temperature and ran greedy → eval's retries produced the same answer every time. Fixed so the server honors OpenAI's `temperature` (0 keeps greedy, >0 samples from the grammar-allowed tokens). The original trigger — "3B answers `time=None` for time questions" — is still there, but retries now make progress. |
-| **3B quality** | JSON validity is guaranteed, but grounding hits 3B's limits — there are cases where it can't fill the field matching the question type (absorbed by retries). **See design decision 5 for why we're not moving up to 8B** (co-residency is required for robot deployment). |
-| ~~**Mixed caption quality**~~ | 🔄 Being resolved by the regeneration in progress. (The old mixed set is kept as `*.MIXED-BACKUP.json`) |
-| **Fidelity deviations** | Captioner VILA→Qwen, LLM 8B→3B (unavoidable for the port), frames 6→1 (a compromise). See the fidelity table in [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md). |
-| **venv dependency trap** | If a new package pulls `langchain-core` up to 0.3 or `numpy` to 2.x, the stack breaks. Respect the pins ([RUNBOOK](../tt_server/RUNBOOK.md) 1-3). |
+| **Server slowdown** (두 가지 원인) | **① tt-metal Inspector** (debug, 기본 ON): workload마다 YAML `flush()` → caption당 ~5,000 synchronous I/O 호출, 실행당 153MB / 5.34M lines 누적 → 19→2.1 it/s. `TT_METAL_INSPECTOR=0`로 해결([8be8bc6]).<br>**② Tracy profiling build**: Inspector를 끈 뒤 드러남(84→50 it/s). 같은 이미지 12회 실행 동안 **RSS +33MB/request, latency +1.0s/request, 선형 증가**. `build -> build_Release_tracy` (`ENABLE_TRACY=ON`)라서 Tracy가 zone을 계속 누적. **compile-time switch라 env var로 끌 수 없음** → ✅ 기본 빌드로 교체(`./build_metal.sh`, TRACY OFF) ([458bf09], symbols 705→0). 측정: **flat 36s, RSS +0MB**. Rollback: `ln -nsf build_Release_tracy build`. |
+| **Caption sentences truncated** | 서버 기본 max_gen_len=128에서 잘림. captioner가 256을 보내도록 해서 해결([8caa7c9]). 재시작 후 적용됨. |
+| **Board wedged** | 원인 = captioning/compilation 중 강제 종료(특히 Ctrl-C 연타). shutdown cleanup 로직 추가([f9bc7bf]). **`-9`는 절대 쓰지 말 것.** 복구는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 6장. |
+| **Reboot constraint** | 이 PC는 부팅 전에 NPU가 켜져 있어야만 NPU를 인식함. wedged 상태에서는 리부팅 전에 프로세스 정리 + 재시작을 먼저 시도할 것. |
+| **Device node = `/dev/bos/0`** | Tenstorrent이 아님(`/dev/tenstorrent`가 없음). `fuser -v /dev/bos/0`, `lsmod \| grep bos`로 확인. |
+| ~~**eval infinite retry**~~ | ✅ **Fixed** ([b2dab02]). 원인 = 서버가 temperature를 무시하고 greedy로 돌아서 → eval의 retry가 매번 같은 답을 냄. 서버가 OpenAI의 `temperature`를 존중하도록 수정(0은 greedy 유지, >0은 grammar 허용 token에서 sampling). 최초 트리거였던 "3B가 time 질문에 `time=None`으로 답함"은 여전하지만, 이제 retry가 진전됨. |
+| **3B quality** | JSON validity는 보장되지만 grounding은 3B의 한계에 부딪힘 — 질문 유형에 맞는 필드를 채우지 못하는 경우가 있음(retry로 흡수됨). **왜 8B로 올리지 않는지는 design decision 5 참고**(로봇 배치에는 공존이 필요함). |
+| ~~**Mixed caption quality**~~ | 🔄 진행 중인 재생성으로 해소 중. (기존 mixed set은 `*.MIXED-BACKUP.json`으로 보관) |
+| **Fidelity deviations** | Captioner VILA→Qwen, LLM 8B→3B(포팅상 불가피), frames 6→1(타협). fidelity 표는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 참고. |
+| **venv dependency trap** | 새 패키지가 `langchain-core`를 0.3으로 또는 `numpy`를 2.x로 끌어올리면 스택이 깨짐. pin을 지킬 것 ([RUNBOOK](../tt_server/RUNBOOK.md) 1-3). |
 
 ## 5. Key design decisions (why we did it this way)
 
-- **Split the two venvs behind HTTP** — avoids version conflicts between ttnn/transformers (server) and langchain/pymilvus (remembr).
-- **Adopted NonAgent** (not ReMEmbRAgent) — tool-calling is unreliable at 3B. A single JSON call suits the NPU.
-- **Keeping the LLM at 3B (not going to 8B)** — if you only look at evaluation, the VLM isn't needed at eval time, so you
-  could load 8B on its own with `TT_ENABLE_VLM=0` and get better quality (8B only fits in 12GiB of DRAM by itself). **But the end
-  goal is robot deployment**, and while driving, caption generation and QA happen together, so **both models must be co-resident.**
-  8B+VLM does not fit in 12GiB → **3B+3B is the only deployable configuration.** Time-separated loading is
-  an eval-only optimization that can't be used in real deployment, so **we evaluate with the same 3B configuration we deploy** (keeping the evaluation representative).
-- **The server honors temperature** — the original eval runs its retry loop on the premise that retrying at
-  `temperature=0.7` (the default) yields a different answer. If the server is hard-wired to greedy, that contract breaks and the loop
-  never ends. Instead of patching the eval code, we made **the server keep the contract** (temperature=0 stays greedy as before).
-- **JSON-constrained decoding** — replaces Ollama's `format="json"`. Prevents 3B's infinite retries and nonsense output.
-- **Captioner = HTTP client** — the VLM is not loaded directly into the remembr process (dependency / device-ownership conflicts).
-- **Removed `<video>`, video→image prompt** — a VILA leftover. It triggered refusals on Qwen with still frames.
-- **ROS-free extractor** — the ROS dependency in the original `preprocess_coda.py` is only for visualization. Plain-text pose + PNGs alone produce the same .pkl.
-- **Checkpointing (JSONL append)** — long captioning runs (~70–95 min) resume without loss if interrupted.
-- **Clean shutdown + ignore signals during teardown** — fixes device close being skipped because the worker was a daemon, and prevents wedging from mashed Ctrl-C.
+- **두 venv를 HTTP 뒤로 분리** — ttnn/transformers(server)와 langchain/pymilvus(remembr) 사이의 버전 충돌을 피함.
+- **NonAgent 채택** (ReMEmbRAgent 대신) — 3B에서 tool-calling은 불안정. 단일 JSON 호출이 NPU에 적합.
+- **LLM을 3B로 유지(8B로 안 감)** — 평가만 보면 eval 시점에는 VLM이 필요 없으므로
+  `TT_ENABLE_VLM=0`으로 8B만 로드해 더 나은 품질을 얻을 수 있음(8B는 12GiB DRAM에 단독으로만 들어감). **하지만 최종
+  목표는 로봇 배치**이고, 주행 중에는 caption 생성과 QA가 동시에 일어나므로 **두 모델이 반드시 공존해야 함.**
+  8B+VLM은 12GiB에 들어가지 않음 → **3B+3B가 유일하게 배치 가능한 구성.** 시간 분리 로딩은
+  실제 배치에서 쓸 수 없는 eval 전용 최적화라, **배치와 동일한 3B 구성으로 평가함**(평가의 대표성 유지).
+- **서버가 temperature를 존중** — 원본 eval은 `temperature=0.7`(기본)으로 retry하면 다른 답이 나온다는
+  전제로 retry 루프를 돌림. 서버가 greedy로 하드코딩되어 있으면 그 계약이 깨지고 루프가
+  끝나지 않음. eval 코드를 패치하는 대신 **서버가 계약을 지키도록** 함(temperature=0은 기존처럼 greedy 유지).
+- **JSON-constrained decoding** — Ollama의 `format="json"`을 대체. 3B의 무한 retry와 헛소리 출력을 방지.
+- **Captioner = HTTP client** — VLM을 remembr 프로세스에 직접 로드하지 않음(dependency / device-ownership 충돌).
+- **`<video>` 제거, video→image 프롬프트** — VILA 잔재. still frame에서 Qwen의 거부를 유발함.
+- **ROS-free extractor** — 원본 `preprocess_coda.py`의 ROS 의존성은 시각화용일 뿐. 텍스트 pose + PNG만으로 동일한 .pkl 생성.
+- **Checkpointing (JSONL append)** — 긴 captioning 실행(~70–95 min)이 중단돼도 손실 없이 resume.
+- **Clean shutdown + teardown 중 signal 무시** — worker가 daemon이라 device close가 건너뛰어지던 문제를 고치고, Ctrl-C 연타로 인한 wedging을 방지.
 
 ## 6. Changelog
 
 ### 2026-07-15
-- `458bf09` **Second slowdown cause = Tracy profiling build**: surfaced once Inspector was off (84→50 it/s).
-  Over **12 runs of the same image**, RSS +33MB/request and latency +1.0s/request grew **linearly** (same input, so it's accumulation, not caching).
-  `build -> build_Release_tracy` (`ENABLE_TRACY=ON`, 705 Tracy symbols), so Tracy kept collecting every zone
-  without `TRACY_ON_DEMAND`. **It's a compile-time switch, so env vars can't turn it off** → rebuilt with `./build_metal.sh` (OFF by default, 7 min).
-  **Verified**: Tracy symbols 705→0, latency **flat at 36.0s across 8 runs**, RSS **+0MB**. 272 captions ~13h → **~2.9h**.
-  No tt-metal source changes; rollback is `ln -nsf build_Release_tracy build`.
-- `b2dab02` **Server honors temperature → eval's infinite retry resolved**: `chat_completions` never read
-  `temperature`; the JSON path used masked argmax and the non-JSON path used `SamplingParams(temperature=0.0)`, so it was **hard-wired to greedy**.
-  The original eval assumes that retrying with `--temperature 0.7` produces a different answer, so under greedy the retries loop forever.
-  temperature is now threaded through `chat_completions → generate() → sampler`, and `_masked_argmax` became `_masked_sample`
-  (temp≤0 = greedy as before, >0 = sample from the grammar-allowed tokens). The grammar constraint is unchanged, so JSON validity is unaffected.
-  **Measured**: temp=0 → 1 unique response across 3 requests; temp=0.7 → 3 (both schema-valid).
-- 🔄 **Caption regeneration started**: regenerating everything to clear the mixed quality (128/256 tokens intermixed). The old set is kept as `*.MIXED-BACKUP.json`.
-  Early measurements: consistent length around \~1150 characters, vision at **83\~182 it/s**, one VisionBlock per caption — confirms all the earlier fixes are working.
-- `8aea788` **Fixed eval optimal-path bug**: `TextMemory.memory_to_string` iterated character by character over the optimal
-  context (which is already a string) and blew up on `doc.time` (→ eval retry infinite loop). Now a string passes straight through.
-- ✅ **Question JSON generation**: `human_qa.json` with 30 questions (position 12 / time 7 / text 5 / binary 4 / duration 2).
-  eval skips text, so **25 questions get scored**. The remaining seqs have no captions and are skipped automatically.
-- ⛔ **Evaluation started → blocked**: the server ignored temperature (greedy), so eval.py's retry loop ran forever. Waiting on a decision about direction.
-- `9fe023c` **Fixed npu_info**: the device methods we'd guessed at don't actually exist, so everything came back `(n/a)` → now it uses only
-  `open_mesh_device` and the real MeshDevice API. MeshDevice has no API for DRAM size, so that's read from the **SoC descriptor YAML**.
-  ttnn's loguru + C++ logs are **suppressed via fd redirection** (visible with `-v`). → **Got real measured specs (DRAM 12GiB, etc.)**.
-- `4f81c2e` **Removed duplicate prefill**: the demo (`vision_demo.py`) **deliberately prefills twice** via `compile_prefill` + `inference_prefill`
-  (to measure compile vs. inference time separately = a benchmarking device), but on the server the cache is warm after the first request,
-  so the second was pure duplication. The first result went into the unused `masks` for the VLM, and for the LLM it **wasn't even assigned to a variable**.
-  Both VLM and LLM now prefill once. Measured: VisionBlock per caption 2→**1**, ~76s→**~38s**.
-- ✅ **seq0 captioning finished**: 272 captions generated (`captions_tt-qwen25-vl-3b_3_secs.json`). Checkpoint resume verified in practice (interrupt, then continue → partial auto-deleted on completion).
-- `8be8bc6` **Slowdown root-caused & fixed**: tt-metal's **Inspector** (debug, ON by default) does a YAML `flush()` per mesh workload → ~5,000 synchronous disk I/O calls per caption, accumulating 153MB / 5.34M lines in a single run → the bigger the file, the more the flush blocks → vision block **decays monotonically from 19 to 2.1 it/s**. Disabled via tt-metal's own switches in `run_server.sh` (`TT_METAL_INSPECTOR=0`, `_RPC=0`) — **no tt-metal source changes**. Measured: **holds steady at ~42 it/s**, no YAML produced. Also reverted the earlier misdiagnosis fix (`ttnn.deallocate` in `describe()`).
-- `f9bc7bf` **Server stabilization**: join the worker on shutdown to guarantee `close_mesh_device()`, plus ignore SIGINT/SIGTERM during teardown (prevents wedging from mashed Ctrl-C).
-- `804bcf6` **eval import**: lazy-import `ChatNVIDIA` (NIM) → eval runs without the NIM package.
-- `8caa7c9` **Captioner**: import fallback (both the inner and outer paths), and sending `max_gen_len` (default 256) fixes the sentence truncation.
-- `16a253e` **Captioning pipeline**: `--captioner {vila,tenstorrent}` selection + VILA lazy import, neutralized the prompt from video→image, JSONL checkpoint/resume, changed early-exit to key off "final JSON exists".
+- `458bf09` **두 번째 slowdown 원인 = Tracy profiling build**: Inspector를 끈 뒤 드러남(84→50 it/s).
+  **같은 이미지 12회 실행** 동안 RSS +33MB/request, latency +1.0s/request가 **선형** 증가(입력이 동일하므로 caching이 아니라 누적).
+  `build -> build_Release_tracy` (`ENABLE_TRACY=ON`, 705 Tracy symbols)라서 `TRACY_ON_DEMAND` 없이
+  Tracy가 모든 zone을 계속 수집. **compile-time switch라 env var로 끌 수 없음** → `./build_metal.sh`로 재빌드(기본 OFF, 7 min).
+  **검증**: Tracy symbols 705→0, latency **8회 실행 내내 flat 36.0s**, RSS **+0MB**. 272 captions ~13h → **~2.9h**.
+  tt-metal source 변경 없음; rollback은 `ln -nsf build_Release_tracy build`.
+- `b2dab02` **서버가 temperature 존중 → eval의 무한 retry 해결**: `chat_completions`가 `temperature`를
+  전혀 읽지 않았음; JSON 경로는 masked argmax, non-JSON 경로는 `SamplingParams(temperature=0.0)`을 써서 **greedy로 하드코딩**되어 있었음.
+  원본 eval은 `--temperature 0.7`로 retry하면 다른 답이 나온다고 가정하므로, greedy 하에서는 retry가 영원히 루프.
+  이제 temperature가 `chat_completions → generate() → sampler`로 전달되고, `_masked_argmax`가 `_masked_sample`로 바뀜
+  (temp≤0 = 기존대로 greedy, >0 = grammar 허용 token에서 sampling). grammar constraint는 그대로라 JSON validity에는 영향 없음.
+  **측정**: temp=0 → 3 요청에 unique 응답 1개; temp=0.7 → 3개(둘 다 schema-valid).
+- 🔄 **Caption 재생성 시작**: mixed 품질(128/256 tokens 혼재)을 해소하려고 전부 재생성. 기존 set은 `*.MIXED-BACKUP.json`으로 보관.
+  초기 측정: 길이가 \~1150자 부근으로 일관적, vision **83\~182 it/s**, caption당 VisionBlock 1개 — 앞선 수정들이 모두 동작함을 확인.
+- `8aea788` **eval optimal 경로 버그 수정**: `TextMemory.memory_to_string`이 이미 string인 optimal
+  context를 문자 단위로 순회하다 `doc.time`에서 터짐(→ eval retry 무한 루프). 이제 string이 그대로 통과.
+- ✅ **Question JSON generation**: 30 questions로 `human_qa.json` (position 12 / time 7 / text 5 / binary 4 / duration 2).
+  eval은 text를 건너뛰므로 **25 questions가 채점됨**. 나머지 seq는 caption이 없어 자동으로 건너뜀.
+- ⛔ **평가 시작 → blocked**: 서버가 temperature를 무시(greedy)해서 eval.py의 retry 루프가 영원히 돌았음. 방향 결정 대기.
+- `9fe023c` **npu_info 수정**: 추측했던 device 메서드가 실제로 존재하지 않아 전부 `(n/a)`로 돌아옴 → 이제
+  `open_mesh_device`와 실제 MeshDevice API만 사용. MeshDevice에 DRAM 크기 API가 없어서 **SoC descriptor YAML**에서 읽음.
+  ttnn의 loguru + C++ logs는 **fd redirection으로 억제**(`-v`로 표시). → **실측 스펙 확보(DRAM 12GiB 등)**.
+- `4f81c2e` **중복 prefill 제거**: demo(`vision_demo.py`)는 `compile_prefill` + `inference_prefill`로 **일부러 두 번 prefill**함
+  (compile vs. inference 시간을 따로 측정하려는 benchmarking 장치)이지만, 서버에서는 첫 요청 이후 cache가 warm이라
+  두 번째는 순수 중복이었음. 첫 결과는 VLM의 안 쓰는 `masks`로, LLM은 **변수에 할당조차 안 됐음**.
+  이제 VLM과 LLM 둘 다 prefill 1회. 측정: caption당 VisionBlock 2→**1**, ~76s→**~38s**.
+- ✅ **seq0 captioning 완료**: 272 captions 생성(`captions_tt-qwen25-vl-3b_3_secs.json`). Checkpoint resume 실제로 검증(중단 후 이어서 → 완료 시 partial 자동 삭제).
+- `8be8bc6` **Slowdown 근본 원인 규명 및 수정**: tt-metal의 **Inspector**(debug, 기본 ON)가 mesh workload마다 YAML `flush()` → caption당 ~5,000 synchronous disk I/O 호출, 단일 실행에서 153MB / 5.34M lines 누적 → 파일이 클수록 flush가 더 오래 block → vision block이 **19에서 2.1 it/s로 단조 감쇠**. `run_server.sh`에서 tt-metal 자체 switch로 비활성화(`TT_METAL_INSPECTOR=0`, `_RPC=0`) — **tt-metal source 변경 없음**. 측정: **~42 it/s로 안정 유지**, YAML 생성 안 됨. 앞선 오진 수정(`describe()`의 `ttnn.deallocate`)도 되돌림.
+- `f9bc7bf` **서버 안정화**: shutdown 시 worker를 join해 `close_mesh_device()`를 보장하고, teardown 중 SIGINT/SIGTERM 무시(Ctrl-C 연타로 인한 wedging 방지).
+- `804bcf6` **eval import**: `ChatNVIDIA`(NIM)를 lazy-import → NIM 패키지 없이도 eval 실행됨.
+- `8caa7c9` **Captioner**: import fallback(안쪽·바깥쪽 경로 둘 다), `max_gen_len`(기본 256) 전송으로 문장 잘림 해결.
+- `16a253e` **Captioning pipeline**: `--captioner {vila,tenstorrent}` 선택 + VILA lazy import, 프롬프트를 video→image로 중화, JSONL checkpoint/resume, early-exit을 "final JSON 존재" 기준으로 변경.
 - `334c0b4` **ROS-free extractor**: `preprocess_coda_rosfree.py` — pose txt + cam0 PNG → .pkl.
-- `c5cc220` **Docs**: added PAPER_EVAL_RUNBOOK; added the langgraph/opencv pins and shutdown procedure to RUNBOOK.
-- (ops) Acquired the original paper data: downloaded `data.csv`; downloaded, extracted, and pulled 8213 .pkl files out of CODa seq0 (42GB).
-- (ops) Tidied up venv dependencies: installed `langgraph==0.2.40`/`langsmith==0.1.147`, `numpy<2`/`opencv-python-headless<5` (avoiding pin conflicts).
-- (diagnosis) Root-caused the wedged board: it's a **`/dev/bos`** chip, not `/dev/tenstorrent`. Force-killing during captioning was the cause.
+- `c5cc220` **Docs**: PAPER_EVAL_RUNBOOK 추가; RUNBOOK에 langgraph/opencv pin과 shutdown 절차 추가.
+- (ops) 원본 논문 데이터 확보: `data.csv` 다운로드; CODa seq0(42GB)에서 8213 .pkl 파일을 다운로드·압축 해제·추출.
+- (ops) venv 의존성 정리: `langgraph==0.2.40`/`langsmith==0.1.147`, `numpy<2`/`opencv-python-headless<5` 설치(pin 충돌 회피).
+- (diagnosis) wedged board 근본 원인 규명: `/dev/tenstorrent`가 아니라 **`/dev/bos`** 칩임. captioning 중 강제 종료가 원인이었음.
 
 ### 2026-07-13
-- `05fff77` Removed the VILA `<video>` token, per-frame captions. Strengthened the smoke test.
+- `05fff77` VILA `<video>` token 제거, per-frame captions. Smoke test 강화.
 - `7d96cbc` LLM JSON-constrained (grammar) decoding.
-- `165e846` Hardened NonAgent NPU end-to-end.
+- `165e846` NonAgent NPU end-to-end 강화.
 - `8f9db90` end-to-end smoke test.
 - `bb169e2` Unified NPU inference server (Llama+Qwen).
 - `d29661c`/`ef0729d` NonAgent `tt/` backend + NPU captioner.
@@ -151,8 +151,8 @@ _Last updated: 2026-07-15 · branch `feat/tenstorrent-npu-backend`_
 
 | Document | Contents |
 |---|---|
-| **[DEV_STATUS.md](DEV_STATUS.md)** (this document) | Status, issues, decisions, changelog (start here) |
+| **[DEV_STATUS.md](DEV_STATUS.md)** (이 문서) | Status, issues, decisions, changelog (여기서 시작) |
 | [TENSTORRENT_INTEGRATION.md](TENSTORRENT_INTEGRATION.md) | Architecture, design decisions, debugging log |
-| [PAPER_EVAL_RUNBOOK.md](PAPER_EVAL_RUNBOOK.md) | Full procedure for the paper's NaVQA/CODa evaluation + recovery |
+| [PAPER_EVAL_RUNBOOK.md](PAPER_EVAL_RUNBOOK.md) | 논문 NaVQA/CODa 평가 + 복구 전체 절차 |
 | [../tt_server/README.md](../tt_server/README.md) | Server structure, requirements, env |
 | [../tt_server/RUNBOOK.md](../tt_server/RUNBOOK.md) | Server startup, venv setup, troubleshooting, shutdown |

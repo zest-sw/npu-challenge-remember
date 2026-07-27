@@ -1,25 +1,25 @@
-# ReMEmbR × NPU Integration — Architecture & Design
+# ReMEmbR × NPU 통합 — 아키텍처 및 설계
 
-A record of the integration work needed to run the robot spatio-temporal memory system **ReMEmbR** end-to-end on an NPU.
-Both the VLM (captioner) and the LLM (question answering) run on the NPU, with Milvus vector memory bridging the two.
+로봇 시공간 메모리 시스템 **ReMEmbR** 을 NPU 위에서 end-to-end로 구동하기 위해 필요했던 통합 작업의 기록.
+VLM(captioner)과 LLM(질의응답) 모두 NPU에서 실행되며, Milvus 벡터 메모리가 이 둘을 이어준다.
 
-> **For progress status, change log, and known issues see [DEV_STATUS.md](DEV_STATUS.md).** This document focuses on
-> architecture, design decisions, and debugging records.
+> **진행 상태, 변경 이력, 알려진 이슈는 [DEV_STATUS.md](DEV_STATUS.md) 를 참고.** 이 문서는
+> 아키텍처, 설계 결정, 디버깅 기록에 집중한다.
 >
-> **Hardware note**: this machine is a **BOS chip** (not Tenstorrent). Since we use ttnn through a tt-metal-compatible
-> stack (`bos-metal`), the logs show `BlackholeTTDevice`, but the actual device node is **`/dev/bos/0`** and the kernel
-> module is **`bos`**. To check device occupancy use `fuser -v /dev/bos/0` / `lsmod | grep bos`. (`/dev/tenstorrent` and
-> `lspci 1e52` do not exist on this machine.)
+> **하드웨어 참고**: 이 머신은 **BOS chip** 이다(Tenstorrent 아님). tt-metal 호환 스택
+> (`bos-metal`)을 통해 ttnn을 사용하기 때문에 로그에는 `BlackholeTTDevice` 가 찍히지만, 실제 device 노드는 **`/dev/bos/0`** 이고 커널
+> 모듈은 **`bos`** 다. device 점유 여부는 `fuser -v /dev/bos/0` / `lsmod | grep bos` 로 확인한다. (`/dev/tenstorrent` 와
+> `lspci 1e52` 는 이 머신에 존재하지 않는다.)
 >
-> **Measured specs** (`python tt_server/npu_info.py`): arch `BLACKHOLE`, 1 device, **DRAM 12 GiB**
-> (4 GiB × 3 banks), **Tensix 5×4 = 20 cores** (harvesting `0x0`), L1 1.5 MB per worker core.
-> The 12 GiB of DRAM is the basis for "3B+3B can be co-resident / 8B cannot".
+> **측정된 스펙** (`python tt_server/npu_info.py`): arch `BLACKHOLE`, device 1개, **DRAM 12 GiB**
+> (4 GiB × 3 banks), **Tensix 5×4 = 20 cores** (harvesting `0x0`), worker core당 L1 1.5 MB.
+> DRAM 12 GiB가 "3B+3B는 co-resident 가능 / 8B는 불가"의 근거다.
 
 ---
 
-## 1. Goal
+## 1. 목표
 
-The ReMEmbR pipeline:
+ReMEmbR 파이프라인:
 
 ```
 Camera frame ──▶ [VLM caption] ──▶ [store in vector memory] ──▶ [question] ──▶ [search] ──▶ [LLM answer]
@@ -27,216 +27,216 @@ Camera frame ──▶ [VLM caption] ──▶ [store in vector memory] ──�
                   (NPU)                                                                      (NPU)
 ```
 
-- The original ReMEmbR used **VILA** as the captioner and **GPT-4o / llama3.1 (8B class)** as the LLM.
-- We replace both with **3B models running on the Tenstorrent NPU**.
+- 원본 ReMEmbR은 captioner로 **VILA** 를, LLM으로 **GPT-4o / llama3.1 (8B급)** 을 사용했다.
+- 우리는 둘 모두를 **Tenstorrent NPU에서 구동되는 3B 모델** 로 교체한다.
   - VLM: `Qwen/Qwen2.5-VL-3B-Instruct`
   - LLM: `meta-llama/Llama-3.2-3B-Instruct`
 
 ---
 
-## 2. Architecture
+## 2. 아키텍처
 
-### 2.1 Unified inference server (`remembr/tt_server/tt_infer_server.py`)
+### 2.1 통합 추론 서버 (`remembr/tt_server/tt_infer_server.py`)
 
-Rather than loading the NPU models directly into the remembr process, we **split them out into an HTTP server**.
-Reason: the ttnn/tt-metal stack conflicts with remembr's dependency pins, and two processes cannot occupy a single device at the same time.
+NPU 모델을 remembr 프로세스에 직접 로드하는 대신, **HTTP 서버로 분리** 한다.
+이유: ttnn/tt-metal 스택이 remembr의 의존성 핀과 충돌하고, 두 프로세스가 하나의 device를 동시에 점유할 수 없기 때문이다.
 
-- **Port 8100**, FastAPI.
+- **포트 8100**, FastAPI.
 - Endpoints
-  - `POST /v1/chat/completions` — LLM (OpenAI compatible)
-  - `POST /caption` — VLM (list of base64 images + prompt → caption)
-  - `GET /health` — load status
-- **Single worker thread + job queue** design: all device work (open/load/prefill/decode) is serialized onto one thread. FastAPI handlers push a job onto the queue and block on a Future. → No matter how many HTTP requests arrive, the device handles exactly one at a time.
-- Both the LLM and VLM engines are **loaded onto the device co-resident at startup** (`TT_ENABLE_LLM`/`TT_ENABLE_VLM`, both on by default). The `_ready` event blocks startup until loading completes.
-- Key env vars
-  - `TT_LLM_MAX_SEQ_LEN` (default 4096), `TT_VLM_MAX_SEQ_LEN` (default 2048)
+  - `POST /v1/chat/completions` — LLM (OpenAI 호환)
+  - `POST /caption` — VLM (base64 이미지 리스트 + 프롬프트 → caption)
+  - `GET /health` — 로드 상태
+- **단일 worker thread + job queue** 설계: 모든 device 작업(open/load/prefill/decode)이 하나의 스레드로 직렬화된다. FastAPI 핸들러는 job을 큐에 넣고 Future에서 블록한다. → HTTP 요청이 아무리 많이 들어와도 device는 정확히 한 번에 하나씩만 처리한다.
+- LLM과 VLM 엔진 모두 **시작 시 device에 co-resident로 로드** 된다(`TT_ENABLE_LLM`/`TT_ENABLE_VLM`, 둘 다 기본 on). `_ready` 이벤트가 로딩이 끝날 때까지 startup을 블록한다.
+- 주요 env vars
+  - `TT_LLM_MAX_SEQ_LEN` (기본 4096), `TT_VLM_MAX_SEQ_LEN` (기본 2048)
   - `TT_PORT` (8100), `TT_HOST` (0.0.0.0)
-- **Grammar-constrained decoding for JSON** is supported: OpenAI `response_format` is honored.
-  - `json_object` → any valid JSON (equivalent to Ollama `format="json"`)
-  - `json_schema` → constrained to the given schema (`TokenEnforcer` + `JsonSchemaParser`, host-side masking followed by argmax)
-- VLM input images are **resized to 224×224** on the server.
+- **JSON에 대한 grammar-constrained decoding** 을 지원한다: OpenAI `response_format` 을 존중한다.
+  - `json_object` → 임의의 유효한 JSON (Ollama `format="json"` 과 동등)
+  - `json_schema` → 주어진 schema로 제약 (`TokenEnforcer` + `JsonSchemaParser`, host-side masking 후 argmax)
+- VLM 입력 이미지는 서버에서 **224×224로 resize** 된다.
 
 ### 2.2 Captioner (`remembr/captioners/tenstorrent_captioner.py`)
 
-Implements the `Captioner` interface. `caption(images: list[PIL.Image]) -> str`.
+`Captioner` 인터페이스를 구현한다. `caption(images: list[PIL.Image]) -> str`.
 
-- POSTs a list of base64 JPEGs + a prompt to the server's `/caption`.
-- env: `TT_VLM_URL` (default `http://localhost:8100/caption`), `TT_VLM_TIMEOUT` (default 900 s).
-  - The first caption on a cold start can take several minutes due to ttnn trace (prefill+decode) compilation, so the timeout is set generously.
-- **The interface is frame list (window) → one caption.** Passing an entire window at once is the original design for real sequence data.
+- base64 JPEG 리스트 + 프롬프트를 서버의 `/caption` 으로 POST한다.
+- env: `TT_VLM_URL` (기본 `http://localhost:8100/caption`), `TT_VLM_TIMEOUT` (기본 900 s).
+  - cold start에서의 첫 caption은 ttnn trace (prefill+decode) 컴파일 때문에 수 분이 걸릴 수 있으므로 timeout을 넉넉히 잡는다.
+- **인터페이스는 frame 리스트(window) → 하나의 caption 이다.** window 전체를 한 번에 넘기는 것은 실제 sequence 데이터를 위한 원래 설계다.
 
-### 2.3 LLM agent (`remembr/agents/non_agent.py`)
+### 2.3 LLM 에이전트 (`remembr/agents/non_agent.py`)
 
-`NonAgent` — a lightweight agent that produces an answer with a **single LLM call**, no tools.
-If `llm_type` has the form `tt/<model>`, the Tenstorrent backend is used.
+`NonAgent` — **단일 LLM 호출** 로 답을 생성하는 경량 에이전트, tool 없음.
+`llm_type` 이 `tt/<model>` 형태이면 Tenstorrent 백엔드를 사용한다.
 
-- Calls the server's `/v1/chat/completions` via `ChatOpenAI` (`TT_LLM_BASE_URL`, default `http://localhost:8100/v1`).
-- **Forces grammar-constrained decoding with a JSON schema**: every key required by `AgentOutput` (`type, text, binary, position, orientation, time, duration`) is marked `required`, `text` is `maxLength: 300`, and `additionalProperties: false`.
-  - This stops small models from spinning in reasoning fields and burning their budget, and prevents infinite retries caused by parse failures.
-- `TT_LLM_MAX_TOKENS` (default 256) — upper bound on generated tokens.
+- `ChatOpenAI` 를 통해 서버의 `/v1/chat/completions` 를 호출한다 (`TT_LLM_BASE_URL`, 기본 `http://localhost:8100/v1`).
+- **JSON schema로 grammar-constrained decoding을 강제한다**: `AgentOutput` 이 요구하는 모든 키(`type, text, binary, position, orientation, time, duration`)를 `required` 로 표시하고, `text` 는 `maxLength: 300`, `additionalProperties: false` 로 둔다.
+  - 이는 작은 모델이 reasoning 필드에서 맴돌며 budget을 소진하는 것을 막고, parse 실패로 인한 무한 재시도를 방지한다.
+- `TT_LLM_MAX_TOKENS` (기본 256) — 생성 토큰의 상한.
 
-### 2.4 Memory (`remembr/memory/milvus_memory.py`)
+### 2.4 메모리 (`remembr/memory/milvus_memory.py`)
 
-- Stores `caption` + `text_embedding` (1024d, `mxbai-embed-large-v1`) + `position` (3d) + `time` (2d) in a Milvus collection.
-- Three kinds of search: `search_by_text` (semantic), `search_by_position` ((x,y,z)), `search_by_time` (H:M:S). Each accumulates results into `working_memory`.
-- `NonAgent` uses `get_working_memory()` as context → **you must call `search_*` before querying** or the context stays empty.
+- `caption` + `text_embedding` (1024d, `mxbai-embed-large-v1`) + `position` (3d) + `time` (2d) 를 Milvus collection에 저장한다.
+- 세 종류의 search: `search_by_text` (semantic), `search_by_position` ((x,y,z)), `search_by_time` (H:M:S). 각각이 결과를 `working_memory` 에 누적한다.
+- `NonAgent` 은 `get_working_memory()` 를 context로 사용한다 → **질의 전에 반드시 `search_*` 를 호출해야** 하며, 그러지 않으면 context가 비어 있게 된다.
 
 ### 2.5 Smoke test (`examples/tt_smoke_test.py`)
 
-A script that validates the whole end-to-end path (caption → store → search → answer) in one shot.
-Usage: `PYTHONPATH=$(pwd) python examples/tt_smoke_test.py <images...>`
+전체 end-to-end 경로(caption → store → search → answer)를 한 번에 검증하는 스크립트.
+사용법: `PYTHONPATH=$(pwd) python examples/tt_smoke_test.py <images...>`
 
 ---
 
-## 3. Agent vs NonAgent (design choice)
+## 3. Agent vs NonAgent (설계 선택)
 
-| | `ReMEmbRAgent` | `NonAgent` (what we use) |
+| | `ReMEmbRAgent` | `NonAgent` (우리가 쓰는 것) |
 |---|---|---|
-| Who searches | The LLM actively picks and repeats tools (LangGraph loop) | Search is done externally in advance; the LLM does not search |
-| Search method | Free choice among text/position/time | Fixed to the context handed in |
-| LLM calls | Multiple (tool loop ≤3 + generate) | **1** |
-| tool calling | **Required** | Not needed |
-| Suitability for small models | Low (3B is unreliable at tool calls) | **High** |
+| 누가 search하나 | LLM이 능동적으로 tool을 고르고 반복 (LangGraph loop) | search를 외부에서 미리 수행; LLM은 search하지 않음 |
+| search 방법 | text/position/time 중 자유 선택 | 넘겨받은 context로 고정 |
+| LLM 호출 | 여러 번 (tool loop ≤3 + generate) | **1회** |
+| tool calling | **필수** | 불필요 |
+| 작은 모델 적합성 | 낮음 (3B는 tool call이 불안정) | **높음** |
 
-→ Since Llama-3.2-3B on the NPU is unreliable at tool calling, we **adopt `NonAgent`**. The tradeoff is that the LLM cannot perform position/time-specialized searches on its own, so our code fills in the search results for it.
+→ NPU의 Llama-3.2-3B는 tool calling이 불안정하므로 **`NonAgent` 을 채택** 한다. 그 대가로 LLM이 스스로 position/time 특화 search를 수행할 수 없으므로, 우리 코드가 대신 search 결과를 채워 넣는다.
 
 ---
 
-## 4. Debugging log — problems found and fixes
+## 4. 디버깅 로그 — 발견한 문제와 해결
 
-### Problem ① Vector search returns nonsense (hallucinated dog on a skateboard)
+### 문제 ① 벡터 search가 엉뚱한 결과를 반환 (스케이트보드 탄 개 환각)
 
-- **Symptom**: fed a pasta image, got back "I saw a dog".
-- **Cause**: `MilvusMemory.__init__` creates with `reset(drop_collection=False)` → **the collection is never dropped**. Old captions from previous runs (dog.jpg, etc.) kept accumulating in the `tt_smoke_test` collection. A generic question ("What did you see?") doesn't bind tightly to any particular caption, so stale entries got mixed into the search results.
-- **Fix**: reset the collection at the start of the smoke test with `memory.reset(drop_collection=True)`.
-  - ⚠️ In real operation memory must accumulate, so dropping is forbidden → in that case the right approach is to **use a different collection name per session**.
+- **증상**: 파스타 이미지를 넣었는데 "개를 봤다"가 돌아옴.
+- **원인**: `MilvusMemory.__init__` 이 `reset(drop_collection=False)` 로 생성 → **collection이 절대 drop되지 않음**. 이전 실행들의 오래된 caption(dog.jpg 등)이 `tt_smoke_test` collection에 계속 누적되었다. 일반적인 질문("What did you see?")은 특정 caption에 강하게 묶이지 않으므로, 오래된 항목들이 search 결과에 섞여 들어갔다.
+- **해결**: smoke test 시작 시 `memory.reset(drop_collection=True)` 로 collection을 reset.
+  - ⚠️ 실제 운용에서는 메모리가 누적되어야 하므로 drop이 금지된다 → 그 경우 올바른 접근은 **세션마다 다른 collection 이름을 쓰는 것** 이다.
 
-### Problem ② The VLM refuses to caption ("I'm sorry, but I can't assist with that.")
+### 문제 ② VLM이 caption을 거부 ("I'm sorry, but I can't assist with that.")
 
-- **Symptom**: passing 2 images at once produced a refusal. With 1 image it worked fine.
-- **Investigation**:
-  - `<video>` + 2 images → **refusal**
-  - `<video>` + 1 image → fine
-  - 2 images without `<video>` → no refusal, but the two images get **merged into a single hallucinated scene**
-- **Cause**: the prompt began with a literal `<video>` token. That is a **VILA convention** from the original ReMEmbR (VILA treats `<video>` as a multi-frame placeholder special token). **Qwen2.5-VL does not know `<video>`** — its processor automatically inserts `<|vision_start|>...<|vision_end|>`, so a literal `<video>` plus multiple images conflicts with the trained format and triggers a refusal.
-- **Fix**: removed `<video>` from `DEFAULT_PROMPT` and replaced it with "These are sequential frames from a robot's camera...". → Multi-frame input now works correctly.
+- **증상**: 이미지 2장을 한 번에 넘기면 거부가 발생. 1장이면 정상 동작.
+- **조사**:
+  - `<video>` + 이미지 2장 → **거부**
+  - `<video>` + 이미지 1장 → 정상
+  - `<video>` 없이 이미지 2장 → 거부는 없으나, 두 이미지가 **하나의 환각 scene으로 병합** 됨
+- **원인**: 프롬프트가 리터럴 `<video>` 토큰으로 시작했다. 이는 원본 ReMEmbR의 **VILA 관례** 다 (VILA는 `<video>` 를 multi-frame placeholder special token으로 취급). **Qwen2.5-VL은 `<video>` 를 모른다** — 그 processor는 자동으로 `<|vision_start|>...<|vision_end|>` 를 삽입하므로, 리터럴 `<video>` 에 다중 이미지가 더해지면 학습된 형식과 충돌하여 거부를 유발한다.
+- **해결**: `DEFAULT_PROMPT` 에서 `<video>` 를 제거하고 "These are sequential frames from a robot's camera..." 로 교체. → multi-frame 입력이 이제 정상 동작한다.
 
-> **What is the `<video>` token?** A VLM concatenates text tokens and image embeddings into one sequence, and the `<video>` token is a **placeholder marking where the image embeddings go**. In VILA the user writes it into the prompt directly, but in Qwen2.5-VL the processor inserts it automatically, so the user must not write it.
+> **`<video>` 토큰이란?** VLM은 text token과 image embedding을 하나의 sequence로 이어붙이는데, `<video>` 토큰은 **image embedding이 들어갈 자리를 표시하는 placeholder** 다. VILA에서는 사용자가 이를 프롬프트에 직접 써넣지만, Qwen2.5-VL에서는 processor가 자동 삽입하므로 사용자가 써서는 안 된다.
 
-### Problem ③ Multiple frames lumped into one caption and one memory entry
+### 문제 ③ 여러 frame이 하나의 caption과 하나의 메모리 항목으로 뭉침
 
-- **Symptom**: unrelated demo images (dog+pasta) were merged into a single caption and stored → no meaningful unit left to search on.
-- **Fix**: changed the smoke test to do **a separate caption per frame → a separate `MemoryItem` per frame**. Each frame gets a staggered `time` (+10s each) and `position` (along the x axis). The retrieved context is also printed so it can be eyeballed.
-  - ⚠️ This changed **only the smoke test script**. **The captioner interface (window → one caption) is unchanged.** For real sequence video the frames are consecutive views of the same scene, so grouping them into a window is the right thing to do.
+- **증상**: 서로 무관한 데모 이미지(개+파스타)가 하나의 caption으로 병합되어 저장됨 → search할 만한 의미 있는 단위가 남지 않음.
+- **해결**: smoke test를 **frame마다 별도 caption → frame마다 별도 `MemoryItem`** 을 만들도록 변경. 각 frame은 시차를 둔 `time` (각 +10s)과 `position` (x축을 따라)을 갖는다. 검색된 context도 육안 확인이 가능하도록 출력한다.
+  - ⚠️ 이는 **smoke test 스크립트만** 바꾼 것이다. **captioner 인터페이스(window → 하나의 caption)는 그대로다.** 실제 sequence 영상에서 frame들은 같은 scene의 연속된 view이므로, window로 묶는 것이 올바른 처리다.
 
-### Problem ④ Captioning refuses again ("I can't see the video")
-- **Symptom**: captioning CODa frames with the paper's prompt produced a refusal saying it cannot see the video.
-- **Cause**: the paper's original prompt is for VILA **video** ("the few seconds of the video"), but we hand Qwen **a single still frame** (`--num-video-frames 1`) → prompt/input mismatch.
-- **Fix**: keep the original wording but neutralize only the video phrasing (remove `<video>`, "the few seconds of the video" → "the image"). Everything else ("Think step by step", etc.) stays exactly as in the paper → fidelity preserved and the refusal resolved.
+### 문제 ④ caption이 또 거부 ("I can't see the video")
+- **증상**: CODa frame을 논문 프롬프트로 caption하니 영상을 볼 수 없다는 거부가 나옴.
+- **원인**: 논문의 원본 프롬프트는 VILA **video** 용("the few seconds of the video")인데, 우리는 Qwen에 **single still frame** 을 넘긴다 (`--num-video-frames 1`) → 프롬프트/입력 불일치.
+- **해결**: 원본 문구를 유지하되 video 표현만 중립화한다(`<video>` 제거, "the few seconds of the video" → "the image"). 그 외("Think step by step" 등)는 논문 그대로 유지 → 충실성을 보존하면서 거부를 해소했다.
 
-### Problem ⑤ Caption sentences get cut off mid-way
-- **Cause**: the server's `/caption` caps generation at **128 tokens** when `max_gen_len` is unspecified. A step-by-step caption doesn't emit EOT before that and gets truncated.
-- **Fix**: the captioner now sends `max_gen_len` (default 256, `TT_VLM_MAX_GEN_LEN`). The server already honors this parameter, so **no server code changed** — just rerun the client.
+### 문제 ⑤ caption 문장이 중간에 잘림
+- **원인**: 서버의 `/caption` 은 `max_gen_len` 미지정 시 생성을 **128 tokens** 로 제한한다. step-by-step caption은 그 전에 EOT를 내지 못해 잘린다.
+- **해결**: captioner가 이제 `max_gen_len` (기본 256, `TT_VLM_MAX_GEN_LEN`) 을 보낸다. 서버는 이미 이 파라미터를 존중하므로 **서버 코드는 변경 없음** — 클라이언트만 다시 실행하면 된다.
 
-### Problem ⑥ Captions get slower over time (21s → 80s) — **culprit: tt-metal Inspector**
-- **Measurement**: caption length, host RAM, and swap were all stable. The decisive clue was the vision block speed in the server log **falling monotonically from 19 to 2.1 it/s** (9×).
-- **Cause**: tt-metal's **Inspector** (a debug feature) is **ON by default** (`rtoptions.hpp`: `InspectorSettings::enabled = true`). Its logger **appends YAML for every mesh workload and calls `fstream::flush()` each time** (`logger.cpp`) → in our case roughly **5,000 synchronous disk flushes per caption**. In a single captioning run `generated/inspector/mesh_workloads_log.yaml` grew to **153MB / 5.34M lines**, and the bigger the file got the more each flush blocked, dragging the VLM down with it.
-- It is **not** a memory problem: the inspector's `unordered_map` is cleaned up via `erase`, and host RSS was in fact flat at 11.3GB.
-- **Fix**: **without touching the tt-metal source**, set the switches tt-metal already provides in `run_server.sh` —
+### 문제 ⑥ caption이 시간이 갈수록 느려짐 (21s → 80s) — **범인: tt-metal Inspector**
+- **측정**: caption 길이, host RAM, swap은 모두 안정적이었다. 결정적 단서는 서버 로그의 vision block 속도가 **19에서 2.1 it/s로 단조 감소** (9배)한 것이었다.
+- **원인**: tt-metal의 **Inspector** (디버그 기능)가 **기본 ON** 이다 (`rtoptions.hpp`: `InspectorSettings::enabled = true`). 그 logger가 **mesh workload마다 YAML을 append하고 매번 `fstream::flush()` 를 호출** 한다 (`logger.cpp`) → 우리 경우 caption당 대략 **5,000회의 동기 disk flush**. 한 번의 captioning 실행에서 `generated/inspector/mesh_workloads_log.yaml` 이 **153MB / 5.34M lines** 까지 커졌고, 파일이 커질수록 각 flush가 더 오래 블록하며 VLM을 함께 끌어내렸다.
+- 이것은 메모리 문제가 **아니다**: inspector의 `unordered_map` 은 `erase` 로 정리되고, host RSS는 실제로 11.3GB에서 평평했다.
+- **해결**: **tt-metal 소스를 건드리지 않고**, tt-metal이 이미 제공하는 스위치를 `run_server.sh` 에서 설정 —
   `TT_METAL_INSPECTOR=0`, `TT_METAL_INSPECTOR_RPC=0`.
-- **Measured result**: the vision block **holds steady at ~42 it/s** (the decay is gone) and no inspector YAML is produced. The `Inspector RPC 50051` warning in the server log also disappears.
-- **Misdiagnosis record**: at first this looked like device tensors piling up, so `ttnn.deallocate` was added to `describe()`, but that **was not the cause** (it targeted LLM decoding tensors) and was reverted. `TT_METAL_DEVICE_PROFILER` is also unrelated (it is only active when set to `'1'`, and it was unset, so it was a no-op).
+- **측정 결과**: vision block이 **~42 it/s로 안정 유지** (감쇠가 사라짐), inspector YAML도 생성되지 않는다. 서버 로그의 `Inspector RPC 50051` 경고도 사라진다.
+- **오진 기록**: 처음에는 device tensor가 쌓이는 것으로 보여 `describe()` 에 `ttnn.deallocate` 를 추가했으나, 이것은 **원인이 아니었고** (LLM decoding tensor를 대상으로 했음) 되돌렸다. `TT_METAL_DEVICE_PROFILER` 도 무관하다 (`'1'` 로 설정될 때만 활성화되고, 설정되지 않았으므로 no-op였다).
 
-### Problem ⑦ Ctrl-C (especially mashing it) wedges the board
-- **Cause**: `close_mesh_device()`, which closes the device, lives in **the finally block of a daemon worker**, so it does not run when the interpreter exits. Mashing Ctrl-C force-kills uvicorn and aborts teardown → the device is left active and **wedged** (on restart: `failed to initialize FW`).
-- **Fix**: on shutdown, signal the worker to stop and then `join()` to guarantee `close_mesh_device()` runs, plus **ignore SIGINT/SIGTERM during the teardown window** (safe against key mashing). Only `-9` (SIGKILL) still bypasses this, so it is **forbidden**.
+### 문제 ⑦ Ctrl-C (특히 연타)가 보드를 먹통으로 만듦
+- **원인**: device를 닫는 `close_mesh_device()` 가 **daemon worker의 finally block** 에 있어서, 인터프리터 종료 시 실행되지 않는다. Ctrl-C 연타는 uvicorn을 강제 종료하고 teardown을 중단시킨다 → device가 활성 상태로 남아 **먹통** 이 된다 (재시작 시: `failed to initialize FW`).
+- **해결**: shutdown 시 worker에 중단 신호를 보낸 뒤 `join()` 하여 `close_mesh_device()` 실행을 보장하고, 추가로 **teardown 구간 동안 SIGINT/SIGTERM을 무시** 한다 (키 연타에 안전). `-9` (SIGKILL)만 여전히 이를 우회하므로 **금지** 다.
 
-### Problem ⑫ The **second** cause of the slowdown — tt-metal was a Tracy profiling build
-- **Symptom**: even after turning off the Inspector, the vision block still declined **from 84 to 50 it/s**. The Inspector was so dominant
-  (19→2.1) that this was hidden underneath it.
-- **Quantitative confirmation**: 12 consecutive requests with **exactly the same image** →
+### 문제 ⑫ 느려짐의 **두 번째** 원인 — tt-metal이 Tracy profiling 빌드였음
+- **증상**: Inspector를 끈 뒤에도 vision block이 여전히 **84에서 50 it/s로** 하락. Inspector가 워낙 지배적이어서
+  (19→2.1) 이것이 그 아래 가려져 있었다.
+- **정량 확인**: **완전히 동일한 이미지** 로 12회 연속 요청 →
   ```
   RSS     : 5280 → 5649 MB   (+33MB per request, almost no variance)
   Latency : 55.8s → 67.8s    (+1.0s per request, monotonic increase)
   ```
-  Identical input yet linear growth = not caching or compilation, but **something accumulating per request**.
-- **Cause**: this tt-metal is **a Tracy build produced by `build_metal.sh --enable-profiler`**
-  (`build -> build_Release_tracy`, `CMakeCache: ENABLE_TRACY:BOOL=ON`, 705 Tracy symbols in `_ttnn.so`).
-  The default in `build_metal.sh` is `enable_profiler="OFF"`, so someone deliberately passed `-p`.
-  When Tracy is compiled without `TRACY_ON_DEMAND` it **accumulates every zone in memory from program start,
-  regardless of whether a UI is connected.** `ReadDeviceProfilerResults` skips its inner block when the profiler
-  is disabled, but the **`ZoneScoped;` (a Tracy macro)** above it still executes inside `#if defined(TRACY_ENABLE)`.
-  On top of that, `decode_forward` calls `ttnn.ReadDeviceProfiler` **on every decoded token** (~256 per caption)
-  and the vision block loop calls it **on every block** (32 times) → tens of thousands of zones accumulated per caption.
-- **Why env vars can't turn it off**: `TT_METAL_DEVICE_PROFILER` only disables the profiler's *operation*; Tracy is a
-  **compile-time** switch and cannot be turned off at runtime.
-- **Fix**: swap in the **default build** with no profiler — `./build_metal.sh` (default `ENABLE_TRACY=OFF`).
-  No tt-metal source changes; the build directory is separate (`build_Release`) and only the symlink changes, so
-  **rollback is a one-liner: `ln -nsf build_Release_tracy build`**. The build takes **7 minutes** on 24 cores.
-- **Verification (re-measured under identical conditions)**: Tracy symbols in `_ttnn.so` went **705 → 0**.
+  동일 입력인데도 선형 증가 = 캐싱이나 컴파일이 아니라, **요청마다 무언가가 누적** 되고 있음.
+- **원인**: 이 tt-metal은 **`build_metal.sh --enable-profiler` 로 만든 Tracy 빌드** 다
+  (`build -> build_Release_tracy`, `CMakeCache: ENABLE_TRACY:BOOL=ON`, `_ttnn.so` 안 705개의 Tracy symbol).
+  `build_metal.sh` 의 기본값은 `enable_profiler="OFF"` 이므로, 누군가 의도적으로 `-p` 를 넘긴 것이다.
+  Tracy를 `TRACY_ON_DEMAND` 없이 컴파일하면 **UI 연결 여부와 무관하게 프로그램 시작부터 모든 zone을 메모리에 누적** 한다.
+  `ReadDeviceProfilerResults` 는 profiler가 비활성일 때 내부 블록을 건너뛰지만, 그 위의 **`ZoneScoped;` (Tracy 매크로)** 는 여전히
+  `#if defined(TRACY_ENABLE)` 안에서 실행된다.
+  게다가 `decode_forward` 는 decode된 토큰마다 (caption당 ~256회) `ttnn.ReadDeviceProfiler` 를 호출하고,
+  vision block loop는 block마다 (32회) 호출한다 → caption당 수만 개의 zone이 누적된다.
+- **env var로 끌 수 없는 이유**: `TT_METAL_DEVICE_PROFILER` 는 profiler의 *동작* 만 비활성화한다; Tracy는
+  **컴파일 타임** 스위치이므로 런타임에 끌 수 없다.
+- **해결**: profiler 없는 **기본 빌드** 로 교체 — `./build_metal.sh` (기본 `ENABLE_TRACY=OFF`).
+  tt-metal 소스 변경 없음; 빌드 디렉터리가 분리되어 있고 (`build_Release`) symlink만 바뀌므로,
+  **rollback은 한 줄이다: `ln -nsf build_Release_tracy build`**. 빌드는 24 core에서 **7분** 걸린다.
+- **검증 (동일 조건 재측정)**: `_ttnn.so` 의 Tracy symbol이 **705 → 0**.
   ```
               Tracy build              Default build
   RSS growth  +33MB/request (linear)   +0~1MB (flat)
   Latency     55.8 → 67.8s             36.0 → 36.0s (constant)
   Vision      84 → 50 it/s (falling)   84~185 it/s (steady)
   ```
-  **The leak and the latency growth vanished completely.** Estimate for 272 captions: ~13 hours → **~2.9 hours**.
-- **Lesson**: when investigating a performance anomaly, **first suspect that the environment is a profiling build**. Both causes
-  (Inspector, Tracy) came down to "a debug tool was on by default or on purpose."
+  **누수와 latency 증가가 완전히 사라졌다.** 272개 caption 추정: ~13시간 → **~2.9시간**.
+- **교훈**: 성능 이상을 조사할 때는 **먼저 환경이 profiling 빌드임을 의심하라**. 두 원인
+  (Inspector, Tracy) 모두 "디버그 도구가 기본으로 또는 의도적으로 켜져 있었다"로 귀결된다.
 
-### Problem ⑨ Two prefills per request (2× waste in the vision encoder)
-- **Discovery**: the server log printed `32 x Qwen2_5_VLVisionBlock` **twice** per caption.
-- **Cause**: the original demo (`qwen25_vl/demo/vision_demo.py`) calls prefill twice **on purpose** —
-  `profiler("compile_prefill")` warms the program cache, and `profiler("inference_prefill")` measures pure inference
-  time. It is **a benchmarking device meant to report compile vs. inference ms separately**, and it is correct for a demo.
-  But the server **only compiles on the first request** and is warm from then on, so the second pass was a pure duplicate forward.
-  Worse, the first result went into `masks`, an unused variable in the VLM, and in the LLM (`generate`) it **wasn't even assigned to a variable**.
-- **Fix**: keep only **one** pass (= the demo's `inference_prefill`) for both VLM and LLM. Measured: VisionBlock per caption 2× → 1×,
+### 문제 ⑨ 요청당 prefill 2회 (vision encoder에서 2배 낭비)
+- **발견**: 서버 로그가 caption당 `32 x Qwen2_5_VLVisionBlock` 을 **두 번** 출력했다.
+- **원인**: 원본 데모(`qwen25_vl/demo/vision_demo.py`)는 prefill을 **의도적으로 두 번** 호출한다 —
+  `profiler("compile_prefill")` 이 program cache를 warm하고, `profiler("inference_prefill")` 이 순수 inference
+  시간을 측정한다. 이는 **compile vs. inference ms를 따로 보고하기 위한 벤치마킹 장치** 이고, 데모로서는 옳다.
+  하지만 서버는 **첫 요청에서만 컴파일** 하고 그 뒤로는 warm하므로, 두 번째 pass는 순수 중복 forward였다.
+  더 나쁜 것은, 첫 결과가 VLM에서는 사용되지 않는 변수 `masks` 로 들어갔고, LLM(`generate`)에서는 **변수에 할당조차 되지 않았다.**
+- **해결**: VLM과 LLM 모두 **한 번** 의 pass(= 데모의 `inference_prefill`)만 남긴다. 측정: caption당 VisionBlock 2회 → 1회,
   ~76s → **~38s**.
 
-### Problem ⑩ The optimal eval path crashes on the first question → infinite retries
-- **Symptom**: `AttributeError: 'str' object has no attribute 'time'` (`text_memory.py`).
-- **Cause**: the `optimal+` path in eval.py puts **an already-rendered string** (`qa_instance['context']`) into
-  `TextMemory`. `get_working_memory()` returns the string as-is when it is a str, and `NonAgent` then passes it back
-  into `memory_to_string()`, which **iterates the string character by character** → blows up at `doc.time`. An upstream bug.
-- **Fix**: `memory_to_string` now passes strings straight through (= consistent with the documented intent of `get_working_memory`).
+### 문제 ⑩ optimal eval 경로가 첫 질문에서 크래시 → 무한 재시도
+- **증상**: `AttributeError: 'str' object has no attribute 'time'` (`text_memory.py`).
+- **원인**: eval.py의 `optimal+` 경로가 **이미 렌더링된 문자열** (`qa_instance['context']`)을
+  `TextMemory` 에 넣는다. `get_working_memory()` 는 값이 str이면 문자열을 그대로 반환하고, `NonAgent` 은 그것을 다시
+  `memory_to_string()` 에 넘기는데, 이 함수가 **문자열을 문자 단위로 순회** 한다 → `doc.time` 에서 터진다. 상류 버그.
+- **해결**: `memory_to_string` 이 이제 문자열을 그대로 통과시킨다(= `get_working_memory` 의 문서화된 의도와 일관).
 
-### Problem ⑪ (unresolved) The server ignores temperature → the eval retry loop never terminates
-- **Symptom**: when the 3B answers a time question with `type='text', time=None`, `evaluate_output` crashes on
-  `abs(answer - None)` → the `while True` in `answer_squad_question` retries forever.
-- **Cause**: the original assumes **`temperature=0.7`** (eval.py's default), so a retry yields a different answer. But
-  our `/v1/chat/completions` **never even reads temperature** and decodes only with `_masked_argmax` (greedy)
-  → retries produce **the identical answer** → infinite loop. (This is a recurrence of the "greedy → identical retries"
-  warning in `tt_server/README.md`; that time it was a JSON validity problem, this time **the JSON is valid but the content is wrong**.)
-- **Options**: (A) have the server honor temperature (restoring the original intent) / (B) add a None guard in `evaluate_output` /
-  (C) enforce per-type fields via JSON schema. **Direction undecided.**
+### 문제 ⑪ (미해결) 서버가 temperature를 무시함 → eval 재시도 loop가 끝나지 않음
+- **증상**: 3B가 시간 질문에 `type='text', time=None` 으로 답하면, `evaluate_output` 이
+  `abs(answer - None)` 에서 크래시 → `answer_squad_question` 의 `while True` 가 영원히 재시도한다.
+- **원인**: 원본은 **`temperature=0.7`** (eval.py의 기본값)을 가정하므로, 재시도하면 다른 답이 나온다. 하지만
+  우리 `/v1/chat/completions` 는 **temperature를 읽지조차 않고** `_masked_argmax` (greedy)로만 decode한다
+  → 재시도가 **동일한 답** 을 낸다 → 무한 loop. (이는 `tt_server/README.md` 의 "greedy → identical retries"
+  경고의 재발이다; 그때는 JSON 유효성 문제였고, 이번에는 **JSON은 유효하지만 내용이 틀린** 경우다.)
+- **선택지**: (A) 서버가 temperature를 존중하게 함 (원래 의도 복원) / (B) `evaluate_output` 에 None guard 추가 /
+  (C) JSON schema로 type별 필드를 강제. **방향 미정.**
 
-### Problem ⑧ "The board is dead" misdiagnosis (device node name)
-- **Cause**: diagnostics checked `/dev/tenstorrent` and `lspci 1e52` → always "not found" → repeated misdiagnosis of "fell off the bus". In reality it is a **BOS chip**, so the node is `/dev/bos/0`.
-- **Lesson**: check the device with `fuser -v /dev/bos/0`, `lsmod | grep bos`, `/proc/<pid>/fd | grep bos`.
-
----
-
-## 5. Remaining issues / next steps
-
-### 3B LLM quality
-- The 3B is "usable but borderline" for RAG. Given clean context it stays grounded, but when the context is empty or polluted it degenerates (repetition, foreign-language token leakage) — e.g. output like `有有`.
-- Greedy (temperature=0) with no repetition penalty encourages the degeneration.
-- **Options**
-  1. **Switch to 8B** — DRAM constraints may make co-residency impossible → fall back to a configuration that time-separates the captioning and query stages (only one model loaded at a time).
-  2. **Stay on 3B + tune** — add a repetition penalty to the server, reduce `TT_LLM_MAX_TOKENS`.
-
-### Real sequence data (in progress)
-- The pipeline for the original paper's data (CODa) is built: `preprocess_coda_rosfree.py` (ROS-free .pkl extraction) → `preprocess_captions.py --captioner tenstorrent` (checkpointed captioning) → `form_question_jsons.py` → `eval.py`. Details in [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md).
-- **Fidelity deviation**: frames 6→1 (a compromise). Qwen supports multiple frames too, but we start at 1 because of first-compile cost and stability. To raise it, increase `--num-video-frames` (be prepared to wait out the first compile).
-- For progress status see the [DEV_STATUS](DEV_STATUS.md) status board.
-
-### Housekeeping
-- Many PyMilvus/LangChain deprecation warnings (`connections.connect`, ORM-style APIs, etc.). Harmless functionally, but migrating to `MilvusClient` / `langchain-milvus` later is recommended.
+### 문제 ⑧ "보드가 죽었다" 오진 (device 노드 이름)
+- **원인**: 진단이 `/dev/tenstorrent` 와 `lspci 1e52` 를 확인 → 항상 "not found" → "버스에서 떨어졌다"는 오진 반복. 실제로는 **BOS chip** 이므로 노드가 `/dev/bos/0` 이다.
+- **교훈**: device는 `fuser -v /dev/bos/0`, `lsmod | grep bos`, `/proc/<pid>/fd | grep bos` 로 확인하라.
 
 ---
 
-## 6. How to run (summary)
+## 5. 남은 이슈 / 다음 단계
+
+### 3B LLM 품질
+- 3B는 RAG용으로 "쓸 만하지만 아슬아슬" 하다. 깨끗한 context를 주면 근거에 충실하지만, context가 비었거나 오염되면 붕괴한다(반복, 외국어 token 누출) — 예: `有有` 같은 출력.
+- repetition penalty 없는 greedy (temperature=0)가 이 붕괴를 부추긴다.
+- **선택지**
+  1. **8B로 전환** — DRAM 제약으로 co-residency가 불가능할 수 있음 → captioning 단계와 query 단계를 시간 분리하는 구성으로 후퇴 (한 번에 하나의 모델만 로드).
+  2. **3B 유지 + 튜닝** — 서버에 repetition penalty 추가, `TT_LLM_MAX_TOKENS` 축소.
+
+### 실제 sequence 데이터 (진행 중)
+- 원본 논문 데이터(CODa)용 파이프라인 구축 완료: `preprocess_coda_rosfree.py` (ROS-free .pkl 추출) → `preprocess_captions.py --captioner tenstorrent` (checkpoint 기반 captioning) → `form_question_jsons.py` → `eval.py`. 상세는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md).
+- **충실성 편차**: frame 6→1 (타협). Qwen도 다중 frame을 지원하지만, first-compile 비용과 안정성 때문에 1에서 시작한다. 올리려면 `--num-video-frames` 를 늘려라 (first compile을 기다릴 각오 필요).
+- 진행 상태는 [DEV_STATUS](DEV_STATUS.md) 상태 보드 참고.
+
+### 정리 작업
+- 다수의 PyMilvus/LangChain deprecation 경고 (`connections.connect`, ORM 스타일 API 등). 기능상 무해하지만, 나중에 `MilvusClient` / `langchain-milvus` 로 마이그레이션하는 것을 권장한다.
+
+---
+
+## 6. 실행 방법 (요약)
 
 ```bash
 # 1) Start the NPU inference server (separate terminal, tt-metal environment)
@@ -251,21 +251,21 @@ PYTHONPATH=$(pwd) python examples/tt_smoke_test.py \
 TT_SMOKE_QUESTION="did you see a dog?" PYTHONPATH=$(pwd) python examples/tt_smoke_test.py <img>
 ```
 
-Restarting the server is only necessary when server (`tt_server/`) code changes. Edits to the captioner/agent/smoke test (the remembr side) do not require a restart.
+서버 재시작은 서버(`tt_server/`) 코드가 바뀔 때만 필요하다. captioner/agent/smoke test(remembr 쪽) 수정은 재시작이 필요 없다.
 
 ---
 
-## 7. Files added/modified
+## 7. 추가/수정된 파일
 
 | File | Role |
 |---|---|
-| `tt_server/tt_infer_server.py` | Unified NPU inference server (LLM+VLM, port 8100, constrained JSON decoding, clean shutdown, tensor deallocation) |
-| `tt_server/run_server.sh` | Server launcher (env setup) |
+| `tt_server/tt_infer_server.py` | 통합 NPU 추론 서버 (LLM+VLM, port 8100, constrained JSON decoding, clean shutdown, tensor deallocation) |
+| `tt_server/run_server.sh` | 서버 런처 (env 설정) |
 | `remembr/captioners/tenstorrent_captioner.py` | Qwen2.5-VL captioner (HTTP client, `max_gen_len`, import fallback) |
-| `remembr/agents/non_agent.py` | Llama-3.2-3B `tt/` backend, JSON schema constraints |
+| `remembr/agents/non_agent.py` | Llama-3.2-3B `tt/` 백엔드, JSON schema 제약 |
 | `remembr/agents/remembr_agent.py` | `ChatNVIDIA` lazy import |
-| `remembr/scripts/preprocess_coda_rosfree.py` | ROS-free CODa → .pkl extractor |
-| `remembr/scripts/preprocess_captions.py` | Captioning (`--captioner tenstorrent`, checkpoint/resume, prompt neutralization) |
+| `remembr/scripts/preprocess_coda_rosfree.py` | ROS-free CODa → .pkl 추출기 |
+| `remembr/scripts/preprocess_captions.py` | Captioning (`--captioner tenstorrent`, checkpoint/resume, prompt 중립화) |
 | `examples/tt_smoke_test.py` | end-to-end smoke test |
 
-*(The tt-metal original is untouched; the added code is collected on the remembr side.)*
+*(tt-metal 원본은 손대지 않았다; 추가 코드는 remembr 쪽에 모아 두었다.)*

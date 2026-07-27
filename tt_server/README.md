@@ -1,14 +1,14 @@
-# ReMEmbR on Tenstorrent NPU
+# Tenstorrent NPU에서의 ReMEmbR
 
-All the glue code needed to run ReMEmbR on a Tenstorrent board lives in **this
-repo**. The tt-metal SDK is used as-is (imported at runtime via `PYTHONPATH`);
-nothing is copied into or modified inside the tt-metal source tree.
+Tenstorrent 보드에서 ReMEmbR을 실행하는 데 필요한 모든 glue 코드는 **이
+repo**에 있습니다. tt-metal SDK는 있는 그대로 사용되며(런타임에 `PYTHONPATH`로
+import), tt-metal 소스 트리에 복사하거나 수정하는 것은 없습니다.
 
-See also: [../docs/DEV_STATUS.md](../docs/DEV_STATUS.md) (project status), [RUNBOOK.md](RUNBOOK.md)
-(setup / start / stop), [../docs/PAPER_EVAL_RUNBOOK.md](../docs/PAPER_EVAL_RUNBOOK.md) (paper eval),
-[../docs/TENSTORRENT_INTEGRATION.md](../docs/TENSTORRENT_INTEGRATION.md) (architecture).
+참고: [../docs/DEV_STATUS.md](../docs/DEV_STATUS.md) (프로젝트 상태), [RUNBOOK.md](RUNBOOK.md)
+(설정 / 시작 / 종료), [../docs/PAPER_EVAL_RUNBOOK.md](../docs/PAPER_EVAL_RUNBOOK.md) (논문 평가),
+[../docs/TENSTORRENT_INTEGRATION.md](../docs/TENSTORRENT_INTEGRATION.md) (아키텍처).
 
-## Layout of what was added
+## 추가된 것들의 구성
 
 ```
 remembr/
@@ -26,10 +26,10 @@ remembr/
 └── examples/tt_smoke_test.py                      # end-to-end: image -> caption -> memory -> query
 ```
 
-> **HW note**: this machine is a **BOS chip** (not Tenstorrent). Device node `/dev/bos/0`,
-> kernel module `bos`. Check who holds it: `fuser -v /dev/bos/0`, `lsmod | grep bos`.
+> **HW note**: 이 머신은 **BOS chip**입니다(Tenstorrent 아님). Device node `/dev/bos/0`,
+> kernel module `bos`. 누가 점유 중인지 확인: `fuser -v /dev/bos/0`, `lsmod | grep bos`.
 
-## Architecture
+## 아키텍처
 
 ```
  remembr (its own venv)                     tt_server/tt_infer_server.py (tt-metal venv, owns the NPU)
@@ -38,24 +38,24 @@ remembr/
                                                                  all NPU work serialized by a queue
 ```
 
-A single process owns the board (ttnn opens it exclusively) and hosts both
-models. A single worker thread + queue serializes every prefill/decode, so
-simultaneous `/caption` and `/v1/chat/completions` requests are safe.
+단일 프로세스가 보드를 소유하고(ttnn이 배타적으로 open) 두 모델을 모두
+호스팅합니다. 단일 worker thread + queue가 모든 prefill/decode를 직렬화하므로
+`/caption`과 `/v1/chat/completions` 요청을 동시에 보내도 안전합니다.
 
-## Requirements
+## 요구 사항
 
-- **Two venvs.** The server runs in tt-metal's `python_env` (ttnn, transformers).
-  remembr runs in its own venv (langchain, pymilvus, sentence-transformers) —
-  the versions conflict, which is why they are split behind HTTP.
-  - remembr venv pins (newer langchain drops `ChatOllama`):
+- **두 개의 venv.** 서버는 tt-metal의 `python_env`(ttnn, transformers)에서
+  실행됩니다. remembr는 자체 venv(langchain, pymilvus, sentence-transformers)에서
+  실행됩니다 — 버전이 충돌하기 때문에 HTTP 뒤로 분리되어 있습니다.
+  - remembr venv pin(최신 langchain은 `ChatOllama`를 제거함):
     `langchain-core==0.2.40 langchain-community==0.2.16 langchain-openai==0.1.25`
-    plus `pillow requests pymilvus langchain-huggingface==0.0.3 sentence-transformers==3.1.0`.
-  - server extra deps (installed into tt-metal venv): `fastapi uvicorn[standard] lm-format-enforcer`.
-- **HF access.** `meta-llama/Llama-3.2-3B-Instruct` is gated — set `HF_TOKEN`
-  (run_server.sh reads it from ~/.bashrc). `Qwen/Qwen2.5-VL-3B-Instruct` is open.
-- **Milvus** running (docker) for the memory DB.
+    그리고 `pillow requests pymilvus langchain-huggingface==0.0.3 sentence-transformers==3.1.0`.
+  - 서버 추가 의존성(tt-metal venv에 설치): `fastapi uvicorn[standard] lm-format-enforcer`.
+- **HF 접근.** `meta-llama/Llama-3.2-3B-Instruct`는 gated이므로 `HF_TOKEN`을
+  설정하세요(run_server.sh가 ~/.bashrc에서 읽음). `Qwen/Qwen2.5-VL-3B-Instruct`는 공개.
+- 메모리 DB용 **Milvus** 실행(docker).
 
-## Run
+## 실행
 
 ```bash
 # 1) start the NPU server (tt-metal venv)
@@ -69,56 +69,56 @@ PYTHONPATH=$(pwd) python examples/tt_smoke_test.py path/to/frame.jpg
 
 ## HTTP API
 
-Interactive docs are served by FastAPI at **`http://localhost:8100/docs`** (Swagger UI),
-`/redoc`, and `/openapi.json`. Note the handlers take a raw `dict`, so the generated
-schema shows only `{"type": "object"}` — the request/response fields are documented here
-instead. All three endpoints are safe to hit while a caption run is in progress; NPU work
-is serialized by the worker queue, so a request just waits its turn.
+인터랙티브 문서는 FastAPI가 **`http://localhost:8100/docs`**(Swagger UI),
+`/redoc`, `/openapi.json`에서 제공합니다. 핸들러가 raw `dict`를 받으므로 생성된
+schema에는 `{"type": "object"}`만 표시됩니다 — request/response 필드는 대신 여기에
+문서화되어 있습니다. 세 엔드포인트 모두 caption 실행 중에 호출해도 안전합니다. NPU
+작업은 worker queue로 직렬화되므로 요청은 그저 자기 차례를 기다립니다.
 
 ### `GET /health`
-Readiness of the device worker and each engine. Cheap, no NPU work.
+device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
 ```jsonc
 // 200
 {"ready": true, "llm": true, "vlm": true}
 ```
-`ready` flips true only after both enabled models are loaded on the device. `llm`/`vlm`
-follow `TT_ENABLE_LLM` / `TT_ENABLE_VLM`.
+`ready`는 활성화된 두 모델이 모두 device에 로드된 후에만 true로 바뀝니다. `llm`/`vlm`은
+`TT_ENABLE_LLM` / `TT_ENABLE_VLM`을 따릅니다.
 
 ### `POST /caption` — VLM (Qwen2.5-VL)
 ```jsonc
 // request
 {
-  "images": ["<base64 image>", "..."],  // required, non-empty. Any PIL-readable format
-                                        // (JPEG/PNG). Server decodes -> RGB -> resize 224x224.
-                                        // Multiple images are treated as frames of one scene.
-  "prompt": "string",                   // optional, defaults to the server's DEFAULT_VLM_PROMPT.
-                                        // Do NOT include a literal "<video>" token: Qwen2.5-VL
-                                        // does not use it and refuses when it appears with images.
-  "max_gen_len": 128                    // optional, default 128. Max tokens generated; decoding
-                                        // stops earlier on EOT. 128 truncates verbose captions
-                                        // mid-sentence — the captioner sends 256.
+  "images": ["<base64 image>", "..."],  // 필수, 비어있으면 안 됨. PIL이 읽을 수 있는 형식
+                                        // (JPEG/PNG). 서버가 decode -> RGB -> 224x224 resize.
+                                        // 여러 장은 한 장면의 프레임들로 취급.
+  "prompt": "string",                   // 선택, 기본값은 서버의 DEFAULT_VLM_PROMPT.
+                                        // 리터럴 "<video>" 토큰은 넣지 말 것: Qwen2.5-VL은
+                                        // 이걸 안 쓰며 이미지와 함께 나오면 거부함.
+  "max_gen_len": 128                    // 선택, 기본 128. 생성 최대 토큰; EOT에서 더 일찍
+                                        // 멈춤. 128은 장황한 캡션을 문장 중간에서 자름
+                                        // — captioner는 256을 보냄.
 }
 // 200
 {"caption": "string"}
 // 503 VLM not loaded (TT_ENABLE_VLM=0)   400 no images provided
 ```
 
-### `POST /v1/chat/completions` — LLM (Llama-3.2-3B), OpenAI-compatible
-Accepts the subset of the OpenAI schema this server implements, so `ChatOpenAI`
-(`base_url=http://localhost:8100/v1`) works unmodified.
+### `POST /v1/chat/completions` — LLM (Llama-3.2-3B), OpenAI 호환
+이 서버가 구현한 OpenAI schema의 subset을 받으므로 `ChatOpenAI`
+(`base_url=http://localhost:8100/v1`)가 수정 없이 동작합니다.
 ```jsonc
 // request
 {
-  "messages": [{"role": "user", "content": "..."}],  // flattened into one prompt
-  "max_tokens": 256,        // optional, default 256. Clamped to max_seq_len//2; an over-long
-                            // prompt is truncated (head kept) rather than erroring.
-  "temperature": 0.0,       // optional, default 0. 0 = greedy (deterministic);
-                            // >0 samples — required if the caller retries on a bad answer,
-                            // since greedy returns an identical answer every time.
-  "model": "string",        // optional, echoed back only
-  "response_format": {      // optional -> grammar-constrained decoding
-    "type": "json_object"   //   any valid JSON
-    // or:
+  "messages": [{"role": "user", "content": "..."}],  // 하나의 prompt로 flatten됨
+  "max_tokens": 256,        // 선택, 기본 256. max_seq_len//2로 clamp; 너무 긴 prompt는
+                            // 에러 대신 잘림(head 유지).
+  "temperature": 0.0,       // 선택, 기본 0. 0 = greedy(결정적);
+                            // >0이면 sampling — 나쁜 답에 재시도하는 caller에겐 필수,
+                            // greedy는 매번 동일한 답을 내므로.
+  "model": "string",        // 선택, 그대로 echo만 됨
+  "response_format": {      // 선택 -> grammar-constrained decoding
+    "type": "json_object"   //   임의의 유효한 JSON
+    // 또는:
     // "type": "json_schema",
     // "json_schema": {"name": "x", "schema": { /* JSON Schema */ }}
   }
@@ -131,10 +131,10 @@ Accepts the subset of the OpenAI schema this server implements, so `ChatOpenAI`
 }
 // 503 LLM not loaded (TT_ENABLE_LLM=0)
 ```
-Unsupported OpenAI fields (`stream`, `top_p`, `n`, `stop`, …) are ignored, and usage/token
-counts are not reported.
+지원하지 않는 OpenAI 필드(`stream`, `top_p`, `n`, `stop`, …)는 무시되며, usage/token
+count는 보고되지 않습니다.
 
-### Examples
+### 예제
 
 ```bash
 curl -s localhost:8100/health
@@ -148,9 +148,9 @@ curl -s localhost:8100/v1/chat/completions -H 'Content-Type: application/json' -
 # ... "content": "{\"ok\": true}" ...
 ```
 
-For `/caption`, **write the payload to a file and use `-d @file`** — a base64 image does not
-fit in a shell argument (a 1.7MB CODa frame is ~2.3MB base64, over the ~2MB `ARG_MAX`, and
-curl dies with "Argument list too long"):
+`/caption`의 경우 **payload를 파일에 쓰고 `-d @file`을 사용하세요** — base64 이미지는
+shell 인자에 들어가지 않습니다(1.7MB CODa frame은 base64로 약 2.3MB이며, ~2MB `ARG_MAX`를
+초과하여 curl이 "Argument list too long"으로 죽습니다):
 
 ```bash
 python3 - <<'EOF'
@@ -163,7 +163,7 @@ curl -s localhost:8100/caption -H 'Content-Type: application/json' -d @/tmp/cap.
 # {"caption":"The image shows an outdoor area with a concrete surface, a set of stairs ..."}
 ```
 
-From Python, just post it directly — that is what `TenstorrentCaptioner` does:
+Python에서는 그냥 직접 post하면 됩니다 — `TenstorrentCaptioner`가 하는 방식입니다:
 ```python
 import base64, requests
 b64 = base64.b64encode(open("frame.png","rb").read()).decode()
@@ -183,57 +183,58 @@ print(r.json()["caption"])
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
 | `TT_PORT` | `8100` | |
 
-remembr side: `TT_LLM_BASE_URL` (default `http://localhost:8100/v1`),
-`TT_VLM_URL` (default `http://localhost:8100/caption`),
-`TT_VLM_TIMEOUT` (client timeout, default 900s — raise for the slow first compile),
-`TT_VLM_MAX_GEN_LEN` (max caption tokens, default 256 — server default is 128 which truncates).
+remembr 쪽: `TT_LLM_BASE_URL`(default `http://localhost:8100/v1`),
+`TT_VLM_URL`(default `http://localhost:8100/caption`),
+`TT_VLM_TIMEOUT`(client timeout, default 900s — 느린 첫 compile을 위해 올리세요),
+`TT_VLM_MAX_GEN_LEN`(max caption token, default 256 — 서버 default는 128이며 잘림).
 
 ## JSON-constrained decoding (format="json" equivalent)
 
-`NonAgent` needs strict JSON. Ollama guaranteed this with `format="json"`
-(grammar-constrained decoding); free greedy decoding on the NPU does not, so a
-small 3B would emit code fences / ramble and `NonAgent.query` looped forever
-(greedy → identical retries).
+`NonAgent`는 엄격한 JSON이 필요합니다. Ollama는 `format="json"`(grammar-constrained
+decoding)으로 이를 보장했지만, NPU의 자유로운 greedy decoding은 그렇지 않아서 작은
+3B는 code fence를 내보내거나 횡설수설하고 `NonAgent.query`는 무한 loop에
+빠졌습니다(greedy → 동일한 retry).
 
-The server replicates it. When a request sets OpenAI `response_format`, the LLM
-runs **host-side grammar-constrained decoding** via `lm-format-enforcer`:
-`decode_forward_text(sampling_params=None)` returns raw host logits, which are
-masked to the grammar-allowed token ids before argmax (`_masked_argmax`).
+서버는 이를 재현합니다. 요청이 OpenAI `response_format`을 설정하면 LLM은
+`lm-format-enforcer`를 통해 **host-side grammar-constrained decoding**을 실행합니다:
+`decode_forward_text(sampling_params=None)`이 raw host logits를 반환하고, 이는
+argmax 전에 grammar가 허용하는 token id로 masking됩니다(`_masked_argmax`).
 
-- `response_format={"type":"json_object"}` → any valid JSON.
+- `response_format={"type":"json_object"}` → 임의의 유효한 JSON.
 - `response_format={"type":"json_schema","json_schema":{"schema":{...}}}` →
-  constrain to the schema. `NonAgent`'s `tt/` branch sends a schema with the
-  required keys, `maxLength` on `text`, and `additionalProperties:false` — this
-  forces the required keys, caps free text, and forbids a reasoning field so the
-  3B can't ramble past the token budget. Result: **100% parseable JSON, no retry
-  loop, grounded answers, ~10-12s/query** on Llama-3.2-3B.
+  schema로 제약. `NonAgent`의 `tt/` branch는 required key, `text`의 `maxLength`,
+  `additionalProperties:false`가 포함된 schema를 보냅니다 — 이는 required key를
+  강제하고, 자유 텍스트를 제한하며, reasoning 필드를 금지하여 3B가 token budget을
+  넘어 횡설수설하지 못하게 합니다. 결과: Llama-3.2-3B에서 **100% parse 가능한 JSON,
+  retry loop 없음, grounded된 답변, ~10-12s/query**.
 
-Cost: JSON mode reads the full-vocab logits to host each step (vs. on-device
-argmax), so it is slower than plain decoding — fine for short JSON answers.
-Non-JSON requests keep the fast on-device greedy path.
+비용: JSON mode는 매 step마다 full-vocab logits를 host로 읽으므로(on-device argmax
+대비) 일반 decoding보다 느립니다 — 짧은 JSON 답변에는 괜찮습니다. Non-JSON 요청은
+빠른 on-device greedy 경로를 유지합니다.
 
-## Notes / known limits
+## 참고 / 알려진 한계
 
-- **DRAM budget.** Measured via `npu_info.py`: **12 GiB = 4 GiB x 3 banks**
-  (arch BLACKHOLE, Tensix 5x4 = 20 cores, L1 1.5MB/core). Llama-3.2-3B + Qwen-3B
-  fit together at `max_seq_len=1024`. An 8B LLM does **not** co-fit — use the
-  time-separated fallback (`TT_ENABLE_VLM=1 TT_ENABLE_LLM=0` for the caption
-  phase, then swap) or a smaller model.
-- **Inspector is off.** `run_server.sh` sets `TT_METAL_INSPECTOR=0` /
-  `TT_METAL_INSPECTOR_RPC=0`. tt-metal's Inspector defaults to ON and flushes a
-  YAML record per mesh workload (~5k synchronous disk flushes per caption), which
-  dragged the VLM from 19 to 2.1 it/s over one run. Leave it off unless debugging.
-- **Single prefill.** The upstream demo runs prefill twice (compile pass + timed
-  pass) to report compile-vs-inference ms; the server keeps one, since its cache
-  is warm after the first request.
-- **3B answer quality.** JSON validity is now guaranteed; answer grounding still
-  depends on the model. The 3B is mostly grounded but occasionally copies the
-  prompt example — the 8B is stronger (use the DRAM fallback if needed).
-- **Shutdown.** Stop with a single `Ctrl-C` (or SIGTERM) and wait — the server
-  joins the worker so `close_mesh_device()` runs and the board is released
-  cleanly, and it ignores extra SIGINT/SIGTERM during teardown (mashing Ctrl-C is
-  safe). **Never `kill -9`** — SIGKILL skips teardown and wedges the board.
-- **Per-caption slowdown.** `describe()` deallocates its per-request device
-  tensors so latency doesn't creep up over a long captioning run. If a run still
-  slows down, restart the server (resets device state) and resume from the
-  captioner checkpoint. (The deallocation fix still wants a fresh-run re-check.)
+- **DRAM budget.** `npu_info.py`로 측정: **12 GiB = 4 GiB x 3 banks**
+  (arch BLACKHOLE, Tensix 5x4 = 20 cores, L1 1.5MB/core). Llama-3.2-3B + Qwen-3B은
+  `max_seq_len=1024`에서 함께 들어갑니다. 8B LLM은 **함께 들어가지 않으므로** —
+  time-separated fallback(caption 단계에서 `TT_ENABLE_VLM=1 TT_ENABLE_LLM=0`, 이후
+  교체) 또는 더 작은 모델을 사용하세요.
+- **Inspector 꺼짐.** `run_server.sh`가 `TT_METAL_INSPECTOR=0` /
+  `TT_METAL_INSPECTOR_RPC=0`을 설정합니다. tt-metal의 Inspector는 기본이 ON이며 mesh
+  workload마다 YAML record를 flush하는데(caption당 ~5k회 synchronous disk flush),
+  이것이 한 번의 실행에서 VLM을 19에서 2.1 it/s로 떨어뜨렸습니다. 디버깅할 때가
+  아니면 꺼두세요.
+- **Single prefill.** upstream 데모는 compile-vs-inference ms를 보고하기 위해
+  prefill을 두 번(compile pass + timed pass) 실행하지만, 서버는 첫 요청 후 cache가
+  warm하므로 하나만 유지합니다.
+- **3B 답변 품질.** JSON 유효성은 이제 보장되지만, 답변 grounding은 여전히 모델에
+  달려 있습니다. 3B는 대체로 grounded되어 있지만 가끔 prompt 예시를 복사합니다 —
+  8B가 더 강력합니다(필요하면 DRAM fallback 사용).
+- **종료.** 단일 `Ctrl-C`(또는 SIGTERM)로 중지하고 기다리세요 — 서버가 worker를
+  join하여 `close_mesh_device()`가 실행되고 보드가 깨끗하게 해제되며, teardown 중
+  추가 SIGINT/SIGTERM은 무시합니다(Ctrl-C를 연타해도 안전). **절대 `kill -9` 하지
+  마세요** — SIGKILL은 teardown을 건너뛰어 보드를 먹통으로 만듭니다.
+- **Caption마다 느려짐.** `describe()`는 request마다 device tensor를 deallocate하여
+  긴 captioning 실행에서 latency가 점점 증가하지 않도록 합니다. 그래도 실행이
+  느려지면 서버를 재시작하고(device state 초기화) captioner checkpoint에서
+  재개하세요. (deallocation 수정은 여전히 fresh-run 재확인이 필요합니다.)
