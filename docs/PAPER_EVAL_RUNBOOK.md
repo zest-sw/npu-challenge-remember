@@ -168,6 +168,8 @@ python scripts/preprocess_captions.py \
   둘 다 고친 후 측정: **caption당 안정적으로 36초, RSS 증가 0**.
   다시 느려지면 서버 로그의 `32 x Qwen2_5_VLVisionBlock ... it/s` 값이 가장 좋은 지표다.
 - 결과: `data/captions/0/captions/captions_tt-qwen25-vl-3b_3_secs.json`.
+  각 caption item에는 `caption_latency_s`가 포함된다. 이 값은 해당 segment의 captioner 호출 wall-clock 시간이며,
+  text embedding 계산 시간은 포함하지 않는다.
 - 첫 caption만 trace compilation 때문에 느리고, 이후에는 캐시되어 빠르다.
 
 ### 4-2. question JSON 생성 (정답지 + captions → human_qa.json)
@@ -200,6 +202,11 @@ python scripts/eval.py \
 ```
 - 결과는 `./out/`로 간다. binary/position/time/duration은 채점되고, text 질문은 건너뛴다
   (원본 코드 동작). seq0의 경우 30개 중 text 질문 5개가 제외되어 **25개 질문이 채점된다**.
+- latency 필드도 함께 저장된다. 최상위 `eval_total_latency_s`는 전체 eval 실행 시간이고, 각 response의
+  `eval_latency_s`는 해당 질문 처리 전체 시간이다. `query_latency_s`/`elapsed`는 retry를 포함한
+  `model.query()` 누적 시간, `last_attempt_latency_s`는 마지막 attempt 시간, `attempts`는 시도 횟수다.
+  `attempt_latencies`에는 성공, unanswered retry, exception attempt가 모두 attempt별로 기록된다. 건너뛴 text
+  질문도 `unscored`/`skipped`로 표시하고 `eval_latency_s`는 남긴다.
 - ⚠️ **접두사 없는 plain `tt/...`는 피하라** — TextMemory가 전체 window의 captions를 넣어,
   긴 질문에서 seq_len을 초과한다.
 - **retry loop 주의**: 3B가 time 질문에 `type='text', time=None`으로 답하면,

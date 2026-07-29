@@ -7,6 +7,8 @@ import requests
 from PIL import Image
 import numpy as np
 import sys
+# added to get captioning time
+import time
 
 # load this directory
 sys.path.append(sys.path[0] + '/..')
@@ -159,7 +161,13 @@ def run_video_in_segs(args):
         # let's sample the images down to args.num_video_frames
         images = images[::30//args.num_video_frames]
 
+        # start time
+        caption_start = time.perf_counter()
+
         out_text = captioner_model.caption(images)
+
+        # captioning duration
+        caption_latency_s = time.perf_counter() - caption_start
 
         print(out_text)
         filename_start = os.path.basename(file_names[0])
@@ -175,6 +183,7 @@ def run_video_in_segs(args):
             'theta': 3.14, # TEMPORARY: We are not using rotation information yet, so just leaving a placeholder
             'time': timestamp.mean(),
             'caption': out_text,
+            'caption_latency_s': caption_latency_s,
             'file_start': filename_start,
             'file_end': filename_end,
             'text_embedding': text_embedding

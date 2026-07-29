@@ -114,30 +114,50 @@ def answer_squad_question(model, question, qa_instance):
     parsed = None
     out_error = None
     elapsed = 0.0
+    last_attempt_elapsed = 0.0
+    attempts = 0
+    attempt_latencies = []
+
     for attempt in range(MAX_ATTEMPTS):
+        attempts = attempt + 1
+        attempt_start = time.perf_counter()
+        attempt_record = {
+            'attempt': attempts,
+            'latency_s': None,
+            'status': None,
+            'unanswered': None,
+            'error': None,
+        }
         try:
-
-            start_time = time.time()
             response = model.query(question)
-            end_time = time.time()
-
-            elapsed = end_time - start_time
+            last_attempt_elapsed = time.perf_counter() - attempt_start
+            elapsed += last_attempt_elapsed
 
             parsed = asdict(response)
 
             out_error = evaluate_output(qa_instance, parsed)
-            print("Time elapsed", elapsed)
+            attempt_record['latency_s'] = last_attempt_elapsed
+            attempt_record['status'] = 'ok'
+            attempt_record['unanswered'] = bool(out_error.get('unanswered'))
+            print("Attempt elapsed", last_attempt_elapsed)
+            print("Query elapsed total", elapsed)
 
         except Exception as e:
+            last_attempt_elapsed = time.perf_counter() - attempt_start
+            elapsed += last_attempt_elapsed
+            attempt_record['latency_s'] = last_attempt_elapsed
+            attempt_record['status'] = 'exception'
+            attempt_record['error'] = repr(e)
             print(parsed)
             print(e)
             traceback.print_exception(*sys.exc_info())
             out_error = None
-            continue
+
+        attempt_latencies.append(attempt_record)
 
         # a clean evaluation: stop if the model actually answered, else retry
         # (a different sample may fill the field) until the attempt cap.
-        if not out_error.get('unanswered'):
+        if out_error is not None and not out_error.get('unanswered'):
             break
 
     if out_error is None:
@@ -148,6 +168,10 @@ def answer_squad_question(model, question, qa_instance):
         return_dict.update(parsed)
     return_dict['error'] = out_error
     return_dict['elapsed'] = elapsed
+    return_dict['query_latency_s'] = elapsed
+    return_dict['last_attempt_latency_s'] = last_attempt_elapsed
+    return_dict['attempts'] = attempts
+    return_dict['attempt_latencies'] = attempt_latencies
 
     return return_dict
 
@@ -237,6 +261,7 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
     return memory, outputs
 
 def main(args):
+    eval_run_start = time.perf_counter()
 
     use_milvus = False
     use_optimal_context = False
@@ -277,6 +302,8 @@ def main(args):
     responses = []
     for i in tqdm.tqdm(range(0, len(data)), total=len(data)):
 
+        eval_latency_start = time.perf_counter()
+
         print(f"Evaluating {i} out of {len(data)}")
 
         qa_instance = data[i]
@@ -288,7 +315,14 @@ def main(args):
 
         if (qa_instance['type'] == 'text'):
             print("Skipping text questions for now")
-            responses.append({}) # this means skipped!
+            responses.append({
+                'unscored': True,
+                'skipped': True,
+                'skip_reason': 'text_question',
+                'eval_latency_s': time.perf_counter() - eval_latency_start,
+                'question': question,
+                'id': id,
+            })
             continue
 
         memory, instance_captions = load_memory(args, data[i], use_milvus=use_milvus, use_optimal_context=use_optimal_context, ip_address=args.db_ip)
@@ -304,6 +338,7 @@ def main(args):
 
         out_dict = answer_squad_question(agent, question, qa_instance)
 
+        out_dict['eval_latency_s'] = time.perf_counter() - eval_latency_start
 
         out_dict['question'] = qa_instance['question']
         out_dict['id'] = id
@@ -346,6 +381,7 @@ def main(args):
     # save all_questions into json
     out_json = {
         "version": 0.1,
+        "eval_total_latency_s": time.perf_counter() - eval_run_start,
         "responses": responses
     }
 

@@ -59,6 +59,7 @@ python scripts/preprocess_captions.py \
 Be sure to set the `captioner_name` correctly so that it matches the model used in `model-path`!
 
 The captions for each frame should be put into a JSON file located in `data/captions/{seq_id}/captions`.
+Each caption entry also records `caption_latency_s`, the wall-clock time spent in the captioner call for that segment. This timing does not include the later text-embedding step.
 
 We provide an example to preprocess all captions as above in `scripts/bash_scripts/preprocess_captions_all.sh`
 
@@ -106,3 +107,5 @@ python scripts/eval.py \
 ```
 
 An example of running `eval.py` across multiple tries and across all sequences, look at `scripts/bash_scripts/run_all_evals.sh`
+
+The evaluation output JSON stores latency metadata alongside the model response. Top-level `eval_total_latency_s` is the full wall-clock evaluation runtime. Each scored response includes `eval_latency_s` for that question, `query_latency_s`/`elapsed` for all model-query attempts combined, `last_attempt_latency_s`, `attempts`, and `attempt_latencies`. `attempt_latencies` contains one record per attempt, including exceptions, with `status`, `latency_s`, `unanswered`, and `error`. Skipped text questions are marked `unscored`/`skipped` and still include `eval_latency_s`.
