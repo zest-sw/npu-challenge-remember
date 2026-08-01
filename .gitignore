@@ -1,5 +1,8 @@
 deps
 
+# model weights / caches (multi-GB HF downloads — never commit)
+model_cache
+
 # data-related
 data
 out
