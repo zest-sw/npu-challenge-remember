@@ -6,6 +6,11 @@
 set -e
 
 export TT_METAL_HOME="${TT_METAL_HOME:-/home/user/tt-metal}"
+# env_set.sh does `export TT_METAL_HOME=$(pwd)`, so it must be sourced FROM the
+# tt-metal root or it clobbers TT_METAL_HOME with the caller's cwd -> the SoC
+# descriptor lookup then fails ("$TT_METAL_HOME/tt_metal/soc_descriptors/... does
+# not exist"). cd there first so the server works regardless of where it's launched.
+cd "$TT_METAL_HOME"
 # shellcheck disable=SC1091
 source "$TT_METAL_HOME/env_set.sh"          # activates python_env, sets PYTHONPATH
 
