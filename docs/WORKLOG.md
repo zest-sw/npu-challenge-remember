@@ -114,6 +114,18 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 | 평균 DB search latency | - | 0.0196s |
 | 평균 LLM latency | - | 100.69s |
 
+### loss 비교 (오차 계산 가능한 응답만 기준)
+
+| 지표 | optimal+ 3B perf | remembr+ 3B perf |
+|---|---|---|
+| position loss | 144.15m (`n=7`) | **73.43m (`n=12`)** |
+| time loss | 7.58min (`n=7`) | **3.67min (`n=1`)** |
+| duration loss | 45.35min (`n=2`) | **9.7min (`n=1`)** |
+
+> ⚠️ 이 loss는 **전체 30문항 평균이 아니라, 해당 오차를 실제로 계산할 수 있었던 응답만의 평균**이다.
+> 따라서 응답률이 더 낮은 모델이 더 쉬운/적은 샘플에 대해서만 loss를 남겼다면 수치가 더 좋아 보일 수 있다.
+> 실제로 remembr+는 응답률에서 뒤지지만, 남긴 응답들의 raw loss는 더 낮게 나타났다.
+
 ### 해석
 
 - **현재 3B에서는 optimal+가 ReMEmbR agent보다 훨씬 안정적이고 빠르다.**
@@ -125,6 +137,9 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
   `optimal+`의 `type`은 주로 `text/position/time`에 머무르지만, ReMEmbR agent 결과에는
   `location`, `geolocation`, `minutes-ago`, `image description`, `answer` 등
   평가 스키마와 직접 대응되지 않는 type 라벨이 다수 섞였다.
+- **loss만 보면 remembr+가 더 낮지만, 이는 응답률과 분리해서 보면 안 된다.**
+  position은 remembr+가 12개 답변에 대해 평균 73.4m로 optimal+(7개, 144.1m)보다 낮았지만,
+  time/duration은 각각 1개 샘플뿐이라 일반화하기 어렵다. 즉 **raw loss는 remembr+ 우세, 완주성·응답률은 optimal+ 우세**다.
 - 첫 질문("When did you leave the building?")에서도 차이가 명확하다.
   `optimal+`는 `type='text', time=1.0`으로 scoring 가능한 답을 냈지만,
   ReMEmbR agent는 `type='geolocation', time='7 minutes-ago'`로 기록되어
