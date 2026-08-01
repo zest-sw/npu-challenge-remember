@@ -106,38 +106,114 @@ def evaluate_output(qa_instance, predicted):
 # 'unanswered' by evaluate_output) and move on.
 MAX_ATTEMPTS = 5
 
+# Helper function for wrapping memory search methods and appending per-call latency records.
+def instrument_memory_search(memory, search_events):
+    for method_name in ("search_by_text", "search_by_position", "search_by_time"):
+        if not hasattr(memory, method_name):
+            continue
 
-def answer_squad_question(model, question, qa_instance):
+        original = getattr(memory, method_name)
+
+        # check what memory search tool was used and records its latency
+        def wrapped(query, _original=original, _method_name=method_name):
+            start = time.perf_counter()
+            record = {
+                "method": _method_name,
+                "latency_s": None,
+                "status": None,
+                "error": None,
+            }
+            try:
+                result = _original(query)
+                record["status"] = "ok"
+                return result
+            except Exception as e:
+                record["status"] = "exception"
+                record["error"] = repr(e)
+                raise
+            finally:
+                record["latency_s"] = time.perf_counter() - start
+                search_events.append(record)
+
+        setattr(memory, method_name, wrapped)
+
+# Track retrieval latency for each query attempt.
+def answer_squad_question(model, question, qa_instance, search_events=None):
+
+    # search_events is shared with memory search wrappers.
+    if search_events is None:
+        search_events = []
 
     print(f'Question: {question}')
 
     parsed = None
     out_error = None
     elapsed = 0.0
+    last_attempt_elapsed = 0.0
+    attempts = 0
+    attempt_latencies = []
+    total_db_search_latency = 0.0
+
     for attempt in range(MAX_ATTEMPTS):
+        attempts = attempt + 1
+        search_start_idx = len(search_events)
+        attempt_start = time.perf_counter()
+        db_search_latency = 0.0
+        llm_latency = None
+
+        attempt_record = {
+            'attempt': attempts,
+            'latency_s': None,
+            'status': None,
+            'unanswered': None,
+            'error': None,
+            'db_search_latency_s': 0.0,
+            'llm_latency_s': None,
+        }
+
         try:
-
-            start_time = time.time()
             response = model.query(question)
-            end_time = time.time()
+            last_attempt_elapsed = time.perf_counter() - attempt_start
 
-            elapsed = end_time - start_time
+            attempt_search_events = search_events[search_start_idx:]
+            db_search_latency = sum((e.get("latency_s") or 0.0) for e in attempt_search_events)
+            llm_latency = max(0.0, last_attempt_elapsed - db_search_latency)
 
             parsed = asdict(response)
-
             out_error = evaluate_output(qa_instance, parsed)
-            print("Time elapsed", elapsed)
+
+            attempt_record['status'] = 'ok'
+            attempt_record['unanswered'] = bool(out_error.get('unanswered'))
+
+            print("Attempt elapsed", last_attempt_elapsed)
+            print("Query elapsed total", elapsed + last_attempt_elapsed)
 
         except Exception as e:
+            last_attempt_elapsed = time.perf_counter() - attempt_start
+
+            attempt_search_events = search_events[search_start_idx:]
+            db_search_latency = sum((event.get("latency_s") or 0.0) for event in attempt_search_events)
+            llm_latency = max(0.0, last_attempt_elapsed - db_search_latency)
+
+            attempt_record['status'] = 'exception'
+            attempt_record['error'] = repr(e)
+
             print(parsed)
             print(e)
             traceback.print_exception(*sys.exc_info())
             out_error = None
-            continue
+
+        attempt_record['latency_s'] = last_attempt_elapsed
+        attempt_record['db_search_latency_s'] = db_search_latency
+        attempt_record['llm_latency_s'] = llm_latency
+
+        elapsed += last_attempt_elapsed
+        total_db_search_latency += db_search_latency
+        attempt_latencies.append(attempt_record)
 
         # a clean evaluation: stop if the model actually answered, else retry
         # (a different sample may fill the field) until the attempt cap.
-        if not out_error.get('unanswered'):
+        if out_error is not None and not out_error.get('unanswered'):
             break
 
     if out_error is None:
@@ -148,6 +224,12 @@ def answer_squad_question(model, question, qa_instance):
         return_dict.update(parsed)
     return_dict['error'] = out_error
     return_dict['elapsed'] = elapsed
+    return_dict['query_latency_s'] = elapsed
+    return_dict['db_search_latency_s'] = total_db_search_latency
+    return_dict['llm_latency_s'] = max(0.0, elapsed - total_db_search_latency)
+    return_dict['last_attempt_latency_s'] = last_attempt_elapsed
+    return_dict['attempts'] = attempts
+    return_dict['attempt_latencies'] = attempt_latencies
 
     return return_dict
 
@@ -237,6 +319,7 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
     return memory, outputs
 
 def main(args):
+    eval_run_start = time.perf_counter()
 
     use_milvus = False
     use_optimal_context = False
@@ -277,6 +360,8 @@ def main(args):
     responses = []
     for i in tqdm.tqdm(range(0, len(data)), total=len(data)):
 
+        eval_latency_start = time.perf_counter()
+
         print(f"Evaluating {i} out of {len(data)}")
 
         qa_instance = data[i]
@@ -288,7 +373,14 @@ def main(args):
 
         if (qa_instance['type'] == 'text'):
             print("Skipping text questions for now")
-            responses.append({}) # this means skipped!
+            responses.append({
+                'unscored': True,
+                'skipped': True,
+                'skip_reason': 'text_question',
+                'eval_latency_s': time.perf_counter() - eval_latency_start,
+                'question': question,
+                'id': id,
+            })
             continue
 
         memory, instance_captions = load_memory(args, data[i], use_milvus=use_milvus, use_optimal_context=use_optimal_context, ip_address=args.db_ip)
@@ -298,12 +390,16 @@ def main(args):
 
         print("HISTORY LENGTH", len(instance_captions))
 
+        search_events = []
+        instrument_memory_search(memory, search_events)
+
         # model.update_for_instance(captions=instance_captions, ref_time=start_time)
         agent.set_memory(memory)
 
 
-        out_dict = answer_squad_question(agent, question, qa_instance)
+        out_dict = answer_squad_question(agent, question, qa_instance, search_events=search_events)
 
+        out_dict['eval_latency_s'] = time.perf_counter() - eval_latency_start
 
         out_dict['question'] = qa_instance['question']
         out_dict['id'] = id
@@ -346,6 +442,7 @@ def main(args):
     # save all_questions into json
     out_json = {
         "version": 0.1,
+        "eval_total_latency_s": time.perf_counter() - eval_run_start,
         "responses": responses
     }
 
