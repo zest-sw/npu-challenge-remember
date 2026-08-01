@@ -92,6 +92,55 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 
 ---
 
+## 5. ReMEmbR Agent 3B perf vs optimal+ 3B perf
+
+`remembr+tt_Llama-3.2-3B-Instruct__captions_tt-qwen25-vl-3b_3_secs_remembr_perf.json`과
+`optimal+tt_Llama-3.2-3B-Instruct__captions_tt-qwen25-vl-3b_3_secs_perf.json`을 직접 비교.
+둘 다 같은 3B TT 모델 + 같은 캡션 파일을 썼지만, **optimal+는 working-memory 직접답변**이고
+**ReMEmbR agent는 tool-call/retrieve/generate 루프**를 거친다.
+
+### 핵심 수치
+
+| 지표 | optimal+ 3B perf | remembr+ 3B perf |
+|---|---|---|
+| 전체 문항 수 | 30 | 30 |
+| **응답 완료** | **25** | 19 |
+| **미응답** | 5 | **11** |
+| **응답률** | **83.3%** | 63.3% |
+| **평균 elapsed** | **14.94s** | 100.71s |
+| median elapsed | 15.58s | 72.28s |
+| 평균 시도 횟수 | - | 3.04 |
+| 최대 시도 횟수 | - | 5 |
+| 평균 DB search latency | - | 0.0196s |
+| 평균 LLM latency | - | 100.69s |
+
+### 해석
+
+- **현재 3B에서는 optimal+가 ReMEmbR agent보다 훨씬 안정적이고 빠르다.**
+  응답률이 83.3% vs 63.3%로 **20%p 높고**, 평균 지연은 14.94s vs 100.71s로
+  **약 6.7배 빠르다.**
+- **병목은 retrieval이 아니라 LLM 루프**다. ReMEmbR agent의 DB 검색 시간은 평균 0.0196s에 불과하고,
+  거의 모든 시간이 tool-call / generate / retry에 들어간다.
+- **ReMEmbR agent는 출력 형식 안정성이 아직 낮다.**
+  `optimal+`의 `type`은 주로 `text/position/time`에 머무르지만, ReMEmbR agent 결과에는
+  `location`, `geolocation`, `minutes-ago`, `image description`, `answer` 등
+  평가 스키마와 직접 대응되지 않는 type 라벨이 다수 섞였다.
+- 첫 질문("When did you leave the building?")에서도 차이가 명확하다.
+  `optimal+`는 `type='text', time=1.0`으로 scoring 가능한 답을 냈지만,
+  ReMEmbR agent는 `type='geolocation', time='7 minutes-ago'`로 기록되어
+  해당 run에서는 `unanswered` 처리됐다.
+
+### 중간 결론
+
+- **동일 3B TT 모델 + 동일 캡션 조건에서는 agent loop가 아직 이득을 못 만들었다.**
+  retrieval을 여러 번 돌려도 응답률과 지연시간 모두 악화됐다.
+- 지금 단계의 ReMEmbR agent 평가는 "완주 가능성 확인"에는 성공했지만,
+  **성능상으로는 optimal+ 대비 열세**다.
+- 따라서 이후 개선 우선순위는 retrieval 품질보다 **최종 출력 스키마 일관성, tool-call 안정성,
+  재시도 축소** 쪽에 둬야 한다.
+
+---
+
 ## 부록
 
 ### 참고 커밋

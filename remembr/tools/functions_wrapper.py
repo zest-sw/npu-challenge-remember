@@ -324,7 +324,7 @@ class FunctionsWrapper(BaseChatModel, BaseLanguageModel):
             tools=json.dumps(functions, indent=2)
         )
 
-        response_message = self.llm.invoke([system_message] + messages)
+        response_message = self.llm.invoke([system_message] + messages, **kwargs)
         chat_generation_content = response_message.content
 
         if not isinstance(chat_generation_content, str):

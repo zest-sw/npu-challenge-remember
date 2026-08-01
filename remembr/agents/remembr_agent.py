@@ -1,4 +1,5 @@
 from typing import Annotated, Literal, Sequence, TypedDict
+import json
 import traceback
 import sys, re
 
@@ -38,6 +39,55 @@ from remembr.memory.memory import Memory
 from remembr.agents.agent import Agent, AgentOutput
 
 
+ANSWER_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'type': {'type': 'string'},
+        'text': {'type': 'string', 'maxLength': 300},
+        'binary': {'type': ['string', 'null']},
+        'position': {
+            'anyOf': [
+                {
+                    'type': 'array',
+                    'items': {'type': 'number'},
+                    'minItems': 3,
+                    'maxItems': 3,
+                },
+                {'type': 'null'},
+            ]
+        },
+        'orientation': {
+            'anyOf': [
+                {
+                    'type': 'array',
+                    'items': {'type': 'number'},
+                    'minItems': 1,
+                    'maxItems': 1,
+                },
+                {'type': 'null'},
+            ]
+        },
+        'time': {'type': ['number', 'string', 'null']},
+        'duration': {'type': ['number', 'string', 'null']},
+    },
+    'required': ['type', 'text', 'binary', 'position', 'orientation', 'time', 'duration'],
+    'additionalProperties': False,
+}
+
+GENERATE_SCHEMA_PROMPT = """You are a robot that can answer specific kinds of questions relating to your memory.
+Use the retrieved conversation context to answer the user's question.
+Respond with exactly one JSON object and nothing else.
+The JSON object must contain all of these keys: type, text, binary, position, orientation, time, duration.
+Use null for any field that does not apply.
+- type: the answer category
+- text: a short answer to the user
+- binary: yes/no for binary questions, otherwise null
+- position: an array like [x, y, z] for where questions, otherwise null
+- orientation: an array like [yaw] when position is provided, otherwise null
+- time: a number or string for minutes-ago answers, otherwise null
+- duration: a number or string for duration answers, otherwise null"""
+
+
 
 ### Print out state of the system
 def inspect(state):
@@ -61,7 +111,7 @@ def inspect(state):
 
 def parse_json(string):
     parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
-    return eval(parsed)
+    return json.loads(parsed)
 
 class AgentState(TypedDict):
     # The add_messages function defines how an update should be processed
@@ -111,6 +161,7 @@ class ReMEmbRAgent(Agent):
         self.temperature = temperature
 
         self.chat = chat
+        self.llm = llm
         self.llm_type = llm_type
         ### Load vectorstore
         self.embeddings = HuggingFaceEmbeddings(model_name='mixedbread-ai/mxbai-embed-large-v1')
@@ -155,7 +206,6 @@ class ReMEmbRAgent(Agent):
                 api_key='local',
                 temperature=temperature,
                 max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
-                model_kwargs={'response_format': {'type': 'json_object'}},
             )
 
         # Support for Ollama functions
@@ -231,6 +281,87 @@ class ReMEmbRAgent(Agent):
 
         self.tool_list = [self.retriever_tool, self.position_retriever_tool, self.time_retriever_tool]
         self.tool_definitions = [convert_to_openai_function(t) for t in self.tool_list]
+        self.tool_call_schema = {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"const": "__conversational_response"},
+                            "tool_input": {
+                                "type": "object",
+                                "properties": {
+                                    "response": {"type": "string", "maxLength": 500}
+                                },
+                                "required": ["response"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["tool", "tool_input"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"const": "retrieve_from_text"},
+                            "tool_input": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "string", "maxLength": 200}
+                                },
+                                "required": ["x"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["tool", "tool_input"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"const": "retrieve_from_position"},
+                            "tool_input": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {
+                                        "type": "array",
+                                        "items": {"type": "number"},
+                                        "minItems": 3,
+                                        "maxItems": 3,
+                                    }
+                                },
+                                "required": ["x"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["tool", "tool_input"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"const": "retrieve_from_time"},
+                            "tool_input": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {
+                                        "type": "string",
+                                        "pattern": "^\\d{2}:\\d{2}:\\d{2}$"
+                                    }
+                                },
+                                "required": ["x"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["tool", "tool_input"],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+            "minItems": 1,
+            "maxItems": 4,
+        }
 
     ### Nodes
 
@@ -251,10 +382,19 @@ class ReMEmbRAgent(Agent):
 
 
         # limit to 5 tool calls.
+        tool_kwargs = {}
+        if self.llm_type.startswith('tt/'):
+            tool_kwargs = {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "tool_calls", "schema": self.tool_call_schema},
+                }
+            }
         if self.agent_call_count < 3:
-            model = model.bind_tools(tools=self.tool_definitions)
+            model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
             prompt = self.agent_prompt
         else:
+            model = model.bind_tools(tools=[], **tool_kwargs)
             prompt = self.agent_gen_only_prompt
 
 
@@ -308,30 +448,44 @@ class ReMEmbRAgent(Agent):
         messages = state["messages"]
         question = messages[0].content \
                 + "\n Please responsed in the desired format."
-        last_message = messages[-1]
+        if self.llm_type.startswith('tt/'):
+            gen_prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("system", GENERATE_SCHEMA_PROMPT),
+                    MessagesPlaceholder("chat_history"),
+                    ("human", "{question}"),
+                ]
+            )
+            model = gen_prompt | self.llm.bind(
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "agent_output", "schema": ANSWER_SCHEMA},
+                },
+                max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
+            )
+        else:
+            last_message = messages[-1]
+            docs = last_message.content
+
+            prompt = PromptTemplate(
+                template=self.generate_prompt,
+                input_variables=["context", "question"],
+            )
+            filled_prompt = prompt.invoke({'question':question})
 
 
-        docs = last_message.content
+            gen_prompt = ChatPromptTemplate.from_messages(
+                [
+                    # ("human", "What do you do?"),
+                    ("system", filled_prompt.text),
+                    MessagesPlaceholder("chat_history"),
+                    # ("ai", filled_prompt.text),
+                    ("human", "{question}"),
 
-        prompt = PromptTemplate(
-            template=self.generate_prompt,
-            input_variables=["context", "question"],
-        )
-        filled_prompt = prompt.invoke({'question':question})
+                ]
+            )
 
-
-        gen_prompt = ChatPromptTemplate.from_messages(
-            [
-                # ("human", "What do you do?"),
-                ("system", filled_prompt.text),
-                MessagesPlaceholder("chat_history"),
-                # ("ai", filled_prompt.text),
-                ("human", "{question}"),
-
-            ]
-        )
-
-        model = gen_prompt | self.chat
+            model = gen_prompt | self.chat
 
         response = model.invoke({"question": question, "chat_history": messages[1:]})
 
@@ -341,7 +495,7 @@ class ReMEmbRAgent(Agent):
         try:
             if '```json' not in response:
                 # try parsing on its own since we cannot always trust llms
-                parsed = eval(response) 
+                parsed = json.loads(response)
             else:
                 parsed = parse_json(response)
 
@@ -351,9 +505,6 @@ class ReMEmbRAgent(Agent):
             for key in keys_to_check_for:
                 if key not in parsed:
                     raise ValueError("Missing all the required keys during generate. Retrying...")
-                
-            if type(parsed['position']) == str:
-                parsed['position'] = eval(parsed['position'])
             
             if (parsed['position'] is not None) and len(parsed['position']) != 3:
                 raise ValueError(f"Shape of position was incorrect. {parsed['position']}. Retrying...")
@@ -363,7 +514,7 @@ class ReMEmbRAgent(Agent):
 
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
-        return {"messages": [str(parsed)]}
+        return {"messages": [json.dumps(parsed)]}
 
 
 
@@ -427,7 +578,7 @@ class ReMEmbRAgent(Agent):
 
         if '```json' not in response:
             # try parsing on its own since we cannot always trust llms
-            parsed = eval(response) 
+            parsed = json.loads(response)
         else:
             parsed = parse_json(response)
 
@@ -451,4 +602,3 @@ if __name__ == "__main__":
 
     response = agent.query("Where can I sit?")
     response = agent.query_position("Where can I sit?")
-
