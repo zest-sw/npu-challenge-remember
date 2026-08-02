@@ -98,6 +98,28 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-02 (2) — eval 중 Ctrl-C가 안 먹히던 문제, 근본 원인 확정 + 수정
+사용자 보고: "remembr eval 돌리다 서버가 잘 안 돌아가서 Ctrl-C 했는데 30분 기다려도 안 내려갔다."
+
+**근본 원인**: `uvicorn.run()`의 `timeout_graceful_shutdown` 기본값이 `None` — SIGINT를 받아도 진행 중인
+HTTP 요청이 끝날 때까지 **무한정** 대기 후에야 리턴한다. 서버 핸들러(`/caption`, `/v1/chat/completions`)는
+sync `def`라 스레드풀에서 돌고, `_submit()`의 `fut.result()`엔 타임아웃이 없어 워커가 끝낼 때까지 블록.
+`remembr+` 에이전트 질문은 평균 70~100초(WORKLOG §3.5)라, 그 사이 SIGINT가 오면 uvicorn이 그 요청을
+기다리며 멈춘다. **여기서 멈추는 게 문제였다** — `main()`의 안전 종료 로직(`finally`에서
+`worker.join(timeout=180)`으로 워커가 device를 깨끗이 닫을 때까지 기다리는 코드, 이번 세션 초반에 만든
+것)은 이미 올바른데, `uvicorn.run()`이 리턴해야 그 코드에 도달하므로 **아예 실행되지 못하고 있었다.**
+30분 뒤 사용자가 결국 강제 종료했을 가능성이 높고, 그게 연산 중이었다면 이 세션에서 반복 확인된
+보드 wedge(force-kill 중 device teardown 스킵)로 이어졌을 것.
+
+**수정** (`tt_server/tt_infer_server.py`, `main()`): `uvicorn.run()`에 `timeout_graceful_shutdown`
+(기본 5초, `TT_SHUTDOWN_TIMEOUT`으로 조정 가능) 추가. uvicorn이 HTTP 연결단에서 무한 대기하는 것만
+막을 뿐, 워커의 안전 종료(진행 중이던 실제 device 작업은 끝까지 실행 후 `close_mesh_device()`)는
+그대로 보존 — 워커의 job queue가 종료 시그널을 진행 중인 작업 **완료 후**에만 집어들기 때문에 안전.
+
+**실측 검증**: 8B 캡션(약 40초) 요청을 발사 후 3초 뒤 SIGINT → **38초 만에 프로세스 정상 종료**(진행
+중이던 캡션이 끝까지 실행된 뒤 device 정리), 클라이언트는 11.7초 후 명확한 500 에러 수신(무한 행 아님),
+종료 후 보드 독립 테스트로 생존 확인. 이전 "30분+ 무응답"에서 근본적으로 개선.
+
 ### 2026-08-02
 - **모드 기반 모델 전환** 서버 구현 (`tt_server/tt_infer_server.py`): 클라이언트가 `POST /mode`로
   모델 조합(`3b+3b` / `caption-3b` / `llm-8b` / `caption-8b`)을 선택. 전환은 워커에서

@@ -665,7 +665,32 @@ def main():
     logger.info("Loading models on the NPU (this can take several minutes on first run)...")
     _ready.wait()  # block startup until models are on device
     try:
-        uvicorn.run(app, host=os.environ.get("TT_HOST", "0.0.0.0"), port=int(os.environ.get("TT_PORT", "8100")))
+        # timeout_graceful_shutdown: uvicorn's default is None, meaning on SIGINT it
+        # waits INDEFINITELY for in-flight requests before uvicorn.run() returns. Our
+        # sync handlers (chat_completions/caption) run in a threadpool blocked on
+        # _submit()'s fut.result() (no timeout), which only unblocks when the worker
+        # finishes that job. A slow-but-legitimate remembr+ agent call (routinely
+        # 70-100s+) or a genuinely stuck one means uvicorn.run() can sit there for a
+        # very long time (observed: 30+ min, no bound) -- and the `finally` block
+        # below, which safely waits up to 180s for the WORKER to close the device,
+        # never even gets a chance to run because we're still stuck inside
+        # uvicorn.run() above it. That dead air is what invites an unsafe SIGKILL.
+        #
+        # Bounding this to a few seconds does NOT abandon the in-flight device op or
+        # skip the safe teardown: the worker's job queue only picks up the shutdown
+        # sentinel after it finishes whatever it's currently running (see _worker),
+        # and the `finally` block's worker.join(timeout=180) below still gives that
+        # real work up to 3 more minutes to finish and call close_mesh_device()
+        # cleanly. This only stops uvicorn from ALSO independently waiting on the
+        # HTTP connection layer for that same duration -- the client's in-flight
+        # request gets cut short, but the process (and the board) shut down
+        # promptly and cleanly either way.
+        uvicorn.run(
+            app,
+            host=os.environ.get("TT_HOST", "0.0.0.0"),
+            port=int(os.environ.get("TT_PORT", "8100")),
+            timeout_graceful_shutdown=int(os.environ.get("TT_SHUTDOWN_TIMEOUT", "5")),
+        )
     finally:
         # Clean NPU teardown. The worker's `finally: close_mesh_device()` is the
         # ONLY thing that releases the board, but the worker is a daemon thread
