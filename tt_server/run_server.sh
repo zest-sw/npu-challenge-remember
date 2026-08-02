@@ -11,8 +11,11 @@ export TT_METAL_HOME="${TT_METAL_HOME:-/home/user/tt-metal}"
 # descriptor lookup then fails ("$TT_METAL_HOME/tt_metal/soc_descriptors/... does
 # not exist"). cd there first so the server works regardless of where it's launched.
 cd "$TT_METAL_HOME"
+# Pick the tt-metal venv: env_set.sh <suffix> activates python_env_<suffix>.
+# TT_PYTHON_ENV=tf457 -> python_env_tf457 (transformers 4.57.1, needed for the
+# qwen3_vl caption-8b backend); unset -> default python_env (4.53).
 # shellcheck disable=SC1091
-source "$TT_METAL_HOME/env_set.sh"          # activates python_env, sets PYTHONPATH
+source "$TT_METAL_HOME/env_set.sh" ${TT_PYTHON_ENV:+"$TT_PYTHON_ENV"}   # activates venv, sets PYTHONPATH
 
 # Non-interactive shells skip ~/.bashrc, so pull the HF token from it explicitly
 # (needed for gated meta-llama weights). HF_HOME is left at its default so the

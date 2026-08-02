@@ -25,6 +25,7 @@ Run (from the tt-metal repo root, inside the tt-metal python_env):
 
 import base64
 import concurrent.futures
+import gc
 import io
 import os
 import queue
@@ -128,8 +129,9 @@ def _set_hf_model(name: str):
 # demo_llama32.llama_inference (lines ~292-453), returning a string.
 # ===========================================================================
 class LlamaEngine:
-    def __init__(self, mesh_device, max_seq_len=LLM_MAX_SEQ_LEN):
+    def __init__(self, mesh_device, model=None, max_seq_len=LLM_MAX_SEQ_LEN):
         self.mesh_device = mesh_device
+        self.model_name = model or LLM_MODEL  # HF repo id (load() later sets self.model to the loaded object)
         self.max_seq_len = max_seq_len
         self.page_params = {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024}
         self._enforcer_data = None  # lazily built token-enforcer data (grammar decoding)
@@ -147,8 +149,8 @@ class LlamaEngine:
         return self._enforcer_data
 
     def load(self):
-        _set_hf_model(LLM_MODEL)
-        logger.info(f"[LLM] loading {LLM_MODEL} ...")
+        _set_hf_model(self.model_name)
+        logger.info(f"[LLM] loading {self.model_name} ...")
         paged_attention_config = PagedAttentionConfig(
             block_size=self.page_params["page_block_size"],
             max_num_blocks=self.page_params["page_max_num_blocks_per_dp"],
@@ -181,7 +183,7 @@ class LlamaEngine:
         # Record model + precision so a run can be verified via /health later
         # (neither is otherwise exposed anywhere).
         self.precision = getattr(getattr(model_args[0], "optimizations", None), "__name__", None)
-        logger.info(f"[LLM] ready. model={LLM_MODEL}  precision={self.precision}")
+        logger.info(f"[LLM] ready. model={self.model_name}  precision={self.precision}")
 
     def generate(self, prompt: str, max_new_tokens: int = 256, force_json: bool = False, json_schema=None,
                  temperature: float = 0.0) -> str:
@@ -308,15 +310,16 @@ class LlamaEngine:
 # demo_qwen25_vl.qwen_inference (HF path, batch 1), returning a caption string.
 # ===========================================================================
 class QwenVLEngine:
-    def __init__(self, mesh_device, max_seq_len=VLM_MAX_SEQ_LEN):
+    def __init__(self, mesh_device, model=None, max_seq_len=VLM_MAX_SEQ_LEN):
         self.mesh_device = mesh_device
+        self.model_name = model or VLM_MODEL  # HF repo id
         self.max_seq_len = max_seq_len
 
     def load(self):
         from transformers import AutoProcessor
 
-        _set_hf_model(VLM_MODEL)
-        logger.info(f"[VLM] loading {VLM_MODEL} ...")
+        _set_hf_model(self.model_name)
+        logger.info(f"[VLM] loading {self.model_name} ...")
         num_devices = self.mesh_device.get_num_devices() if isinstance(self.mesh_device, ttnn.MeshDevice) else 1
         model_args, model = qwen_prepare_generator_args(
             num_devices=num_devices,
@@ -396,30 +399,87 @@ class QwenVLEngine:
 
 
 # ===========================================================================
+# Modes — named model combinations the client switches between
+# ===========================================================================
+# A mode is a resident configuration (which LLM + which VLM). Only one mode fits
+# on the 12 GiB board at a time, so switching TEARS DOWN the device and reloads
+# (minutes). The client picks a mode per captioning/query run, not per request.
+MODES = {
+    "3b+3b":      {"llm": "meta-llama/Llama-3.2-3B-Instruct", "vlm": "Qwen/Qwen2.5-VL-3B-Instruct"},
+    "caption-3b": {"llm": None,                                "vlm": "Qwen/Qwen2.5-VL-3B-Instruct"},
+    "llm-8b":     {"llm": "meta-llama/Llama-3.1-8B-Instruct",  "vlm": None},
+    # needs the qwen3_vl backend (transformers 4.57 venv) + downloaded weights:
+    "caption-8b": {"llm": None,                                "vlm": "Qwen/Qwen3-VL-8B-Instruct"},
+}
+# Initial mode: a named mode via TT_MODE, else reproduce the legacy env config
+# (TT_ENABLE_LLM/VLM + TT_LLM_MODEL/TT_VLM_MODEL) so existing launches are unchanged.
+INITIAL_MODE = os.environ.get("TT_MODE")
+
+
+def make_vlm_engine(mesh_device, model):
+    """VLM engine for `model`. qwen25_vl is wired here; Qwen3-VL needs the qwen3_vl
+    backend under transformers 4.57 and is not loadable in this process."""
+    if "Qwen3-VL" in model:
+        raise RuntimeError(
+            f"{model} needs the qwen3_vl backend (transformers 4.57 venv); not wired in this process")
+    return QwenVLEngine(mesh_device, model=model)
+
+
+# ===========================================================================
 # Single-threaded device worker + job queue
 # ===========================================================================
 _jobs: "queue.Queue" = queue.Queue()
 _ready = threading.Event()
-_engines = {"llm": None, "vlm": None}
+# Active configuration. `switching` is set by the /mode handler so other requests
+# fail fast (503) instead of queueing behind a multi-minute reload.
+_state = {"mode": None, "llm": None, "vlm": None, "switching": False}
+_mesh = {"device": None}  # mutable: reassigned on every close+reopen switch
+
+
+def _load_mode(cfg, mode_name):
+    """Load a mode's engines onto the current (open, empty) device."""
+    md = _mesh["device"]
+    if cfg.get("llm"):
+        eng = LlamaEngine(md, model=cfg["llm"]); eng.load(); _state["llm"] = eng
+    if cfg.get("vlm"):
+        eng = make_vlm_engine(md, cfg["vlm"]); eng.load(); _state["vlm"] = eng
+        # keep HF_MODEL set so Qwen's decode_forward routes to its HF text path
+        os.environ["HF_MODEL"] = cfg["vlm"]
+    _state["mode"] = mode_name
+
+
+def _apply_mode(mode_name):
+    """Switch modes on the WORKER thread (serialized with inference): reclaim the
+    device by dropping engine refs + synchronize + close, reopen fresh, load new.
+
+    close_mesh_device frees ALL device memory (weights/KV/traces/program cache) in
+    one call — reclamation without touching model internals. synchronize first so
+    we never close mid-op (that is exactly what wedges the board). Verified: repeated
+    in-process close+reopen is stable on this board (reopen gate, 20 cycles)."""
+    if mode_name not in MODES:
+        raise ValueError(f"unknown mode {mode_name!r}; known: {list(MODES)}")
+    if _state["mode"] == mode_name:
+        return _state["mode"]
+    ttnn.synchronize_device(_mesh["device"])   # 1. finish any in-flight op
+    _state["llm"] = None                         # 2. drop engine refs BEFORE close so
+    _state["vlm"] = None                         #    their tensors' __del__ runs on the
+    gc.collect()                                 #    still-open device, not a closed one
+    ttnn.close_mesh_device(_mesh["device"])      # 3. free the whole device context
+    _mesh["device"] = _open_device()             # 4. fresh device
+    _load_mode(MODES[mode_name], mode_name)      # 5. load the new mode
+    return _state["mode"]
 
 
 def _worker():
-    mesh_device = _open_device()
+    _mesh["device"] = _open_device()
     try:
-        if ENABLE_LLM:
-            eng = LlamaEngine(mesh_device)
-            eng.load()
-            _engines["llm"] = eng
-        if ENABLE_VLM:
-            eng = QwenVLEngine(mesh_device)
-            eng.load()
-            _engines["vlm"] = eng
-        # After load, leave HF_MODEL set to a truthy value so Qwen's decode_forward
-        # keeps routing to its HF text path (Llama reads model_args, not env).
-        if ENABLE_VLM:
-            os.environ["HF_MODEL"] = VLM_MODEL
+        cfg = MODES[INITIAL_MODE] if INITIAL_MODE else {
+            "llm": LLM_MODEL if ENABLE_LLM else None,
+            "vlm": VLM_MODEL if ENABLE_VLM else None,
+        }
+        _load_mode(cfg, INITIAL_MODE or "default")
         _ready.set()
-        logger.info("Server device worker ready; models loaded.")
+        logger.info(f"Server device worker ready; mode={_state['mode']}")
 
         while True:
             fn, args, fut = _jobs.get()
@@ -430,7 +490,8 @@ def _worker():
             except Exception as e:  # noqa: BLE001
                 fut.set_exception(e)
     finally:
-        ttnn.close_mesh_device(mesh_device)
+        if _mesh["device"] is not None:
+            ttnn.close_mesh_device(_mesh["device"])
 
 
 def _open_device():
@@ -480,20 +541,55 @@ def _decode_image(b64: str) -> Image.Image:
 
 @app.get("/health")
 def health():
-    llm = _engines["llm"]
+    llm = _state["llm"]
     return {
         "ready": _ready.is_set(),
+        "mode": _state["mode"],
+        "switching": _state["switching"],
         "llm": llm is not None,
-        "vlm": _engines["vlm"] is not None,
-        "llm_model": LLM_MODEL if llm is not None else None,
+        "vlm": _state["vlm"] is not None,
+        "llm_model": getattr(llm, "model_name", None) if llm is not None else None,
         "llm_precision": getattr(llm, "precision", None) if llm is not None else None,
     }
 
 
+@app.get("/mode")
+def get_mode():
+    return {
+        "mode": _state["mode"],
+        "switching": _state["switching"],
+        "llm": getattr(_state["llm"], "model_name", None),
+        "vlm": getattr(_state["vlm"], "model_name", None),
+        "available": list(MODES),
+    }
+
+
+@app.post("/mode")
+def set_mode(req: dict):
+    """Switch the resident model configuration. Blocks for the reload (minutes);
+    concurrent inference requests get 503 while switching rather than queueing."""
+    mode = req.get("mode")
+    if mode not in MODES:
+        raise HTTPException(400, f"unknown mode {mode!r}; available: {list(MODES)}")
+    if _state["switching"]:
+        raise HTTPException(503, "a mode switch is already in progress")
+    if _state["mode"] == mode:
+        return {"mode": mode, "switched": False, **get_mode()}
+    _state["switching"] = True  # make other requests fail fast immediately
+    try:
+        _submit(_apply_mode, mode)  # runs on the worker; tears down + reloads
+    finally:
+        _state["switching"] = False
+    return {"mode": _state["mode"], "switched": True, **get_mode()}
+
+
 @app.post("/v1/chat/completions")
 def chat_completions(req: dict):
-    if _engines["llm"] is None:
-        raise HTTPException(503, "LLM not loaded (TT_ENABLE_LLM=0?)")
+    if _state["switching"]:
+        raise HTTPException(503, "mode switch in progress, retry")
+    if _state["llm"] is None:
+        raise HTTPException(409, f"chat unavailable in mode '{_state['mode']}' (no LLM loaded). "
+                                 f"POST /mode to switch to a mode with an LLM.")
     messages = req.get("messages", [])
     max_tokens = int(req.get("max_tokens") or 256)
     prompt = _messages_to_prompt(messages)
@@ -510,12 +606,12 @@ def chat_completions(req: dict):
     # remembr's eval loop re-asks until the answer scores, and with greedy
     # decoding every retry is identical, so it would spin forever.
     temperature = float(req.get("temperature") or 0.0)
-    text = _submit(_engines["llm"].generate, prompt, max_tokens, force_json, json_schema, temperature)
+    text = _submit(_state["llm"].generate, prompt, max_tokens, force_json, json_schema, temperature)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": req.get("model", LLM_MODEL),
+        "model": req.get("model", _state["llm"].model_name),
         "choices": [
             {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
         ],
@@ -524,14 +620,17 @@ def chat_completions(req: dict):
 
 @app.post("/caption")
 def caption(req: dict):
-    if _engines["vlm"] is None:
-        raise HTTPException(503, "VLM not loaded (TT_ENABLE_VLM=0?)")
+    if _state["switching"]:
+        raise HTTPException(503, "mode switch in progress, retry")
+    if _state["vlm"] is None:
+        raise HTTPException(409, f"/caption unavailable in mode '{_state['mode']}' (no VLM loaded). "
+                                 f"POST /mode to switch to a mode with a VLM.")
     images = [_decode_image(b) for b in req.get("images", [])]
     if not images:
         raise HTTPException(400, "no images provided")
     prompt = req.get("prompt", DEFAULT_VLM_PROMPT)
     max_gen_len = int(req.get("max_gen_len") or 128)
-    text = _submit(_engines["vlm"].describe, images, prompt, max_gen_len)
+    text = _submit(_state["vlm"].describe, images, prompt, max_gen_len)
     return {"caption": text}
 
 

@@ -98,6 +98,20 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-02
+- **모드 기반 모델 전환** 서버 구현 (`tt_server/tt_infer_server.py`): 클라이언트가 `POST /mode`로
+  모델 조합(`3b+3b` / `caption-3b` / `llm-8b` / `caption-8b`)을 선택. 전환은 워커에서
+  `synchronize → close_mesh_device → open → load`로 **device를 통째 반환**(회수 실패/누수 없음,
+  tt-metal 내부 무접근). 불일치 요청 → 409, 전환 중 → 503. 검증: 반복 close+reopen 20회 무먹통,
+  모드 전환 6회(4.53)·4회(4.57) 서버+보드 생존, 엔드포인트 매칭 정확. [[VLM_MODE_SWITCHING_PLAN]]
+- **venv 통일 (transformers 4.57.1)**: qwen3_vl(4.57 요구)와 기존 3B 백엔드를 한 venv로. 게이트에서
+  qwen25_vl 로드가 4.57에서 깨짐 — **원인: tt-metal `model_config.py:1435`가 빈 `_name_or_path`(4.57
+  동작 변경)를 덮어쓰기 조건으로 오인** → 잘못된 AutoModel 분기. **load-bearing tt-metal 수정 1줄**:
+  `if "_name_or_path" in config:` → `if config.get("_name_or_path"):` (하위호환, 4.53 불변). 이후
+  4.57.1에서 3B 로드+LLM/VLM 추론+모드 전환 전부 정상, downstream 크래시 break 없음. 통일 venv =
+  `python_env_tf457`(`TT_PYTHON_ENV=tf457`로 선택).
+  - 미완: caption-8b(qwen3) 백엔드 배선 + 8B 가중치 다운로드; 출력 품질 4.53↔4.57 A/B.
+
 ### 2026-07-15
 - `458bf09` **두 번째 slowdown 원인 = Tracy profiling build**: Inspector를 끈 뒤 드러남(84→50 it/s).
   **같은 이미지 12회 실행** 동안 RSS +33MB/request, latency +1.0s/request가 **선형** 증가(입력이 동일하므로 caching이 아니라 누적).
