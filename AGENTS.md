@@ -12,6 +12,12 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 
 ## ⚠️ 절대 하지 말 것 (보드를 몇 시간 날림, 여러 번 확인됨)
 
+0. **NPU 서버를 올리고 내리는 작업은 사람 사용자가 지정된 tmux 세션에서만 직접 수행한다.**
+   AI 에이전트는 `run_server.sh` 실행, 새 서버/background process 기동, `tmux send-keys`,
+   `Ctrl-C` 전송, signal/`kill`/`pkill`, 서버 재시작을 하지 않는다. 상태 확인이 필요하면
+   `/health`, process 목록, tmux pane/log를 **읽기 전용**으로 조회할 수 있지만, lifecycle 변경이
+   필요하면 작업을 멈추고 사용자에게 기동·종료를 요청한다. 사용자가 명시적으로 요청하더라도
+   서버 lifecycle은 사용자가 tmux에서 직접 조작하는 원칙을 우선한다.
 1. **서버에 `kill -9`(SIGKILL) 쓰지 말 것.** device teardown을 건너뛰어 보드가 FW-init 실패
    상태로 먹통이 된다. `Ctrl-C`(SIGINT)만 쓸 것 — 안전 종료가 구현돼 있다(아래 참고).
 2. **`Ctrl-C` 연타하지 말 것.** teardown 도중 두 번째 인터럽트가 오면 같은 결과.
@@ -29,6 +35,8 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 
 ## 서버 (`tt_server/tt_infer_server.py`)
 
+- **소유권**: 서버 기동·종료·재시작은 사람 사용자가 tmux에서 직접 한다. 에이전트는 서버를
+  조작하지 않고 `/health`와 로그만 확인하며, lifecycle 변경이 필요하면 사용자에게 요청한다.
 - **내부 구조**: `tt_infer_server.py`는 호환 entrypoint이고 실제 코드는
   `presentation/http → application → domain` + `infrastructure/tenstorrent`로 분리돼 있다.
   route에서 엔진/device를 직접 참조하지 말고 `InferenceService`와 `RuntimePort` 경계를 유지할 것.
