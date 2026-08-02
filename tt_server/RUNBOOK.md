@@ -228,6 +228,8 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 | `TT_VLM_MAX_SEQ_LEN` | `1024` | captioning |
 | `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | fallback 시 하나만 로드 |
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
+| `TT_MAX_CAPTION_FRAMES` | `5` | 요청당 최대 frame 수. 보드 안정성을 위해 6장 이상은 HTTP 400 |
+| `TT_WORKER_SHUTDOWN_TIMEOUT` | `180` | device worker join 대기 시간(non-daemon worker라 timeout 뒤에도 강제 폐기되지 않음) |
 | `TT_PORT` | `8100` | |
 
 **remembr side**
@@ -238,4 +240,3 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 | `TT_VLM_URL` | `http://localhost:8100/caption` | Captioner → server |
 | `TT_VLM_TIMEOUT` | `900` | caption client timeout (seconds) |
 | `TT_LLM_MAX_TOKENS` | `256` | max tokens the LLM generates |
-

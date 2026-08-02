@@ -36,7 +36,7 @@ Camera frame ──▶ [VLM caption] ──▶ [store in vector memory] ──�
 
 ## 2. 아키텍처
 
-### 2.1 통합 추론 서버 (`remembr/tt_server/tt_infer_server.py`)
+### 2.1 통합 추론 서버 (`remembr/tt_server/`)
 
 NPU 모델을 remembr 프로세스에 직접 로드하는 대신, **HTTP 서버로 분리** 한다.
 이유: ttnn/tt-metal 스택이 remembr의 의존성 핀과 충돌하고, 두 프로세스가 하나의 device를 동시에 점유할 수 없기 때문이다.
@@ -46,8 +46,12 @@ NPU 모델을 remembr 프로세스에 직접 로드하는 대신, **HTTP 서버�
   - `POST /v1/chat/completions` — LLM (OpenAI 호환)
   - `POST /caption` — VLM (base64 이미지 리스트 + 프롬프트 → caption)
   - `GET /health` — 로드 상태
-- **단일 worker thread + job queue** 설계: 모든 device 작업(open/load/prefill/decode)이 하나의 스레드로 직렬화된다. FastAPI 핸들러는 job을 큐에 넣고 Future에서 블록한다. → HTTP 요청이 아무리 많이 들어와도 device는 정확히 한 번에 하나씩만 처리한다.
-- LLM과 VLM 엔진 모두 **시작 시 device에 co-resident로 로드** 된다(`TT_ENABLE_LLM`/`TT_ENABLE_VLM`, 둘 다 기본 on). `_ready` 이벤트가 로딩이 끝날 때까지 startup을 블록한다.
+- **레이어드 구조**: `presentation/http → application → domain`으로 의존하고,
+  `infrastructure/tenstorrent`가 application의 `RuntimePort`를 구현한다. 기존
+  `tt_infer_server.py`는 실행 경로 호환만 담당하며 실제 조립은 `main.py`가 한다.
+- **단일 non-daemon worker thread + job queue** 설계: 모든 device 작업(open/load/prefill/decode)이 하나의 스레드로 직렬화된다. FastAPI 핸들러는 application service를 거쳐 command를 큐에 넣고 Future에서 블록한다. → HTTP 요청이 아무리 많이 들어와도 device는 정확히 한 번에 하나씩만 처리한다.
+- LLM과 VLM 엔진 모두 **시작 시 device에 co-resident로 로드** 된다(`TT_ENABLE_LLM`/`TT_ENABLE_VLM`, 둘 다 기본 on). startup event는 성공뿐 아니라 예외에도 반드시 풀리며, 로딩 실패는 main thread에 전달된다.
+- runtime 상태는 `starting/ready/switching/failed/stopping/stopped`의 immutable snapshot으로 노출된다. 모드 로딩 실패 시 닫힌 이전 device의 mode를 계속 표시하지 않고 `failed`로 전환한다.
 - 주요 env vars
   - `TT_LLM_MAX_SEQ_LEN` (기본 4096), `TT_VLM_MAX_SEQ_LEN` (기본 2048)
   - `TT_PORT` (8100), `TT_HOST` (0.0.0.0)
@@ -55,6 +59,7 @@ NPU 모델을 remembr 프로세스에 직접 로드하는 대신, **HTTP 서버�
   - `json_object` → 임의의 유효한 JSON (Ollama `format="json"` 과 동등)
   - `json_schema` → 주어진 schema로 제약 (`TokenEnforcer` + `JsonSchemaParser`, host-side masking 후 argmax)
 - VLM 입력 이미지는 서버에서 **224×224로 resize** 된다.
+- 보드 안정성을 위해 한 요청은 기본 최대 5 frame이며(`TT_MAX_CAPTION_FRAMES`), 6장 이상은 NPU에 보내기 전에 HTTP 400으로 거부한다.
 
 ### 2.2 Captioner (`remembr/captioners/tenstorrent_captioner.py`)
 
@@ -259,7 +264,8 @@ TT_SMOKE_QUESTION="did you see a dog?" PYTHONPATH=$(pwd) python examples/tt_smok
 
 | File | Role |
 |---|---|
-| `tt_server/tt_infer_server.py` | 통합 NPU 추론 서버 (LLM+VLM, port 8100, constrained JSON decoding, clean shutdown, tensor deallocation) |
+| `tt_server/tt_infer_server.py` | 기존 실행 경로 호환 entrypoint (`tt_server.main` 호출) |
+| `tt_server/main.py` + layered packages | HTTP/application/domain 분리, 단일 NPU runtime, LLM+VLM, constrained JSON decoding, clean shutdown |
 | `tt_server/run_server.sh` | 서버 런처 (env 설정) |
 | `remembr/captioners/tenstorrent_captioner.py` | Qwen2.5-VL captioner (HTTP client, `max_gen_len`, import fallback) |
 | `remembr/agents/non_agent.py` | Llama-3.2-3B `tt/` 백엔드, JSON schema 제약 |

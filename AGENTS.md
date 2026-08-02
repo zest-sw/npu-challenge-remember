@@ -29,6 +29,9 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 
 ## 서버 (`tt_server/tt_infer_server.py`)
 
+- **내부 구조**: `tt_infer_server.py`는 호환 entrypoint이고 실제 코드는
+  `presentation/http → application → domain` + `infrastructure/tenstorrent`로 분리돼 있다.
+  route에서 엔진/device를 직접 참조하지 말고 `InferenceService`와 `RuntimePort` 경계를 유지할 것.
 - **기동**: `bash tt_server/run_server.sh` (tt-metal 루트 아무 데서나 실행해도 됨 — 스크립트가
   알아서 `cd`한다. 직접 `env_set.sh`를 다른 위치에서 source하면 `TT_METAL_HOME`이 깨진다, 이미
   겪음). **모드 지정**: `TT_MODE=caption-8b bash run_server.sh` — 없으면 `3b+3b` 기본.

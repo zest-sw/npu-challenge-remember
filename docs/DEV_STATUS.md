@@ -98,6 +98,25 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-02 (3) — NPU 서버 레이어드 아키텍처 마이그레이션 (`refacoter` branch)
+
+- 772줄 단일 `tt_infer_server.py`를 `presentation/http → application → domain`과
+  `infrastructure/tenstorrent` 계층으로 분리. 기존 파일은 `run_server.sh` 실행 경로를 보존하는
+  얇은 entrypoint로 유지했다. 외부 endpoint와 OpenAI 응답 shape는 유지한다.
+- 전역 `_jobs/_state/_mesh` 대신 `TenstorrentRuntime` actor가 device와 엔진을 소유한다.
+  모든 open/load/infer/switch/close는 하나의 non-daemon worker에서 실행되고 외부에는 immutable
+  lifecycle snapshot만 노출된다.
+- 초기 model load 예외에도 startup wait가 반드시 풀리고 device가 닫히도록 수정. 모드 로딩 실패는
+  이전 mode를 거짓으로 유지하지 않고 `failed` 상태와 오류를 노출한다.
+- Pydantic HTTP schema와 application 오류 매핑 추가. 검증되지 않은 6-frame 이상 요청은 device에
+  도달하기 전에 400으로 거부한다(`TT_MAX_CAPTION_FRAMES`, 기본 5).
+- **검증**: compileall 및 fake device/engine 기반 unit·HTTP contract test 14개를
+  기본 venv·tt-metal 기본 venv·`tf457`에서 통과(직렬 실행, close→reopen, switch 실패 후 복구,
+  startup failure cleanup, 기존 응답 shape). 두 tt-metal 환경에서 Llama/Qwen2.5/Qwen3 backend import도
+  확인했다. 실제 BOS NPU에서 `3b+3b` LLM JSON + VLM caption 추론 성공, `caption-3b → 3b+3b`
+  close/reopen 왕복 전환과 중간 LLM 409·복귀 후 추론 성공, 단일 Ctrl-C 후
+  `NPU released cleanly`와 port 해제까지 확인했다.
+
 ### 2026-08-02 (2) — eval 중 Ctrl-C가 안 먹히던 문제, 근본 원인 확정 + 수정
 사용자 보고: "remembr eval 돌리다 서버가 잘 안 돌아가서 Ctrl-C 했는데 30분 기다려도 안 내려갔다."
 

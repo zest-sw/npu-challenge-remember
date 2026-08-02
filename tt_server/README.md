@@ -13,7 +13,15 @@ import), tt-metal 소스 트리에 복사하거나 수정하는 것은 없습니
 ```
 remembr/
 ├── tt_server/
-│   ├── tt_infer_server.py   # unified NPU inference server (LLM + VLM)
+│   ├── tt_infer_server.py   # 기존 실행 경로를 보존하는 얇은 호환 entrypoint
+│   ├── main.py              # 설정·runtime·HTTP app을 조립하는 composition root
+│   ├── domain/              # lifecycle snapshot과 서버 오류
+│   ├── application/         # chat/caption/mode 유스케이스와 RuntimePort
+│   ├── presentation/http/   # FastAPI schema, route, HTTP 오류 변환
+│   ├── infrastructure/
+│   │   └── tenstorrent/     # 단일 worker, device lifecycle, LLM/VLM engine
+│   ├── config/              # 환경변수와 mode catalog
+│   ├── tests/               # NPU 없이 실행하는 contract/runtime 단위 테스트
 │   ├── run_server.sh        # launcher (sets env, runs in tt-metal venv)
 │   ├── npu_info.py          # hardware/spec dump (arch, DRAM, Tensix grid, L1)
 │   ├── RUNBOOK.md           # start/venv/troubleshoot/shutdown
@@ -41,6 +49,11 @@ remembr/
 단일 프로세스가 보드를 소유하고(ttnn이 배타적으로 open) 두 모델을 모두
 호스팅합니다. 단일 worker thread + queue가 모든 prefill/decode를 직렬화하므로
 `/caption`과 `/v1/chat/completions` 요청을 동시에 보내도 안전합니다.
+
+서버 내부 의존 방향은 `presentation → application → domain`이며,
+`infrastructure/tenstorrent`가 application의 `RuntimePort`를 구현합니다. FastAPI route는
+엔진이나 mutable device state를 직접 참조하지 않습니다. NPU의 open/load/infer/switch/close는
+모두 non-daemon device worker가 소유하고, 외부에는 immutable runtime snapshot만 노출됩니다.
 
 ## 요구 사항
 
@@ -120,7 +133,7 @@ true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
 ```jsonc
 // request
 {
-  "images": ["<base64 image>", "..."],  // 필수, 비어있으면 안 됨. PIL이 읽을 수 있는 형식
+  "images": ["<base64 image>", "..."],  // 필수, 1~5장. PIL이 읽을 수 있는 형식
                                         // (JPEG/PNG). 서버가 decode -> RGB -> 224x224 resize.
                                         // 여러 장은 한 장면의 프레임들로 취급.
   "prompt": "string",                   // 선택, 기본값은 서버의 DEFAULT_VLM_PROMPT.
@@ -132,7 +145,8 @@ true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
 }
 // 200
 {"caption": "string"}
-// 409 현재 모드에 VLM 없음(모드 전환 필요)   503 전환 중   400 no images provided
+// 409 현재 모드에 VLM 없음(모드 전환 필요)   503 전환 중
+// 400 이미지 없음/6장 이상/잘못된 base64 이미지
 ```
 
 ### `POST /v1/chat/completions` — LLM (Llama-3.2-3B), OpenAI 호환
@@ -214,6 +228,8 @@ print(r.json()["caption"])
 | `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | `TT_MODE` 미지정 시만, 하나만 켜서 fallback 구성 |
 | `TT_PYTHON_ENV` | (unset) | `tf457`로 주면 `python_env_tf457`(transformers 4.57.1) 사용 — `caption-8b`에 필요 |
 | `TT_SHUTDOWN_TIMEOUT` | `5` | Ctrl-C 시 uvicorn이 진행 중 요청을 기다리는 최대 초. 진행 중이던 실제 device 작업은 이 값과 무관하게 끝까지 실행된 뒤 안전하게 정리됨 |
+| `TT_WORKER_SHUTDOWN_TIMEOUT` | `180` | main thread가 device worker의 안전 종료를 기다리는 시간. worker는 non-daemon이라 이 시간이 지나도 interpreter가 강제로 버리지 않음 |
+| `TT_MAX_CAPTION_FRAMES` | `5` | 한 `/caption` 요청에서 허용할 최대 frame 수. 6장 이상은 검증되지 않은 vision attention deadlock을 막기 위해 거부 |
 | `TT_LLM_MAX_SEQ_LEN` / `TT_VLM_MAX_SEQ_LEN` | `1024` | raise for longer context (uses more DRAM) |
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
 | `TT_PORT` | `8100` | |
@@ -269,7 +285,7 @@ argmax 전에 grammar가 허용하는 token id로 masking됩니다(`_masked_argm
   join하여 `close_mesh_device()`가 실행되고 보드가 깨끗하게 해제되며, teardown 중
   추가 SIGINT/SIGTERM은 무시합니다(Ctrl-C를 연타해도 안전). **절대 `kill -9` 하지
   마세요** — SIGKILL은 teardown을 건너뛰어 보드를 먹통으로 만듭니다.
-- **Caption마다 느려짐.** `describe()`는 request마다 device tensor를 deallocate하여
-  긴 captioning 실행에서 latency가 점점 증가하지 않도록 합니다. 그래도 실행이
-  느려지면 서버를 재시작하고(device state 초기화) captioner checkpoint에서
-  재개하세요. (deallocation 수정은 여전히 fresh-run 재확인이 필요합니다.)
+- **Caption마다 느려짐.** Inspector와 Tracy가 모두 꺼져 있는지 먼저 확인하세요. 과거의
+  request별 명시적 tensor deallocation 접근은 효과가 없어 되돌렸으며, 현재 엔진은 tt-metal의
+  lifecycle을 그대로 따릅니다. 그래도 느려지면 서버를 정상 종료 후 재시작하고 captioner
+  checkpoint에서 재개하세요.
