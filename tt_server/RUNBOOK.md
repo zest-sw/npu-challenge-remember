@@ -111,6 +111,15 @@ TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
 - **`TT_LLM_MAX_SEQ_LEN=2048`은 필수다.** NonAgent 프롬프트는 2048까지 패딩되므로, 기본값
   (1024)이면 `Padded prefill end idx 2048 exceeds max seq len` 에러가 난다.
 - VLM에는 1024로 충분하다(이미지는 서버에서 224×224로 리사이즈된다).
+- **특정 모드로 바로 올리려면 `TT_MODE`를 지정한다** (기본은 `3b+3b`와 동일 구성):
+  ```bash
+  TT_MODE=caption-8b TT_PYTHON_ENV=tf457 \
+    bash /home/user/remembr/tt_server/run_server.sh   # Qwen3-VL-8B만, 4.57 venv
+  TT_MODE=llm-8b \
+    bash /home/user/remembr/tt_server/run_server.sh   # Llama-3.1-8B만
+  ```
+  오타 등 알 수 없는 모드는 device를 건드리기 전에 즉시 실패한다. 다른 사람이 이미 쓰고
+  있는 서버라면 `curl localhost:8100/health`로 현재 모드부터 확인할 것 — 공유 보드이므로.
 - 두 모델 로딩 + weight cache 빌드에 **몇 분**이 걸린다. 이 로그 줄이 나오면 준비 완료다:
   ```
   INFO:     Application startup complete.

@@ -439,6 +439,13 @@ MODES = {
 # Initial mode: a named mode via TT_MODE, else reproduce the legacy env config
 # (TT_ENABLE_LLM/VLM + TT_LLM_MODEL/TT_VLM_MODEL) so existing launches are unchanged.
 INITIAL_MODE = os.environ.get("TT_MODE")
+if INITIAL_MODE and INITIAL_MODE not in MODES:
+    # Fail fast, in the main thread, before the device worker even starts. Without
+    # this, a typo'd TT_MODE raises KeyError inside the worker (a daemon thread) --
+    # the main thread's `_ready.wait()` then blocks forever with no clear signal
+    # beyond a traceback that scrolls by in the log before any "ready" message.
+    raise SystemExit(f"TT_MODE={INITIAL_MODE!r} is not a known mode. "
+                     f"Available: {', '.join(MODES)}")
 
 
 def make_vlm_engine(mesh_device, model):

@@ -23,7 +23,21 @@ source "$TT_METAL_HOME/env_set.sh" ${TT_PYTHON_ENV:+"$TT_PYTHON_ENV"}   # activa
 eval "$(grep -E '^export (HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' ~/.bashrc 2>/dev/null || true)"
 export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
 
-# Models + memory-fit settings (this board exposes only ~12GB DRAM: 3 banks).
+# Startup mode (this board exposes only ~12GB DRAM: 3 banks, so only one model
+# combination fits at a time). Set TT_MODE to load a named combination directly
+# instead of loading the legacy default and switching via POST /mode afterward:
+#   TT_MODE=3b+3b      Llama-3.2-3B + Qwen2.5-VL-3B  (default combination)
+#   TT_MODE=caption-3b Qwen2.5-VL-3B only (captioning, no LLM)
+#   TT_MODE=llm-8b     Llama-3.1-8B only (no VLM)
+#   TT_MODE=caption-8b Qwen3-VL-8B only -- needs TT_PYTHON_ENV=tf457 and the
+#                      weights downloaded (not wired for the default 4.53 venv)
+# An unknown TT_MODE fails immediately with a clear error, before the device is
+# touched -- it does not hang or wedge the board.
+# Leave TT_MODE unset to keep the old behavior: TT_ENABLE_LLM/VLM + TT_LLM_MODEL/
+# TT_VLM_MODEL below pick the models individually (still the default combination).
+export TT_MODE="${TT_MODE:-}"
+
+# Models + memory-fit settings (used when TT_MODE is unset).
 export TT_LLM_MODEL="${TT_LLM_MODEL:-meta-llama/Llama-3.2-3B-Instruct}"
 export TT_VLM_MODEL="${TT_VLM_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 export TT_LLM_MAX_SEQ_LEN="${TT_LLM_MAX_SEQ_LEN:-1024}"

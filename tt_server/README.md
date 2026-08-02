@@ -79,10 +79,42 @@ schema에는 `{"type": "object"}`만 표시됩니다 — request/response 필드
 device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
 ```jsonc
 // 200
-{"ready": true, "llm": true, "vlm": true}
+{"ready": true, "mode": "3b+3b", "switching": false, "llm": true, "vlm": true,
+ "llm_model": "meta-llama/Llama-3.2-3B-Instruct", "llm_precision": "performance"}
 ```
-`ready`는 활성화된 두 모델이 모두 device에 로드된 후에만 true로 바뀝니다. `llm`/`vlm`은
-`TT_ENABLE_LLM` / `TT_ENABLE_VLM`을 따릅니다.
+`ready`는 현재 모드의 모델이 전부 device에 로드된 후에만 true로 바뀝니다. `switching`이
+true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
+
+### 모드 — 동시에 로드되는 모델 조합
+보드 DRAM이 ~12GB라 조합 하나만 상주 가능합니다. **모드**는 그 조합에 이름을 붙인 것:
+
+| 모드 | LLM | VLM |
+|---|---|---|
+| `3b+3b` (기본) | Llama-3.2-3B | Qwen2.5-VL-3B |
+| `caption-3b` | — | Qwen2.5-VL-3B |
+| `llm-8b` | Llama-3.1-8B | — |
+| `caption-8b` | — | Qwen3-VL-8B (transformers 4.57 venv 필요, `TT_PYTHON_ENV=tf457`) |
+
+**시작 시 선택**: `TT_MODE=caption-8b bash run_server.sh` — 잘못된 이름이면 device를 건드리기
+전에 바로 실패합니다(조용히 멈추지 않음). 안 주면 `TT_ENABLE_LLM`/`TT_ENABLE_VLM` +
+`TT_LLM_MODEL`/`TT_VLM_MODEL`로 기존 방식대로 뜹니다.
+
+**실행 중 전환**: 다른 모드가 필요하면 요청이 자동으로 바꾸지 않습니다 — 반드시 `/mode`를
+명시적으로 호출해야 합니다(로드에 수 분 걸리므로). 전환은 device를 완전히 반환(`synchronize
+→ close_mesh_device → reopen → load`)한 뒤 다시 올리므로 자원 누수가 없습니다.
+
+```jsonc
+// GET /mode
+{"mode": "3b+3b", "switching": false, "llm": "meta-llama/Llama-3.2-3B-Instruct",
+ "vlm": "Qwen/Qwen2.5-VL-3B-Instruct", "available": ["3b+3b", "caption-3b", "llm-8b", "caption-8b"]}
+
+// POST /mode  {"mode": "caption-8b"}
+// 200 (전환 완료 후 반환, 수 분 걸릴 수 있음)
+{"mode": "caption-8b", "switched": true, ...}
+// 400 unknown mode   503 already switching
+```
+현재 모드에 없는 엔드포인트를 호출하면 **409**(예: `caption-3b`에서 `/v1/chat/completions`) —
+"모드를 바꾸라"는 안내 메시지와 함께. 조용히 블록하는 대신 즉시 명확한 에러를 냅니다.
 
 ### `POST /caption` — VLM (Qwen2.5-VL)
 ```jsonc
@@ -100,7 +132,7 @@ device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
 }
 // 200
 {"caption": "string"}
-// 503 VLM not loaded (TT_ENABLE_VLM=0)   400 no images provided
+// 409 현재 모드에 VLM 없음(모드 전환 필요)   503 전환 중   400 no images provided
 ```
 
 ### `POST /v1/chat/completions` — LLM (Llama-3.2-3B), OpenAI 호환
@@ -129,7 +161,7 @@ device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
   "model": "meta-llama/Llama-3.2-3B-Instruct",
   "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}]
 }
-// 503 LLM not loaded (TT_ENABLE_LLM=0)
+// 409 현재 모드에 LLM 없음(모드 전환 필요)   503 전환 중
 ```
 지원하지 않는 OpenAI 필드(`stream`, `top_p`, `n`, `stop`, …)는 무시되며, usage/token
 count는 보고되지 않습니다.
@@ -176,9 +208,12 @@ print(r.json()["caption"])
 
 | var | default | note |
 |-----|---------|------|
-| `TT_LLM_MODEL` | `meta-llama/Llama-3.2-3B-Instruct` | LLM (agent reasoning) |
-| `TT_VLM_MODEL` | `Qwen/Qwen2.5-VL-3B-Instruct` | VLM (captioning) |
-| `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | load one at a time for the fallback |
+| `TT_MODE` | (unset) | 시작 시 로드할 모드 이름(`3b+3b`/`caption-3b`/`llm-8b`/`caption-8b`). 미지정 모드면 device 건드리기 전에 즉시 실패. 비우면 아래 개별 변수로 결정 |
+| `TT_LLM_MODEL` | `meta-llama/Llama-3.2-3B-Instruct` | LLM (agent reasoning), `TT_MODE` 미지정 시만 |
+| `TT_VLM_MODEL` | `Qwen/Qwen2.5-VL-3B-Instruct` | VLM (captioning), `TT_MODE` 미지정 시만 |
+| `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | `TT_MODE` 미지정 시만, 하나만 켜서 fallback 구성 |
+| `TT_PYTHON_ENV` | (unset) | `tf457`로 주면 `python_env_tf457`(transformers 4.57.1) 사용 — `caption-8b`에 필요 |
+| `TT_SHUTDOWN_TIMEOUT` | `5` | Ctrl-C 시 uvicorn이 진행 중 요청을 기다리는 최대 초. 진행 중이던 실제 device 작업은 이 값과 무관하게 끝까지 실행된 뒤 안전하게 정리됨 |
 | `TT_LLM_MAX_SEQ_LEN` / `TT_VLM_MAX_SEQ_LEN` | `1024` | raise for longer context (uses more DRAM) |
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
 | `TT_PORT` | `8100` | |
