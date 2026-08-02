@@ -105,6 +105,7 @@ VLM_MODEL = os.environ.get("TT_VLM_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
 
 ENABLE_LLM = os.environ.get("TT_ENABLE_LLM", "1") == "1"
 ENABLE_VLM = os.environ.get("TT_ENABLE_VLM", "1") == "1"
+DEBUG_DECODE = os.environ.get("TT_DEBUG_DECODE", "0") == "1"
 
 LLM_MAX_SEQ_LEN = int(os.environ.get("TT_LLM_MAX_SEQ_LEN", "4096"))
 VLM_MAX_SEQ_LEN = int(os.environ.get("TT_VLM_MAX_SEQ_LEN", "2048"))
@@ -233,6 +234,8 @@ class LlamaEngine:
             enforcer = TokenEnforcer(self._ensure_enforcer_data(), JsonSchemaParser(json_schema))
             first = _masked_sample(logits, enforcer.get_allowed_tokens([]), vocab, temperature)
             generated = [] if first in tokenizer.stop_tokens else [first]
+            if DEBUG_DECODE and generated:
+                print(tokenizer.decode([first]), end="", flush=True)
             current_pos = torch.tensor([decoding_pos[0]])
             out_tok = torch.tensor([[first]])
             for _ in range(max_new_tokens - 1):
@@ -245,9 +248,14 @@ class LlamaEngine:
                 if nxt in tokenizer.stop_tokens:
                     break
                 generated.append(nxt)
+                if DEBUG_DECODE:
+                    print(tokenizer.decode([nxt]), end="", flush=True)
                 out_tok = torch.tensor([[nxt]])
             ttnn.synchronize_device(mesh_device)
-            return tokenizer.decode(generated).strip()
+            text = tokenizer.decode(generated).strip()
+            if DEBUG_DECODE:
+                print("", flush=True)
+            return text
 
         # ---- unconstrained device-greedy path ----
         prefilled_token = torch.argmax(logits, dim=-1)
@@ -259,6 +267,8 @@ class LlamaEngine:
         generated = []
         if first not in tokenizer.stop_tokens:
             generated.append(first)
+            if DEBUG_DECODE:
+                print(tokenizer.decode([first]), end="", flush=True)
 
         current_pos = torch.tensor([decoding_pos[0]])
         out_tok = prefilled_token
@@ -282,10 +292,15 @@ class LlamaEngine:
             if tok in tokenizer.stop_tokens:
                 break
             generated.append(tok)
+            if DEBUG_DECODE:
+                print(tokenizer.decode([tok]), end="", flush=True)
             op_event = ttnn.record_event(mesh_device, 0)
 
         ttnn.synchronize_device(mesh_device)
-        return tokenizer.decode(generated).strip()
+        text = tokenizer.decode(generated).strip()
+        if DEBUG_DECODE:
+            print("", flush=True)
+        return text
 
 
 # ===========================================================================
