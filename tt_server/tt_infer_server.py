@@ -49,16 +49,33 @@ from models.bos_model.llama32.tt.generator import SamplingParams, create_submesh
 from models.bos_model.llama32.tt.model_config import DecodersPrecision
 from models.bos_model.llama32.demo_llama32 import create_tt_page_table
 
-# ---- qwen25_vl (VLM) imports ----------------------------------------------
+# ---- VLM imports ----------------------------------------------------------
+# Backend-agnostic (used to build the dialog for both Qwen2.5-VL and Qwen3-VL):
 from llama_models.llama3.api.datatypes import ImageMedia, UserMessage
-from models.bos_model.qwen25_vl.tt.common import hf_multimodal_encode
-from models.bos_model.qwen25_vl.tt.generator import Generator as QwenGenerator
-from models.bos_model.qwen25_vl.tt.model_config import DecodersPrecision as QwenDecodersPrecision
-from models.bos_model.qwen25_vl.demo_qwen25_vl import (
-    get_batch_sampler,
-    prepare_generator_args as qwen_prepare_generator_args,
-    warmup_model as qwen_warmup_model,
-)
+
+
+def _vlm_backend(model_name):
+    """The tt-metal VLM backend's functions for this model. qwen25_vl and qwen3_vl
+    expose identical APIs, so the engine below is backend-agnostic. Lazy-imported so
+    a 4.53 venv (no Qwen3-VL support) only fails if caption-8b is actually loaded;
+    Qwen3-VL needs the transformers-4.57 venv (TT_PYTHON_ENV=tf457)."""
+    if "Qwen3-VL" in model_name:
+        from models.bos_model.qwen3_vl.tt.common import hf_multimodal_encode
+        from models.bos_model.qwen3_vl.tt.generator import Generator
+        from models.bos_model.qwen3_vl.demo_qwen3_vl import (
+            get_batch_sampler, prepare_generator_args, warmup_model)
+        # qwen3_vl hardcodes bfloat8_b for Qwen3-VL (fits the 8B on 12 GiB) and its
+        # prepare_generator_args takes no `optimizations` arg.
+        DecodersPrecision = None
+    else:
+        from models.bos_model.qwen25_vl.tt.common import hf_multimodal_encode
+        from models.bos_model.qwen25_vl.tt.generator import Generator
+        from models.bos_model.qwen25_vl.tt.model_config import DecodersPrecision
+        from models.bos_model.qwen25_vl.demo_qwen25_vl import (
+            get_batch_sampler, prepare_generator_args, warmup_model)
+    return dict(hf_multimodal_encode=hf_multimodal_encode, Generator=Generator,
+                DecodersPrecision=DecodersPrecision, get_batch_sampler=get_batch_sampler,
+                prepare_generator_args=prepare_generator_args, warmup_model=warmup_model)
 
 # Optional: JSON-constrained (grammar) decoding, the equivalent of Ollama's
 # format="json". Guarded so a VLM-only server or a missing dep still runs.
@@ -318,33 +335,41 @@ class QwenVLEngine:
     def load(self):
         from transformers import AutoProcessor
 
+        be = _vlm_backend(self.model_name)              # qwen25_vl or qwen3_vl (same API)
+        self._encode = be["hf_multimodal_encode"]        # used by describe()
+        self._get_batch_sampler = be["get_batch_sampler"]
         _set_hf_model(self.model_name)
         logger.info(f"[VLM] loading {self.model_name} ...")
         num_devices = self.mesh_device.get_num_devices() if isinstance(self.mesh_device, ttnn.MeshDevice) else 1
-        model_args, model = qwen_prepare_generator_args(
+        gen_kwargs = dict(
             num_devices=num_devices,
             data_parallel=1,
             mesh_device=self.mesh_device,
             max_batch_size=1,
             max_seq_len=self.max_seq_len,
-            optimizations=lambda margs: QwenDecodersPrecision.performance(margs.n_layers, margs.model_name),
         )
+        # qwen25_vl sets precision via `optimizations`; qwen3_vl hardcodes bfp8 and
+        # takes no such arg (DecodersPrecision is None for it).
+        if be["DecodersPrecision"] is not None:
+            gen_kwargs["optimizations"] = (
+                lambda margs: be["DecodersPrecision"].performance(margs.n_layers, margs.model_name))
+        model_args, model = be["prepare_generator_args"](**gen_kwargs)
         self.model_args = model_args
         self.processor = AutoProcessor.from_pretrained(model_args[0].CKPT_DIR)
         self.tokenizer = self.processor.tokenizer
-        self.generator = QwenGenerator(model, model_args, self.mesh_device)
+        self.generator = be["Generator"](model, model_args, self.mesh_device)
         self.xattn_caches = [None for _ in self.generator.model]  # HF path uses no cross-attn cache
-        qwen_warmup_model(self.generator, model_args, self.xattn_caches, HF_MODEL=True, processor=self.processor)
+        be["warmup_model"](self.generator, model_args, self.xattn_caches, HF_MODEL=True, processor=self.processor)
         logger.info("[VLM] ready.")
 
     def describe(self, images, prompt: str, max_gen_len: int = 128) -> str:
         processor, tokenizer, generator = self.processor, self.tokenizer, self.generator
         model_args, xattn_caches = self.model_args, self.xattn_caches
-        sampler = get_batch_sampler(0, 0.9, model_args[0].tokenizer)  # greedy
+        sampler = self._get_batch_sampler(0, 0.9, model_args[0].tokenizer)  # greedy
 
         content = [ImageMedia(image=im) for im in images] + [prompt]
         dialog = [UserMessage(content=content)]
-        model_input = hf_multimodal_encode(dialog, processor)
+        model_input = self._encode(dialog, processor)
 
         image_grid_thw = [model_input.image_grid_thw]
         vision_images = [model_input.vision.images]
@@ -417,11 +442,8 @@ INITIAL_MODE = os.environ.get("TT_MODE")
 
 
 def make_vlm_engine(mesh_device, model):
-    """VLM engine for `model`. qwen25_vl is wired here; Qwen3-VL needs the qwen3_vl
-    backend under transformers 4.57 and is not loadable in this process."""
-    if "Qwen3-VL" in model:
-        raise RuntimeError(
-            f"{model} needs the qwen3_vl backend (transformers 4.57 venv); not wired in this process")
+    """VLM engine for `model`. QwenVLEngine picks the qwen25_vl / qwen3_vl backend
+    by model name (see _vlm_backend); Qwen3-VL requires the transformers-4.57 venv."""
     return QwenVLEngine(mesh_device, model=model)
 
 
