@@ -98,6 +98,17 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-03 — docs: `run_server.sh` 예시 명령에서 불필요한 tt-metal cd/activate 제거
+
+- `run_server.sh`가 상대경로로 실행하면 안 뜨던 버그는 아래 "중복 NPU 서버 기동 방지
+  startup guard" 커밋이 `BASH_SOURCE` 기준 `SCRIPT_DIR`을 도입하며 이미 고쳐져 있었다
+  (같은 문제를 별도로 다시 고치려던 시도는 폐기하고 `SCRIPT_DIR`을 그대로 재사용).
+- 그런데 README.md/PAPER_EVAL_RUNBOOK.md의 예시 명령은 여전히 `cd /home/user/tt-metal` 후
+  절대경로로 `run_server.sh`를 실행하도록 안내하고 있었다 — venv는 스크립트가 알아서
+  켜므로 그 cd는 애초에 불필요했다. `cd tt_server && ./run_server.sh`로 단순화.
+- **검증**: `bash -n`; 문서에 적은 명령을 실행 중인 보드에서 실제로 돌려 잘못된 TT_MODE로
+  device 건드리기 전에 fail-fast하는 것과 기존 서버(`/health`)가 영향받지 않는 것을 확인.
+
 ### 2026-08-02 (4) — NPU 서버 lifecycle을 사람 사용자 전용으로 명문화
 
 - 공유 BOS 보드의 안전을 위해 서버 기동·종료·재시작은 **사람 사용자가 지정된 tmux 세션에서만**
@@ -117,7 +128,6 @@ _최종 수정: 2026-07-21 · branch `main`_
 - **검증**: 실제 서버 lifecycle은 건드리지 않고 mock curl/pgrep/fuser와 실제 flock을 사용한
   preflight unit test 6개(ready no-op, unhealthy process, device holder, free device, concurrent lock,
   server process의 lock FD 상속), 전체 server test 20개, `bash -n`, `git diff --check` 통과.
-
 ### 2026-08-02 (3) — NPU 서버 레이어드 아키텍처 마이그레이션 (`refacoter` branch)
 
 - 772줄 단일 `tt_infer_server.py`를 `presentation/http → application → domain`과

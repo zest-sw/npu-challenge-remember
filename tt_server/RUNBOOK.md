@@ -113,20 +113,20 @@ pip install fastapi "uvicorn[standard]" lm-format-enforcer
 서버가 없는지 확인한다.
 
 ```bash
-cd /home/user/tt-metal
-TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
-  bash /home/user/remembr/tt_server/run_server.sh
+cd /home/user/remembr/tt_server
+TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 ./run_server.sh
 ```
 
+- **venv를 미리 활성화할 필요 없다.** 스크립트가 `env_set.sh`로 tt-metal venv를 직접 켜고
+  `TT_METAL_HOME`으로 `cd`한다. **어느 디렉터리에서 어떤 방식으로 실행해도 된다**
+  (`./run_server.sh`, `bash run_server.sh`, 절대경로 — 전부 동작).
 - **`TT_LLM_MAX_SEQ_LEN=2048`은 필수다.** NonAgent 프롬프트는 2048까지 패딩되므로, 기본값
   (1024)이면 `Padded prefill end idx 2048 exceeds max seq len` 에러가 난다.
 - VLM에는 1024로 충분하다(이미지는 서버에서 224×224로 리사이즈된다).
 - **특정 모드로 바로 올리려면 `TT_MODE`를 지정한다** (기본은 `3b+3b`와 동일 구성):
   ```bash
-  TT_MODE=caption-8b TT_PYTHON_ENV=tf457 \
-    bash /home/user/remembr/tt_server/run_server.sh   # Qwen3-VL-8B만, 4.57 venv
-  TT_MODE=llm-8b \
-    bash /home/user/remembr/tt_server/run_server.sh   # Llama-3.1-8B만
+  TT_MODE=caption-8b TT_PYTHON_ENV=tf457 ./run_server.sh   # Qwen3-VL-8B만, 4.57 venv
+  TT_MODE=llm-8b ./run_server.sh                           # Llama-3.1-8B만
   ```
   오타 등 알 수 없는 모드는 device를 건드리기 전에 즉시 실패한다. 다른 사람이 이미 쓰고
   있는 서버라면 launcher가 자동으로 `/health`를 확인해 기존 상태를 출력하고 exit 0으로 종료한다.
