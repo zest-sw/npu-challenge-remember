@@ -233,12 +233,19 @@ class ReMEmbRAgent(Agent):
         template += "The robot saw the following: {{page_content}}"
 
 
+        # Keep these descriptions short and give them NO value to copy. A filled-in
+        # sample is an instruction to a small model, not an illustration. Measured on
+        # the board (Llama-3.1-8B): every irrelevant argument the planner produced was
+        # a verbatim copy of the sample that used to sit here — asked when the robot
+        # left a building it searched for "a green car driving down the road" and
+        # "a crowd gathering", queried time 08:02:03 and position (0.5, 0.2, 0.1).
+        # 4 of 4 bad arguments traced back to these strings. Removing the samples but
+        # leaving long prose was not enough either: it then passed the description
+        # sentence itself as the query. Less text here is less text to copy instead
+        # of reading the question.
         class TextRetrieverInput(BaseModel):
-            x: str = Field(description="The query that will be searched by the vector similarity-based retriever.\
-                                Text embeddings of this description are used. There should always be text in here as a response! \
-                                Based on the question and your context, decide what text to search for in the database. \
-                                This query argument should be a phrase such as 'a crowd gathering' or 'a green car driving down the road'.\
-                                The query will then search your memories for you.")
+            x: str = Field(description="The thing to look for, as a short visual phrase \
+                                taken from what the question asks about.")
 
         self.retriever_tool = StructuredTool.from_function(
             func=lambda x: memory.search_by_text(x),
@@ -249,11 +256,8 @@ class ReMEmbRAgent(Agent):
         )
 
         class PositionRetrieverInput(BaseModel):
-            x: tuple = Field(description="The query that will be searched by finding the nearest memories at this (x,y,z) position.\
-                                The query must be an (x,y,z) array with floating point values \
-                                Based on the question and your context, decide what position to search for in the database. \
-                                This query argument should be a position such as (0.5, 0.2, 0.1). They should NOT be a string. \
-                                The query will then search your memories for you.")
+            x: tuple = Field(description="An (x,y,z) array of numbers, copied from a \
+                                coordinate the question or a retrieved memory gave you. Never invent one.")
         # position-based tool
         self.position_retriever_tool = StructuredTool.from_function(
             func=lambda x: memory.search_by_position(x),
@@ -264,11 +268,8 @@ class ReMEmbRAgent(Agent):
         )
 
         class TimeRetrieverInput(BaseModel):
-            x: str = Field(description="The query that will be searched by finding the nearest memories at a specific time in H:M:S format.\
-                                The query must be a string containing only time. \
-                                Based on the question and your context, decide what time to search for in the database. \
-                                This query argument should be an HMS time such as 08:02:03 with leading zeros. \
-                                The query will then search your memories for you.")
+            x: str = Field(description="An HH:MM:SS time, copied from the question or a \
+                                retrieved memory. Never invent one. Only for questions naming a clock time.")
 
         # position-based tool
         self.time_retriever_tool = StructuredTool.from_function(
