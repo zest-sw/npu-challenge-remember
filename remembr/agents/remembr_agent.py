@@ -113,6 +113,12 @@ def parse_json(string):
     parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
     return json.loads(parsed)
 
+
+# How many turns the planner may spend calling tools before it must answer. Each
+# turn is a full LLM generation (~9-13s measured on 8B), so this is the main knob
+# on how long one question takes.
+MAX_TOOL_TURNS = 3
+
 class AgentState(TypedDict):
     # The add_messages function defines how an update should be processed
     # Default is to replace. add_messages says "append"
@@ -378,6 +384,20 @@ class ReMEmbRAgent(Agent):
         """
         messages = state["messages"]
 
+        if self.agent_call_count >= MAX_TOOL_TURNS:
+            # Tool budget spent -> hand straight to generate() without an LLM call.
+            # This branch used to bind tools=[] and still run a full generation, so
+            # the model could not emit a tool call and instead wrote prose that
+            # should_continue routed to "end" and generate() then discarded by
+            # re-answering from the same context. Measured on the board: that turn
+            # cost 53s of a 118s question -- 45% -- for output nothing reads.
+            # Returning a tool-call-free message reaches generate() the same way,
+            # for free. (self.agent_gen_only_prompt is no longer used by this path.)
+            self.agent_call_count += 1
+            return {"messages": [AIMessage(
+                content="Enough memory has been retrieved. Answer the question from the context above."
+            )]}
+
         model = self.chat
 
 
@@ -390,12 +410,8 @@ class ReMEmbRAgent(Agent):
                     "json_schema": {"name": "tool_calls", "schema": self.tool_call_schema},
                 }
             }
-        if self.agent_call_count < 3:
-            model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
-            prompt = self.agent_prompt
-        else:
-            model = model.bind_tools(tools=[], **tool_kwargs)
-            prompt = self.agent_gen_only_prompt
+        model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
+        prompt = self.agent_prompt
 
 
         agent_prompt = ChatPromptTemplate.from_messages(
