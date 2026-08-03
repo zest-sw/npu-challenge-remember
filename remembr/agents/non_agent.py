@@ -45,8 +45,15 @@ class NonAgent(Agent):
                     'type': {'type': 'string'},
                     'text': {'type': 'string', 'maxLength': 300},
                     'binary': {'type': ['string', 'null']},
-                    'position': {'type': ['string', 'null']},
-                    'orientation': {'type': ['string', 'null']},
+                    # maxLength matters here, it is not cosmetic. Without it the
+                    # grammar permits an unbounded string and the model runs away
+                    # inside it: observed on the board, position filled with
+                    # "[-55.74, 86.31, -2.11], [0, 0, 0], [0, 0, 1], [0, 0, 0], ..."
+                    # until max_tokens cut the JSON mid-string, so every parse
+                    # raised "Unterminated string" and the answer was never usable.
+                    # A 3-D coordinate needs ~60 characters at full float precision.
+                    'position': {'type': ['string', 'null'], 'maxLength': 80},
+                    'orientation': {'type': ['string', 'null'], 'maxLength': 40},
                     'time': {'type': ['number', 'string', 'null']},
                     'duration': {'type': ['number', 'string', 'null']},
                 },
@@ -101,7 +108,20 @@ class NonAgent(Agent):
         filled_prompt = prompt.invoke({'context': self.memory.memory_to_string(self.memory.get_working_memory()), 'question':question, 'output_format':output_format})
         inputs = filled_prompt.text
 
-        while True:
+        # Cap the retries. This loop was `while True`, which hangs outright when
+        # the model cannot produce parseable output: at temperature=0 every retry
+        # is byte-identical, so a single bad generation repeats forever. Measured
+        # on the board — one question spent 975s in 26 identical retries of the
+        # same truncated JSON and would never have returned, stalling the whole
+        # eval on question 10 of 30. eval.answer_squad_question already has its own
+        # MAX_ATTEMPTS=5 around this call and treats an exception as an unanswered
+        # attempt, so raising here lets the run continue instead of blocking.
+        # (temperature>0 makes retries differ and usually recovers, but the loop
+        # must not depend on the caller choosing a temperature to terminate.)
+        MAX_PARSE_RETRIES = 5
+        last_error = None
+
+        for _ in range(MAX_PARSE_RETRIES):
 
             response = self.chain.invoke(inputs)
             response = ''.join(response.content.splitlines())
@@ -120,6 +140,7 @@ class NonAgent(Agent):
                 response = AgentOutput.from_dict(parsed)
 
             except Exception as e:
+                last_error = e
                 print(response)
                 print(e)
                 print("Generate call failed. Retrying...")
@@ -127,5 +148,14 @@ class NonAgent(Agent):
 
             break
 
+        else:
+            # Every retry failed. Raise rather than return something unparsed:
+            # eval's attempt loop records this as an unanswered attempt and moves
+            # on, which is what we want. Silently returning a broken answer would
+            # be scored as if the model had answered.
+            raise ValueError(
+                f"NonAgent could not produce a parseable answer in {MAX_PARSE_RETRIES} "
+                f"tries; last error: {last_error}"
+            )
 
         return response
