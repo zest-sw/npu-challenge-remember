@@ -185,7 +185,7 @@ def _canonicalize_minutes(value, question: str):
 
 
 def _expected_answer_type(question: str) -> str:
-    q = question.lower()
+    q = _asked_question_text(question).lower()
     if "how long" in q or "duration" in q:
         return "duration"
     if re.search(r"\bwhen\b", q):
@@ -199,7 +199,11 @@ def _expected_answer_type(question: str) -> str:
 
 def _asked_question_text(question: str) -> str:
     text = re.sub(r"^\s*The question is:\s*", "", question.strip(), flags=re.IGNORECASE)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not re.match(r"please\s+respons", line.strip(), flags=re.IGNORECASE)
+    ]
     return lines[-1] if lines else text
 
 
@@ -679,10 +683,10 @@ class ReMEmbRAgent(Agent):
             dict: The updated state with re-phrased question
         """
         messages = state["messages"]
-        question = messages[0].content \
-                + "\n Please responsed in the desired format."
+        raw_question = messages[0].content
+        question = raw_question + "\n Please responsed in the desired format."
         if self.llm_type.startswith('tt/'):
-            expected_type = _expected_answer_type(question)
+            expected_type = _expected_answer_type(raw_question)
             gen_prompt = ChatPromptTemplate.from_messages(
                 [
                     ("system", GENERATE_SCHEMA_PROMPT),
@@ -693,7 +697,7 @@ class ReMEmbRAgent(Agent):
             model = gen_prompt | self.llm.bind(
                 response_format={
                     "type": "json_schema",
-                    "json_schema": {"name": "agent_output", "schema": _tt_answer_schema_for(question)},
+                    "json_schema": {"name": "agent_output", "schema": _tt_answer_schema_for(raw_question)},
                 },
                 max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
             )
@@ -726,7 +730,7 @@ class ReMEmbRAgent(Agent):
             "chat_history": messages[1:],
         }
         if self.llm_type.startswith('tt/'):
-            invoke_inputs["expected_type"] = _expected_answer_type(question)
+            invoke_inputs["expected_type"] = _expected_answer_type(raw_question)
         response = model.invoke(invoke_inputs)
 
         # let us parse and check the output is a dictionary. raise error otherwise
