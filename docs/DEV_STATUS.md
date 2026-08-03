@@ -98,6 +98,18 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-02 — 중복 NPU 서버 기동 방지 startup guard
+
+- `run_server.sh`가 tt-metal import/device open 전에 `server_preflight.sh`를 실행하도록 변경했다.
+  기존 `/health`가 응답하면 health를 출력하고 exit 0 no-op, health 없이 server process 또는
+  `/dev/bos/0` holder가 있으면 원인을 출력하고 exit 1로 차단한다.
+- server lifetime 동안 상속되는 전역 `flock`을 추가해 두 launcher가 동시에 idle 검사를 통과하는
+  race를 막았다. script 위치도 `BASH_SOURCE`의 absolute path로 고정해 launcher가 `cd`한 뒤에도
+  entrypoint 경로가 깨지지 않는다.
+- **검증**: 실제 서버 lifecycle은 건드리지 않고 mock curl/pgrep/fuser와 실제 flock을 사용한
+  preflight unit test 6개(ready no-op, unhealthy process, device holder, free device, concurrent lock,
+  server process의 lock FD 상속), 전체 server test 20개, `bash -n`, `git diff --check` 통과.
+
 ### 2026-08-02 (3) — NPU 서버 레이어드 아키텍처 마이그레이션 (`refacoter` branch)
 
 - 772줄 단일 `tt_infer_server.py`를 `presentation/http → application → domain`과
