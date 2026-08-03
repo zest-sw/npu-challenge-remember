@@ -98,7 +98,7 @@ unzip -q -o ${SEQ}.zip "2d_rect/cam0/${SEQ}/*" "poses/dense/${SEQ}.txt" -d seq${
 우리 extractor는 plain-text pose txt + cam0 PNG만 읽어서 동일한 `.pkl` 파일을 생성한다(ROS 불필요).
 ```bash
 cd /home/user/remembr
-source ~/remembr_venv/bin/activate
+source remembr_venv/bin/activate
 python remembr/scripts/preprocess_coda_rosfree.py \
   --seq_id ${SEQ} \
   --coda_root /home/user/coda_raw/seq${SEQ} \
@@ -127,8 +127,9 @@ TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
 ## 4. 테스트 실행 (terminal B, remembr_venv, **inner** 디렉터리)
 
 ```bash
-source ~/remembr_venv/bin/activate
-cd /home/user/remembr/remembr           # inner: scripts use ./data relative paths
+cd /home/user/remembr
+source remembr_venv/bin/activate
+cd remembr                              # inner: scripts use ./data relative paths
 export OPENAI_API_KEY=local PYTHONPATH=/home/user/remembr
 export TT_VLM_TIMEOUT=3600               # headroom for the first compile
 ```

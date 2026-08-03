@@ -3,6 +3,11 @@ deps
 # model weights / caches (multi-GB HF downloads — never commit)
 model_cache
 
+# venvs (this repo's own: remembr_venv; anyone else's local .venv/venv)
+remembr_venv
+.venv
+venv
+
 # data-related
 data
 out
