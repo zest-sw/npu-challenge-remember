@@ -128,7 +128,9 @@ TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
     bash /home/user/remembr/tt_server/run_server.sh   # Llama-3.1-8B만
   ```
   오타 등 알 수 없는 모드는 device를 건드리기 전에 즉시 실패한다. 다른 사람이 이미 쓰고
-  있는 서버라면 `curl localhost:8100/health`로 현재 모드부터 확인할 것 — 공유 보드이므로.
+  있는 서버라면 launcher가 자동으로 `/health`를 확인해 기존 상태를 출력하고 exit 0으로 종료한다.
+  전역 startup lock, 기존 server process, `/dev/bos/0` holder도 device open 전에 검사하므로
+  중복 서버를 띄우지 않는다. guard를 우회해 `tt_infer_server.py`를 직접 실행하지 말 것.
 - 두 모델 로딩 + weight cache 빌드에 **몇 분**이 걸린다. 이 로그 줄이 나오면 준비 완료다:
   ```
   INFO:     Application startup complete.
@@ -218,6 +220,9 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 | **Captions get slower over time / server RSS keeps growing** | 원인 두 가지. ① tt-metal의 **Inspector**(기본 ON)가 워크로드마다 YAML을 flush → `run_server.sh`가 `TT_METAL_INSPECTOR=0`으로 비활성화한다(이미 적용됨). ② **Tracy profiler 빌드** → 1-0 참고, 기본 빌드로 재빌드해야 한다(env로는 끌 수 없다). 판단 기준: 서버 로그의 `32 x Qwen2_5_VLVisionBlock ... it/s`가 떨어지면 의심하라. |
 | **The first caption is very slow (several minutes), client times out** | 새로 띄운 서버에서는 **첫 요청이 ttnn 트레이스(prefill/decode)를 처음으로 컴파일**한다 — 일회성 비용이다. 데드락이 아니다(서버 CPU는 계속 돌고 있다). 끝나면 이후 요청은 훨씬 빠르다. 클라이언트 타임아웃 기본값은 900 s이며 `TT_VLM_TIMEOUT`(초)로 조정 가능하다. |
 | `address already in use (8100)` | 서버가 이미 떠 있다. 새로 띄울 필요 없다. 내리려면 4장 참고. |
+| `[tt-server] startup skipped: server already ready ...` | 정상 no-op. 기존 서버의 health를 출력하고 새 process를 만들지 않은 것이다. |
+| `[tt-server] startup blocked: an inference server process exists ...` | process는 있지만 health가 준비되지 않았다. 로딩 중인지 로그를 확인하고 중복 기동하지 않는다. |
+| `[tt-server] startup blocked: NPU device ... already held ...` | 다른 process가 보드를 점유 중이다. 표시된 PID의 소유자를 확인하고 임의 종료하지 않는다. |
 | `Padded prefill end idx 2048 exceeds max seq len` | `TT_LLM_MAX_SEQ_LEN=2048`로 서버를 재시작하라. |
 | LLM emits code fences / broken JSON, NonAgent retries in an infinite loop | JSON 제약 디코딩이 적용되지 않은 것이다. `lm-format-enforcer`가 설치되었는지 확인하라(1-4). |
 | HF 403 / gated error | `~/.bashrc`의 `HF_TOKEN`을 확인하라. `run_server.sh`가 거기서 읽는다. |
@@ -240,6 +245,8 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
 | `TT_MAX_CAPTION_FRAMES` | `5` | 요청당 최대 frame 수. 보드 안정성을 위해 6장 이상은 HTTP 400 |
 | `TT_WORKER_SHUTDOWN_TIMEOUT` | `180` | device worker join 대기 시간(non-daemon worker라 timeout 뒤에도 강제 폐기되지 않음) |
+| `TT_SERVER_LOCK_FILE` | `/tmp/remembr-tt-npu-server.lock` | server lifetime 동안 유지되는 전역 NPU startup lock |
+| `TT_HEALTH_HOST` / `TT_HEALTH_TIMEOUT` | `127.0.0.1` / `2` | preflight health host / timeout(초) |
 | `TT_PORT` | `8100` | |
 
 **remembr side**

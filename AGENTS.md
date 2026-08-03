@@ -43,7 +43,9 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 - **기동**: `bash tt_server/run_server.sh` (tt-metal 루트 아무 데서나 실행해도 됨 — 스크립트가
   알아서 `cd`한다. 직접 `env_set.sh`를 다른 위치에서 source하면 `TT_METAL_HOME`이 깨진다, 이미
   겪음). **모드 지정**: `TT_MODE=caption-8b bash run_server.sh` — 없으면 `3b+3b` 기본.
-  잘못된 모드명은 device 건드리기 전에 즉시 실패한다(조용히 안 멈춤).
+  잘못된 모드명은 device 건드리기 전에 즉시 실패한다(조용히 안 멈춤). launcher는 전역
+  `flock` + `/health` + 기존 process/device holder를 먼저 검사하므로 이미 서버가 있으면 새로
+  띄우지 않고 상태 메시지만 출력한다. 이 guard를 우회해 Python entrypoint를 직접 실행하지 말 것.
 - **모드**: 보드 DRAM이 ~12GB라 한 번에 조합 하나만. `3b+3b`(기본) / `caption-3b` / `llm-8b` /
   `caption-8b`(Qwen3-VL-8B, `TT_PYTHON_ENV=tf457` 필요). 전환은 `POST /mode` — **요청이 자동으로
   모드를 안 바꾼다**, 안 맞으면 409. 전환은 device를 완전히 반환(`close_mesh_device`)했다가

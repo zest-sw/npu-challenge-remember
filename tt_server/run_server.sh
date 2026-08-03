@@ -5,6 +5,19 @@
 # source tree is left untouched — nothing is copied into remembr).
 set -e
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/server_preflight.sh"
+if tt_server_preflight; then
+    : # no existing server/device holder; keep FD 9 locked through exec below
+else
+    preflight_status=$?
+    if [[ "$preflight_status" -eq 10 ]]; then
+        exit 0 # an existing server/launcher is healthy or already starting
+    fi
+    exit "$preflight_status"
+fi
+
 export TT_METAL_HOME="${TT_METAL_HOME:-/home/user/tt-metal}"
 # env_set.sh does `export TT_METAL_HOME=$(pwd)`, so it must be sourced FROM the
 # tt-metal root or it clobbers TT_METAL_HOME with the caller's cwd -> the SoC
@@ -57,4 +70,4 @@ export TT_ENABLE_VLM="${TT_ENABLE_VLM:-1}"
 export TT_METAL_INSPECTOR="${TT_METAL_INSPECTOR:-0}"
 export TT_METAL_INSPECTOR_RPC="${TT_METAL_INSPECTOR_RPC:-0}"
 
-exec python "$(dirname "$0")/tt_infer_server.py"
+exec python "$SCRIPT_DIR/tt_infer_server.py"
