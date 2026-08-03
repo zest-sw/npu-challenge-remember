@@ -81,6 +81,34 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 3. 모드/서버를 건드렸으면 [docs/NPU_STABILITY_TEST_PLAN.md](docs/NPU_STABILITY_TEST_PLAN.md)의
    축소판(순차 요청 몇십 회 + 모드 전환 몇 회)만이라도
 
+## 파일 어디에 두나 (홈 디렉터리 지도)
+
+**코드는 전부 레포 안.** 예전에 스크립트를 `~/ycc/`에 뒀다가, 데이터가 옮겨지면서 스크립트
+안 절대경로가 전부 죽어 있었다(아무도 몰랐다). 레포 밖 = git 추적 안 됨 = 다음 세션이 못 찾음.
+
+| 무엇 | 어디 | 비고 |
+|---|---|---|
+| 파이프라인/도구 스크립트 | `remembr/scripts/` (Samsung 계열은 `scripts/samsung/`) | git 추적 |
+| 보드·서버 스트레스 테스트 | `tt_server/tests/board/` | 실제 device 필요, 일반 테스트와 분리 |
+| 생성 산출물(HTML 뷰어·비교 결과·로그) | `out/` | **gitignored.** `/tmp`에 두지 말 것 — 재부팅 시 소멸 |
+| 데이터셋 | `remembr/data/` (레포 안, gitignored) | Samsung CODa: `remembr/data/samsung_dataset/0/` |
+
+**홈에 있고 옮기면 안 되는 것들** (실제로 확인한 이유가 있음):
+
+| 경로 | 왜 그대로 둬야 하나 |
+|---|---|
+| `~/milvus` | 실행 중인 `milvus-standalone` 컨테이너가 bind-mount 중. 옮기면 벡터 DB가 깨진다 |
+| `~/coda_raw` (85G) | `eval.md`와 스크립트 docstring에 절대경로로 박혀 있다 |
+| `~/tt-metal` | `TT_METAL_HOME`, weight 캐시(`model_cache/`, 39G), venv 2개가 여기 기준 |
+| `~/ycc/samsung_dataset/.venv` | rosbags·kiss-icp 전용 venv. venv는 절대경로를 내장해서 옮기면 깨진다 |
+| `~/ycc/samsung_demo3`, `samsung_demo4` | 원본 rosbag. `scripts/samsung/01_*.py`가 참조 |
+
+**weight 캐시는 상대경로다.** `model_config.py:476`이 `model_cache/...`를 CWD 기준으로 잡아서,
+서버를 다른 디렉터리에서 띄우면 6.9G 캐시가 거기 또 생긴다(실제로 2벌 중복돼 있었다).
+`run_server.sh`의 `cd "$TT_METAL_HOME"`가 이걸 막는다 — 지우지 말 것.
+`TT_CACHE_PATH`로 고정하려 하지 말 것: 같은 파일 478행이 device 이름만 붙이고 **모델 이름을
+안 붙여서** Llama와 Qwen 캐시가 한 경로에서 충돌한다.
+
 ## 문서 지도
 
 | 파일 | 용도 |
