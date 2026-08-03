@@ -1,8 +1,9 @@
-# 작업 로그 — NPU eval 파이프라인 디버깅 & 3B/8B × perf/acc 4-way 비교
+# 작업 로그 — NPU eval 파이프라인 디버깅 & agent/3B/8B/perf/acc 8-way 비교
 
 NPU 포트(Qwen2.5-VL 캡셔너 + Llama LLM)의 NaVQA eval을 **처음으로 유효하게 완주**시키고,
-Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval이 결과를 못 남기던 원인 3종
-(정답 타임존·저장경로·무한 재시도)을 모두 고쳤고, 네 구성 결과를 확보(3B ×5회, 8B ×3회).
+Llama를 **Optimal+/ReMEmbR × 3B/8B × performance/accuracy 8개 구성**으로 비교. eval이 결과를 못 남기던 원인 3종
+(정답 타임존·저장경로·무한 재시도)을 모두 고쳤고, 8개 구성 결과를 확보했다(Optimal+ 3B 각 5회·8B 각 3회,
+ReMEmbR 3B-perf 1회·3B-acc 2회·8B 각 1회).
 
 ---
 
@@ -19,54 +20,69 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 
 ---
 
-## 2. 통합 4-way 비교 (3B ×5회, 8B ×3회) ★
+## 2. 통합 8-way 비교 ★
 
-모든 결과 파일을 하나의 채점 스크립트로 재집계. 캡션·질문·eval코드·서버구성 동일, 차이는 **모델 크기 + Llama 정밀도**뿐.
+`jung_results`의 모든 결과 파일을 하나의 채점 기준으로 재집계. 캡션·질문·eval 코드는 동일하고, 차이는
+**답변 경로(Optimal+ working memory / ReMEmbR agent) + 모델 크기 + Llama 정밀도**다. 반복 실행은 구성별로 합쳐
+문항 단위 평균을 냈으며, loss는 해당 필드에 유효하게 답한 문항만의 평균이다.
 지표: **응답률**(유효 필드 낸 비율) / **정답률**(score_navqa 임계: position≤15m, time·duration≤2min, binary 정확일치,
 미응답=오답 — NaVQA 논문 정의) / **loss**(답한 것만의 평균 오차; eval.py는 임계 판정 없이 raw 오차만 기록).
 
+| 구성 | O-3B-perf | O-3B-acc | O-8B-perf | O-8B-acc | R-3B-perf | R-3B-acc | R-8B-perf | R-8B-acc |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **실행 수** | 5 | 5 | 3 | 3 | 1 | 2 | 1 | 1 |
+
+`O` = Optimal+, `R` = ReMEmbR agent. 실행마다 non-text 25문항(position 12, binary 4, time 7, duration 2)을 평가했다.
+
 ### Overall (non-text 25문항)
 
-| 지표 | 3B-perf | 3B-acc | 8B-perf | 8B-acc |
-|---|---|---|---|---|
-| **응답률** | 70% | 57% | 85% | **92%** |
-| **정답률**(임계) | 13% | 21% | **47%** | 37% |
+| 지표 | O-3B-perf | O-3B-acc | O-8B-perf | O-8B-acc | R-3B-perf | R-3B-acc | R-8B-perf | R-8B-acc |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **응답률** | 70% | 57% | 85% | **92%** | 56% | 38% | 84% | 52% |
+| **정답률**(임계) | 13% | 21% | **47%** | 37% | 0% | 2% | 28% | 8% |
 
 ### 유형별 (응답률 / loss / 정답률)
 
-| 유형 | 지표 | 3B-perf | 3B-acc | 8B-perf | 8B-acc |
-|---|---|---|---|---|---|
-| **position** (12) | 응답률 | 45% | 40% | 69% | **83%** |
-| | loss(m)↓ | 128.7 | 110.0 | **44.2** | 60.2 |
-| | 정답률 | 0% | 3% | **33%** | 22% |
-| **binary** (4) | 응답률 | 90% | 85% | 100% | 100% |
-| | 정답률 | 60% | 65% | **67%** | 58% |
-| **time** (7) | 응답률 | 91% | 69% | 100% | 100% |
-| | loss(min)↓ | 13.5 | 6.3 | 4.7 | **3.9** |
-| | 정답률 | 11% | 29% | **57%** | 48% |
-| **duration** (2) | 응답률 | 100% | 60% | 100% | 100% |
-| | loss(min)↓ | 21.3 | 9.7 | 4.9 | **4.6** |
-| | 정답률 | 0% | 10% | 50% | 50% |
+| 유형 | 지표 | O-3B-perf | O-3B-acc | O-8B-perf | O-8B-acc | R-3B-perf | R-3B-acc | R-8B-perf | R-8B-acc |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **position** (12/run) | 응답률 | 45% | 40% | 69% | 83% | **100%** | 67% | **100%** | 92% |
+| | loss(m)↓ | 128.7 | 110.0 | **44.2** | 60.2 | 73.4 | 75.9 | 72.9 | 91.4 |
+| | 정답률 | 0% | 3% | **33%** | 22% | 0% | 4% | 8% | 8% |
+| **binary** (4/run) | 응답률 | 90% | 85% | **100%** | **100%** | 0% | 38% | 75% | 25% |
+| | 정답률 | 60% | 65% | 67% | 58% | 0% | 0% | **75%** | 0% |
+| **time** (7/run) | 응답률 | 91% | 69% | **100%** | **100%** | 14% | 0% | 86% | 14% |
+| | loss(min)↓ | 13.5 | 6.3 | 4.7 | 3.9 | 3.7 | — | 1.9 | **0.2** |
+| | 정답률 | 11% | 29% | **57%** | 48% | 0% | 0% | 43% | 14% |
+| **duration** (2/run) | 응답률 | **100%** | 60% | **100%** | **100%** | 50% | 0% | 0% | 0% |
+| | loss(min)↓ | 21.3 | 9.7 | 4.9 | **4.6** | 9.7 | — | — | — |
+| | 정답률 | 0% | 10% | **50%** | **50%** | 0% | 0% | 0% | 0% |
+
+`—`는 해당 유형에 유효 응답이 없어 loss를 계산할 수 없다는 뜻이다. 굵은 값은 행별 최고(오차는 최저)이며,
+표시 반올림 때문에 원자료의 근소한 차이가 보이지 않을 수 있다.
 
 ### 종합 정리
 
-- **3B — accuracy가 정확도 우세, performance가 커버리지 우세.** 정답률 acc 21%>perf 13%, loss도 acc가 전 유형에서
+- **Optimal+ 3B — accuracy가 정확도 우세, performance가 커버리지 우세.** 정답률 acc 21%>perf 13%, loss도 acc가 전 유형에서
   낮음(pos 110<129, time 6.3<13.5, dur 9.7<21.3). 대신 응답률은 perf 70%>acc 57%. → **품질(정답률·loss)로는 acc가 낫다.**
-- **8B — perf/acc 대체로 대등(혼조), 확정적 승자 없음 + 분산 큼.**
+- **Optimal+ 8B — perf/acc 대체로 대등(혼조), 확정적 승자 없음 + 분산 큼.**
   - 정답률(임계)은 **오히려 perf가 약간 앞섬(47% vs 37%)** → "acc 우세"는 성립 안 함.
   - loss는 갈림: position·binary는 **perf**(44<60, 67%>58%), time·duration은 **acc**(3.9<4.7, 4.6<4.9).
   - 응답률은 **8B에선 acc가 더 높음(92% vs 85%)** — 3B(perf 우위)와 반대. 8B는 둘 다 형식은 거의 다 채우고,
     차이는 position 응답률(acc 83%>perf 69%)에서 남. 단 acc는 많이 답해도 임계 통과율은 perf보다 낮음.
   - §4의 동일 설정 재실행이 **32%↔48%(±16%p)** 로 튐 → 3회로는 우열 확정 불가, **추가 테스트 필요.**
-- **모드 무관, 최대 레버는 용량(3B→8B).** 정답률 13~21%→37~47%, position loss ~110~129→44~60. 정밀도는 3B에선
-  커버리지↔정확도 트레이드오프, 8B에선 사실상 무의미.
+- **ReMEmbR는 8B-perf만 경쟁력 있는 신호를 보였다.** R-8B-perf는 응답률 84%, 정답률 28%로 ReMEmbR 네 구성 중
+  가장 높지만 O-8B-perf(85%, 47%)에는 못 미친다. 반면 R-3B 두 구성은 정답률 0~2%, R-8B-acc는 8%로 낮다.
+- **agent 종류와 무관하게 3B→8B 용량 증가가 가장 큰 레버다.** Optimal+ 정답률은 13~21%→37~47%, ReMEmbR는
+  0~2%→8~28%로 올랐다. 다만 ReMEmbR는 실행 수가 대부분 1회라 run-to-run 분산을 분리할 수 없다.
+- **ReMEmbR의 낮은 overall은 유형별 출력 불균형에서 온다.** position 응답률은 67~100%지만 time/binary/duration에서
+  유효 필드를 자주 못 냈다. 특히 네 구성 모두 duration 정답이 없고, R-3B-acc는 time·duration 유효 응답이 0개다.
 
-> ⚠️ "8B는 acc 우세 / 응답률은 perf 우세"로 뭉뚱그리면 틀림. 두 방향 모두 3B↔8B에서 반대로 나타남.
-> 확실한 두 문장: **3B = acc 정확·perf 다응답 / 8B = 대등·혼조(분산 큼).**
+> ⚠️ Optimal+에는 3~5회 평균이 있지만 ReMEmbR는 R-3B-acc를 제외하면 각 1회뿐이다. 따라서 agent 간 격차는
+> 현재 파일에서 관측된 결과이며, 확정적 우열로 일반화하려면 ReMEmbR 반복 실행이 더 필요하다.
 
 ---
 
-## 3. 8B 심화 관찰 (position 도약이 종합점수 견인)
+## 3. Optimal+ 8B 심화 관찰 (position 도약이 종합점수 견인)
 
 - **position에서 질적 도약.** 3B는 질문에 주어진 현재 좌표를 복창(오차 수십~수백 m)해 사실상 검색 실패였으나,
   8B-perf는 캡션 메모리에서 **과거 좌표를 실제로 꺼내옴**(노란 비상전화 0.003m, Gates 동상 0.0007m 등).
@@ -92,7 +108,7 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 
 ---
 
-## 5. ReMEmbR Agent 3B perf vs optimal+ 3B perf
+## 5. ReMEmbR Agent 3B perf vs Optimal+ 3B perf (단일 run 사례)
 
 `remembr+tt_Llama-3.2-3B-Instruct__captions_tt-qwen25-vl-3b_3_secs_remembr_perf.json`과
 `optimal+tt_Llama-3.2-3B-Instruct__captions_tt-qwen25-vl-3b_3_secs_perf.json`을 직접 비교.
@@ -166,7 +182,7 @@ Llama를 **3B/8B × performance/accuracy 4개 구성**으로 공정 비교. eval
 
 ### 참고 파일
 - 수정: `scripts/question_scripts/form_question_jsons.py`, `scripts/eval.py`, `tt_server/tt_infer_server.py`
-- 결과: `out/0/human_qa/jung_results/optimal+eval/llm{3b,8b}models/*_{perf,acc}[(N)].json`
-  (3B ×5 + 8B ×3). 파일명 라벨 3.1/3.2 혼재 — 실제 구분은 **크기(3B/8B)+모드(acc/perf)**, 로드 모델은
-  서버 `TT_LLM_MODEL`이 결정하므로 결과엔 무관.
+- 결과: `out/0/human_qa/jung_results/{optimal+,remembr+}eval/llm{3b,8b}models/*.json`
+  (Optimal+ 3B 각 5회·8B 각 3회, ReMEmbR 3B-perf 1회·3B-acc 2회·8B 각 1회). 파일명 라벨 3.1/3.2 혼재 —
+  실제 구분은 **agent+크기(3B/8B)+모드(acc/perf)**, 로드 모델은 서버 `TT_LLM_MODEL`이 결정하므로 결과엔 무관.
 - 데이터: `data/questions/0/human_qa.json`(수정본), `human_qa.BROKEN-TZ.json`(옛 백업)
