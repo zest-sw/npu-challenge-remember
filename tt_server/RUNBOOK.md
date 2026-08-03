@@ -14,7 +14,7 @@
 ## 0. Architecture at a glance
 
 ```
- remembr (remembr_venv)                     tt_infer_server.py (tt-metal python_env, owns the board)
+ remembr (remembr/remembr_venv)              tt_infer_server.py (tt-metal python_env, owns the board)
    NonAgent ── HTTP /v1/chat/completions ─────► Llama-3.2-3B  ┐  1 process, device opened once,
    Captioner ─ HTTP /caption ─────────────────► Qwen2.5-VL-3B ┘  both models co-resident,
                                                                  single worker + queue serializes all NPU execution
@@ -69,8 +69,9 @@ docker ps | grep milvus                                    # confirm it is up
 
 ### 1-3. remembr 전용 venv 생성
 ```bash
-python3 -m venv ~/remembr_venv
-source ~/remembr_venv/bin/activate
+cd /home/user/remembr
+python3 -m venv remembr_venv
+source remembr_venv/bin/activate
 pip install --upgrade pip          # ★ upgrade pip first (avoids the old pip resolver bug)
 
 pip install "langchain-core==0.2.40" "langchain-community==0.2.16" \
@@ -160,8 +161,8 @@ curl -s http://localhost:8100/v1/chat/completions \
 ## 3. Running the smoke test (remembr_venv)
 
 ```bash
-source ~/remembr_venv/bin/activate
 cd /home/user/remembr
+source remembr_venv/bin/activate
 export OPENAI_API_KEY=local
 PYTHONPATH=$(pwd) python examples/tt_smoke_test.py <image_path_1> <image_path_2> ...
 ```

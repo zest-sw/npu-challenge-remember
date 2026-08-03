@@ -27,7 +27,7 @@ Upstream은 **VILA-1.5 (13B)**로 캡션을 만들고 **GPT-4o / llama3.1-8B**�
 ## 어떻게 도는가
 
 ```
- remembr (remembr_venv)                    tt_server/tt_infer_server.py (tt-metal python_env, 보드 소유)
+ remembr (remembr/remembr_venv)             tt_server/tt_infer_server.py (tt-metal python_env, 보드 소유)
    NonAgent ── HTTP /v1/chat/completions ────► Llama-3.2-3B  ┐  프로세스 1개, device를 1회만 open,
    Captioner ─ HTTP /caption ────────────────► Qwen2.5-VL-3B ┘  두 모델 co-resident,
                                                                 모든 NPU op는 단일 워커 큐로 직렬화
@@ -63,7 +63,7 @@ TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 bash /home/user/remembr/tt_serve
 curl -s localhost:8100/health          # {"ready":true,"llm":true,"vlm":true}
 
 # 2) end-to-end 스모크 테스트 (remembr_venv)
-cd /home/user/remembr && source ~/remembr_venv/bin/activate
+cd /home/user/remembr && source remembr_venv/bin/activate
 export OPENAI_API_KEY=local
 PYTHONPATH=$(pwd) python examples/tt_smoke_test.py path/to/frame.jpg
 ```
