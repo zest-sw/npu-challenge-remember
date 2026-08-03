@@ -95,7 +95,14 @@ def create_app(service: InferenceService) -> FastAPI:
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": request.model or snapshot.llm_model,
+            # Report what actually generated this, never the client's requested
+            # name. The board holds one model at a time and the request's `model`
+            # is not honoured (see /mode), so echoing it back told callers a model
+            # ran that had not: a client asking for Llama-3.2-3B against a server
+            # in llm-8b mode got "Llama-3.2-3B" in the reply while 8B did the work.
+            # That is how eval.py ends up naming a results file after a model that
+            # never ran, since it labels output from its own --model argument.
+            "model": snapshot.llm_model,
             "choices": [
                 {
                     "index": 0,

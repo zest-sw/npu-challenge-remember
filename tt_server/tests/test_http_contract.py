@@ -78,6 +78,22 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(body["object"], "chat.completion")
         self.assertEqual(body["choices"][0]["message"]["content"], "answer:hello")
 
+    def test_chat_reports_the_loaded_model_not_the_requested_one(self):
+        """The reply must name whatever actually generated it.
+
+        The board holds one model at a time and `model` in the request is not
+        honoured, so echoing it back claimed a model had run when it had not —
+        a client asking for a 3B against a server in 8B mode was told "3B", and
+        eval.py names its results file from that same argument.
+        """
+        body = self.endpoint("/v1/chat/completions", "POST")(
+            ChatCompletionRequest(
+                messages=[ChatMessage(role="user", content="hello")],
+                model="some/other-model-that-is-not-loaded",
+            )
+        )
+        self.assertEqual(body["model"], self.runtime.current.llm_model)
+
     def test_caption_decodes_images(self):
         body = self.endpoint("/caption", "POST")(
             CaptionRequest(images=[encoded_image()])
