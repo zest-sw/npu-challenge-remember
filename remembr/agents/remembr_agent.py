@@ -97,7 +97,7 @@ Choose exactly one action as JSON. Do not write XML, markdown, or prose.
 Expected final answer type for this question: {expected_type}.
 
 Available actions:
-- retrieve_from_time: use mainly for "when" questions that need evidence near a specific timestamp.
+- retrieve_from_time: use only when the actual question asks for memories near an explicit HH:MM:SS timestamp.
 - retrieve_from_position: use only when the schema permits it and the question asks for memories near an explicit [x, y, z] coordinate.
 - retrieve_from_text: use for objects, places, activities, entrances, exits, doors, stairs, signs, durations, or other visual concepts.
 - __conversational_response: use only after retrieved memory gives enough evidence to answer.
@@ -108,9 +108,10 @@ Rules:
 3. For retrieve_from_time, tool_input.x must be exactly HH:MM:SS.
 4. For retrieve_from_position, tool_input.x must be [x, y, z].
 5. For retrieve_from_text, tool_input.x must be a short visual search phrase, not a full prompt.
-6. For duration/how-long questions, use retrieve_from_text with the event or activity phrase; do not choose retrieve_from_time just because the question mentions time.
-7. For where/object-location questions, use retrieve_from_text with the object or place phrase; do not choose retrieve_from_position just because the question includes the robot's current coordinates.
-8. If retrieved memory is enough, summarize the relevant evidence with __conversational_response."""
+6. For when questions about an event, object, or place, use retrieve_from_text with the event/object/place phrase; do not choose retrieve_from_time just because the preamble mentions start/current time.
+7. For duration/how-long questions, use retrieve_from_text with the event or activity phrase; do not choose retrieve_from_time just because the question mentions time.
+8. For where/object-location questions, use retrieve_from_text with the object or place phrase; do not choose retrieve_from_position just because the question includes the robot's current coordinates.
+9. If retrieved memory is enough, summarize the relevant evidence with __conversational_response."""
 
 
 
@@ -194,6 +195,31 @@ def _expected_answer_type(question: str) -> str:
     if re.match(r"\s*(can|could|did|do|does|is|are|was|were|has|have)\b", q):
         return "binary"
     return "text"
+
+
+def _asked_question_text(question: str) -> str:
+    text = re.sub(r"^\s*The question is:\s*", "", question.strip(), flags=re.IGNORECASE)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else text
+
+
+def _tt_text_query_from_question(question: str) -> str:
+    asked = _asked_question_text(question)
+    asked = re.sub(r"\?\s*$", "", asked).strip()
+    replacements = [
+        r"^when\s+(were|was)\s+(you|the robot)\s+",
+        r"^when\s+did\s+(you|the robot)\s+",
+        r"^where\s+(is|are)\s+",
+        r"^how\s+long\s+(were|was)\s+(you|the robot)\s+",
+        r"^(are|is|was|were)\s+(you|the robot)\s+",
+    ]
+    query = asked
+    for pattern in replacements:
+        query = re.sub(pattern, "", query, flags=re.IGNORECASE).strip()
+    query = re.sub(r"\b(right now|currently|for)\b", "", query, flags=re.IGNORECASE).strip()
+    query = re.sub(r"^(in|at|near|around|by)\s+", "", query, flags=re.IGNORECASE).strip()
+    query = re.sub(r"^the\s+", "", query, flags=re.IGNORECASE).strip()
+    return (query or asked)[:200]
 
 
 def _tt_answer_schema_for(question: str) -> dict:
@@ -346,7 +372,14 @@ class ReMEmbRAgent(Agent):
     def _tt_action_schema(self, question: str, allow_answer: bool):
         expected_type = _expected_answer_type(question)
         if expected_type == "time":
-            tools = ["retrieve_from_time", "retrieve_from_text"]
+            asked = _asked_question_text(question)
+            if re.search(r"\b\d{2}:\d{2}:\d{2}\b", asked):
+                tools = ["retrieve_from_time", "retrieve_from_text"]
+            else:
+                # Benchmark "when" questions usually ask for the time of a
+                # visual event/place, while the preamble contains unrelated
+                # start/current timestamps. Search the event caption first.
+                tools = ["retrieve_from_text"]
         elif expected_type == "position":
             # Object-location questions are answered best by retrieving the
             # caption that mentions the target, then using that memory's stored
@@ -387,7 +420,7 @@ class ReMEmbRAgent(Agent):
             "additionalProperties": False,
         }
 
-    def _parse_tt_action(self, content: str) -> dict:
+    def _parse_tt_action(self, content: str, question: str = "") -> dict:
         try:
             action = json.loads(content)
         except json.JSONDecodeError as e:
@@ -412,7 +445,9 @@ class ReMEmbRAgent(Agent):
             # as a canonicalization step, not a planner failure.
             match = re.search(r"\b(\d{2}:\d{2}:\d{2})\b", query.strip())
             if match is None:
-                raise ValueError(f"retrieve_from_time requires HH:MM:SS string x: {action}")
+                action["tool"] = "retrieve_from_text"
+                action["tool_input"] = {"x": _tt_text_query_from_question(question)}
+                return action
             action["tool_input"] = {"x": match.group(1)}
         elif tool == "retrieve_from_position":
             query = tool_input.get("x")
@@ -477,7 +512,7 @@ class ReMEmbRAgent(Agent):
             "previous_tool_requests": self.previous_tool_requests,
             "expected_type": expected_type,
         })
-        action = self._parse_tt_action("".join(response.content.splitlines()))
+        action = self._parse_tt_action("".join(response.content.splitlines()), question=question)
         self.agent_call_count += 1
 
         if action["tool"] == "__conversational_response":
