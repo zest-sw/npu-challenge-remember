@@ -4,6 +4,11 @@
 **단일 Tenstorrent 보드**에서 기동하고, remembr 코어 파이프라인
 (`image → caption → memory insert → question answering`)을 end-to-end로 실행하는 절차이다.
 
+> ⚠️ **서버 lifecycle 소유권**: NPU 서버 기동·종료·재시작은 사람 사용자가 지정된 tmux
+> 세션에서 직접 수행한다. AI 에이전트나 자동화는 `run_server.sh` 실행, `tmux send-keys`,
+> signal/kill, background server 기동을 하지 않는다. 에이전트는 `/health`, process, tmux 로그를
+> 읽기 전용으로 확인할 수 있으며, 서버를 올리거나 내려야 하면 사용자에게 요청해야 한다.
+
 ---
 
 ## 0. Architecture at a glance
@@ -102,6 +107,10 @@ pip install fastapi "uvicorn[standard]" lm-format-enforcer
 
 ## 2. Starting the NPU server (tt-metal python_env)
 
+이 절의 명령은 **사람 사용자가 tmux 서버 pane에서 직접 실행**한다. 에이전트가 대신 실행하거나
+별도의 pane/process에 중복 서버를 띄우지 않는다. 시작 전 `curl localhost:8100/health`로 기존
+서버가 없는지 확인한다.
+
 ```bash
 cd /home/user/tt-metal
 TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
@@ -179,7 +188,8 @@ OK: end-to-end path completed.
 
 ## 4. Shutdown
 
-**서버 콘솔에서 `Ctrl-C`를 한 번만 누르고 기다려라.** (또는 `kill -TERM <pid>` / `pkill -f tt_infer_server.py` = SIGTERM.)
+**사람 사용자가 tmux의 서버 콘솔에서 `Ctrl-C`를 한 번만 누르고 기다려라.** 에이전트는
+`tmux send-keys`나 signal 명령으로 대신 종료하지 않는다. (비상시 SIGTERM도 사람 사용자가 직접 판단한다.)
 서버는 worker에게 정지 신호를 보내고 **`close_mesh_device()`로 device를 깨끗이 닫은 뒤** 종료한다.
 이 로그 줄들이 나오면 안전하게 내려간 것이다:
 ```

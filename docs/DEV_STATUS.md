@@ -98,6 +98,14 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-02 (4) — NPU 서버 lifecycle을 사람 사용자 전용으로 명문화
+
+- 공유 BOS 보드의 안전을 위해 서버 기동·종료·재시작은 **사람 사용자가 지정된 tmux 세션에서만**
+  직접 수행하도록 `AGENTS.md`와 서버 `RUNBOOK.md`에 운영 원칙을 추가했다.
+- AI 에이전트는 `/health`, process, tmux pane/log의 읽기 전용 확인만 허용하며,
+  `run_server.sh`, background server, `tmux send-keys`, signal/kill/restart를 금지한다. lifecycle
+  변경이 필요하면 사용자에게 직접 조작을 요청한다.
+- 문서 전용 변경. `git diff --check`로 형식을 검증했다.
 ### 2026-08-02 — 중복 NPU 서버 기동 방지 startup guard
 
 - `run_server.sh`가 tt-metal import/device open 전에 `server_preflight.sh`를 실행하도록 변경했다.
