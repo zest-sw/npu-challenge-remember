@@ -110,13 +110,13 @@ python remembr/scripts/preprocess_coda_rosfree.py \
 
 ---
 
-## 3. NPU 서버 시작 (terminal A, tt-metal 환경)
+## 3. NPU 서버 시작 (terminal A)
 
 ```bash
-cd /home/user/tt-metal
-TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 \
-  bash /home/user/remembr/tt_server/run_server.sh
+cd /home/user/remembr/tt_server
+TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 ./run_server.sh
 ```
+venv는 스크립트가 알아서 켠다 — tt-metal로 미리 cd/activate할 필요 없음.
 - `TT_LLM_MAX_SEQ_LEN=2048`은 **필수**다(NonAgent 프롬프트가 2048까지 pad한다).
 - `Application startup complete.`가 나타날 때까지 기다려라.
 - 확인: `curl -s http://localhost:8100/health` → `{"ready":true,"llm":true,"vlm":true}`

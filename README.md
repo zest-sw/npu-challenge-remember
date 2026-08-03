@@ -57,9 +57,9 @@ VLM과 공존이 안 됩니다 — 그리고 로봇은 둘 다 동시에 상주�
 ## 빠른 시작
 
 ```bash
-# 1) NPU 서버 (tt-metal python_env)
-cd /home/user/tt-metal
-TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 bash /home/user/remembr/tt_server/run_server.sh
+# 1) NPU 서버 (venv는 run_server.sh가 알아서 켠다 — 미리 활성화할 필요 없음)
+cd /home/user/remembr/tt_server
+TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 ./run_server.sh
 curl -s localhost:8100/health          # {"ready":true,"llm":true,"vlm":true}
 
 # 2) end-to-end 스모크 테스트 (remembr_venv)
