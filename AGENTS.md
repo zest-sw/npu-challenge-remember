@@ -68,7 +68,18 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 - **eval.py는 `/mode`를 호출하지 않는다.** 서버가 지금 어떤 모드든 그대로 쓴다 — LLM 필요한데
   VLM 전용 모드면 계속 409.
 - 서버 문법 강제 JSON(`response_format`)은 lm-format-enforcer로 host-side full-vocab logit
-  마스킹 — device-side greedy보다 느리지만 소형 모델의 깨진 JSON을 막아준다.
+  마스킹 — 소형 모델의 깨진 JSON을 막아준다. **느리다고 오해하지 말 것**: 실측하면 같은
+  토큰 수에서 device-side greedy와 차이가 ~3%다(8B: plain 28.6s vs json 29.6s). 토큰마다
+  호스트로 읽는 513KB(128256×fp32)는 8B forward pass에 묻힌다.
+- **지연은 거의 전부 "생성 토큰 수 × 토큰당 비용"이다.** 실측(8B, accuracy): 요청당 고정비
+  ~3초 + **토큰당 ~0.26초(≈3.8 tok/s)**. 프롬프트 길이 영향은 작다(22→529 words에서
+  3.0→4.3초). 느리면 프롬프트나 grammar를 의심하기 전에 **생성 토큰 수와 재시도 횟수**를 보라.
+- **`temperature=0`은 재시도를 무의미하게 만든다.** 생성이 바이트 단위로 동일해져서 실패한
+  답을 그대로 반복한다. 실측(동일 9문제, 8B): temp 0 → LLM 824초·attempts 25·미답변 4,
+  temp 0.7 → **445초·12·0**. eval 기본값 0.7을 이유 없이 0으로 바꾸지 말 것.
+- **grammar 스키마의 문자열에 `maxLength`가 없으면 모델이 그 안에서 폭주한다.** `position`에
+  제한이 없어서 `[0, 0, 0], `를 끝없이 반복하다 max_tokens에 잘려 JSON이 깨졌고, 상한 없는
+  재시도와 겹쳐 eval이 27분간 멈췄다([c997922]). 새 필드를 추가할 때 길이를 반드시 준다.
 - tt-metal 소스는 원칙적으로 무손상 유지 — 편집한 곳은 위 model_name 패치가 거의 유일하고,
   이유가 `docs/DEV_STATUS.md` changelog에 기록돼 있다.
 
