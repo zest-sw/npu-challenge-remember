@@ -2,6 +2,7 @@ from typing import Annotated, Literal, Sequence, TypedDict
 import json
 import traceback
 import uuid
+import datetime
 import sys, re
 
 # from langchain_openai import OpenAIEmbeddings
@@ -68,8 +69,8 @@ ANSWER_SCHEMA = {
                 {'type': 'null'},
             ]
         },
-        'time': {'type': ['number', 'string', 'null']},
-        'duration': {'type': ['number', 'string', 'null']},
+        'time': {'type': ['number', 'null']},
+        'duration': {'type': ['number', 'null']},
     },
     'required': ['type', 'text', 'binary', 'position', 'orientation', 'time', 'duration'],
     'additionalProperties': False,
@@ -85,16 +86,20 @@ Use null for any field that does not apply.
 - binary: yes/no for binary questions, otherwise null
 - position: an array like [x, y, z] for where questions, otherwise null
 - orientation: an array like [yaw] when position is provided, otherwise null
-- time: a number or string for minutes-ago answers, otherwise null
-- duration: a number or string for duration answers, otherwise null"""
+- time: a number in minutes ago for "when" questions, otherwise null. Never output an absolute timestamp here.
+- duration: a number in minutes for "how long" questions, otherwise null. Never output an absolute timestamp here.
+For example, if the current time is 08:03:02 and the event happened at 07:55:32, time must be 7.5, not "07:55:32" and not "2023-01-16 07:55:32".
+Expected answer type for this question: {expected_type}.
+Do not answer with an image-description type unless the user asked what the image shows."""
 
 TT_AGENT_SYSTEM_PROMPT = """You are a memory retrieval planner for a robot.
 Choose exactly one action as JSON. Do not write XML, markdown, or prose.
+Expected final answer type for this question: {expected_type}.
 
 Available actions:
-- retrieve_from_time: use for questions about when something happened, or when a question includes a time window.
-- retrieve_from_position: use for questions about where something is, or when a useful 3D query position is given.
-- retrieve_from_text: use for objects, places, activities, entrances, exits, doors, stairs, signs, or other visual concepts.
+- retrieve_from_time: use mainly for "when" questions that need evidence near a specific timestamp.
+- retrieve_from_position: use only when the schema permits it and the question asks for memories near an explicit [x, y, z] coordinate.
+- retrieve_from_text: use for objects, places, activities, entrances, exits, doors, stairs, signs, durations, or other visual concepts.
 - __conversational_response: use only after retrieved memory gives enough evidence to answer.
 
 Rules:
@@ -103,7 +108,9 @@ Rules:
 3. For retrieve_from_time, tool_input.x must be exactly HH:MM:SS.
 4. For retrieve_from_position, tool_input.x must be [x, y, z].
 5. For retrieve_from_text, tool_input.x must be a short visual search phrase, not a full prompt.
-6. If retrieved memory is enough, summarize the relevant evidence with __conversational_response."""
+6. For duration/how-long questions, use retrieve_from_text with the event or activity phrase; do not choose retrieve_from_time just because the question mentions time.
+7. For where/object-location questions, use retrieve_from_text with the object or place phrase; do not choose retrieve_from_position just because the question includes the robot's current coordinates.
+8. If retrieved memory is enough, summarize the relevant evidence with __conversational_response."""
 
 
 
@@ -130,6 +137,98 @@ def inspect(state):
 def parse_json(string):
     parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
     return json.loads(parsed)
+
+
+def _extract_datetime(text: str):
+    match = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})", text)
+    if match is None:
+        return None
+    return datetime.datetime.strptime(" ".join(match.groups()), "%Y-%m-%d %H:%M:%S")
+
+
+def _extract_current_datetime(question: str):
+    match = re.search(r"current time is\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", question, re.IGNORECASE)
+    if match is None:
+        return _extract_datetime(question)
+    return datetime.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+
+
+def _canonicalize_minutes(value, question: str):
+    if value is None or isinstance(value, (int, float)):
+        return value
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    try:
+        return float(stripped)
+    except ValueError:
+        pass
+
+    current_dt = _extract_current_datetime(question)
+    if current_dt is None:
+        return None
+
+    event_dt = _extract_datetime(stripped)
+    if event_dt is None:
+        hms = re.search(r"\b(\d{2}:\d{2}:\d{2})\b", stripped)
+        if hms is None:
+            return None
+        event_time = datetime.datetime.strptime(hms.group(1), "%H:%M:%S").time()
+        event_dt = datetime.datetime.combine(current_dt.date(), event_time)
+    delta_min = (current_dt - event_dt).total_seconds() / 60.0
+    if delta_min < 0:
+        # Retrieval context can cross date boundaries after offset conversion.
+        # A future absolute time is not a valid minutes-ago answer for eval.
+        return None
+    return float(delta_min)
+
+
+def _expected_answer_type(question: str) -> str:
+    q = question.lower()
+    if "how long" in q or "duration" in q:
+        return "duration"
+    if re.search(r"\bwhen\b", q):
+        return "time"
+    if re.search(r"\bwhere\b", q) or "located" in q or "location" in q:
+        return "position"
+    if re.match(r"\s*(can|could|did|do|does|is|are|was|were|has|have)\b", q):
+        return "binary"
+    return "text"
+
+
+def _tt_answer_schema_for(question: str) -> dict:
+    expected_type = _expected_answer_type(question)
+    schema = json.loads(json.dumps(ANSWER_SCHEMA))
+    schema["properties"]["type"] = {"type": "string", "enum": [expected_type]}
+    if expected_type == "time":
+        schema["properties"]["time"] = {"type": "number"}
+        schema["properties"]["duration"] = {"type": "null"}
+        schema["properties"]["position"] = {"type": "null"}
+        schema["properties"]["orientation"] = {"type": "null"}
+        schema["properties"]["binary"] = {"type": "null"}
+    elif expected_type == "duration":
+        schema["properties"]["duration"] = {"type": "number"}
+        schema["properties"]["time"] = {"type": "null"}
+        schema["properties"]["position"] = {"type": "null"}
+        schema["properties"]["orientation"] = {"type": "null"}
+        schema["properties"]["binary"] = {"type": "null"}
+    elif expected_type == "position":
+        schema["properties"]["time"] = {"type": "null"}
+        schema["properties"]["duration"] = {"type": "null"}
+        schema["properties"]["binary"] = {"type": "null"}
+    elif expected_type == "binary":
+        schema["properties"]["binary"] = {"type": "string", "enum": ["yes", "no"]}
+        schema["properties"]["time"] = {"type": "null"}
+        schema["properties"]["duration"] = {"type": "null"}
+        schema["properties"]["position"] = {"type": "null"}
+        schema["properties"]["orientation"] = {"type": "null"}
+    else:
+        schema["properties"]["time"] = {"type": "null"}
+        schema["properties"]["duration"] = {"type": "null"}
+        schema["properties"]["position"] = {"type": "null"}
+        schema["properties"]["orientation"] = {"type": "null"}
+        schema["properties"]["binary"] = {"type": "null"}
+    return schema
 
 class AgentState(TypedDict):
     # The add_messages function defines how an update should be processed
@@ -192,6 +291,7 @@ class ReMEmbRAgent(Agent):
 
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
+        self.used_tt_actions = set()
 
         self.chat_history = ChatMessageHistory()
 
@@ -243,8 +343,21 @@ class ReMEmbRAgent(Agent):
         self.create_tools(memory)
         self.build_graph()
 
-    def _tt_action_schema(self, allow_answer: bool):
-        tools = ["retrieve_from_text", "retrieve_from_position", "retrieve_from_time"]
+    def _tt_action_schema(self, question: str, allow_answer: bool):
+        expected_type = _expected_answer_type(question)
+        if expected_type == "time":
+            tools = ["retrieve_from_time", "retrieve_from_text"]
+        elif expected_type == "position":
+            # Object-location questions are answered best by retrieving the
+            # caption that mentions the target, then using that memory's stored
+            # position. The benchmark question preamble always includes the
+            # robot's current coordinates, so allowing position search here makes
+            # the planner overfit to the preamble instead of the asked object.
+            tools = ["retrieve_from_text"]
+        else:
+            # Duration/binary/text questions should retrieve event/object evidence,
+            # not blindly query a timestamp from the question.
+            tools = ["retrieve_from_text"]
         if allow_answer:
             tools.append("__conversational_response")
         return {
@@ -292,9 +405,15 @@ class ReMEmbRAgent(Agent):
             action["tool_input"] = {"x": query.strip()[:200]}
         elif tool == "retrieve_from_time":
             query = tool_input.get("x")
-            if not isinstance(query, str) or not re.match(r"^\d{2}:\d{2}:\d{2}$", query.strip()):
+            if not isinstance(query, str):
                 raise ValueError(f"retrieve_from_time requires HH:MM:SS string x: {action}")
-            action["tool_input"] = {"x": query.strip()}
+            # The planner sometimes includes the date ("2023-01-16 07:55:32")
+            # even though MilvusMemory.search_by_time only wants HMS. Treat that
+            # as a canonicalization step, not a planner failure.
+            match = re.search(r"\b(\d{2}:\d{2}:\d{2})\b", query.strip())
+            if match is None:
+                raise ValueError(f"retrieve_from_time requires HH:MM:SS string x: {action}")
+            action["tool_input"] = {"x": match.group(1)}
         elif tool == "retrieve_from_position":
             query = tool_input.get("x")
             if not isinstance(query, list) or len(query) != 3:
@@ -311,7 +430,17 @@ class ReMEmbRAgent(Agent):
 
     def _tt_agent(self, state):
         messages = state["messages"]
+        max_tool_calls = int(os.environ.get("TT_MAX_TOOL_CALLS", "1"))
+        if self.agent_call_count >= max_tool_calls:
+            return {"messages": [AIMessage(
+                content=(
+                    "Use the retrieved memory context above to produce the final answer. "
+                    "Do not call another retrieval tool."
+                )
+            )]}
         allow_answer = self.agent_call_count > 0
+        question = getattr(messages[0], "content", str(messages[0]))
+        expected_type = _expected_answer_type(question)
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -326,7 +455,7 @@ class ReMEmbRAgent(Agent):
                 "type": "json_schema",
                 "json_schema": {
                     "name": "memory_action",
-                    "schema": self._tt_action_schema(allow_answer=allow_answer),
+                    "schema": self._tt_action_schema(question, allow_answer=allow_answer),
                 },
             },
             max_tokens=int(os.environ.get("TT_TOOL_MAX_TOKENS", "96")),
@@ -342,17 +471,31 @@ class ReMEmbRAgent(Agent):
             else:
                 chat_history.append(message)
 
-        question = getattr(messages[0], "content", str(messages[0]))
         response = model.invoke({
             "question": f"The question is: {question}",
             "chat_history": chat_history,
             "previous_tool_requests": self.previous_tool_requests,
+            "expected_type": expected_type,
         })
         action = self._parse_tt_action("".join(response.content.splitlines()))
         self.agent_call_count += 1
 
         if action["tool"] == "__conversational_response":
             return {"messages": [AIMessage(content=action["tool_input"]["response"])]}
+
+        action_key = json.dumps(
+            {"tool": action["tool"], "tool_input": action["tool_input"]},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if action_key in self.used_tt_actions:
+            return {"messages": [AIMessage(
+                content=(
+                    "The requested memory has already been retrieved. "
+                    "Use the retrieved memory context above to produce the final answer."
+                )
+            )]}
+        self.used_tt_actions.add(action_key)
 
         self.previous_tool_requests += (
             f"I previously used the {action['tool']} tool with the arguments: "
@@ -504,6 +647,7 @@ class ReMEmbRAgent(Agent):
         question = messages[0].content \
                 + "\n Please responsed in the desired format."
         if self.llm_type.startswith('tt/'):
+            expected_type = _expected_answer_type(question)
             gen_prompt = ChatPromptTemplate.from_messages(
                 [
                     ("system", GENERATE_SCHEMA_PROMPT),
@@ -514,7 +658,7 @@ class ReMEmbRAgent(Agent):
             model = gen_prompt | self.llm.bind(
                 response_format={
                     "type": "json_schema",
-                    "json_schema": {"name": "agent_output", "schema": ANSWER_SCHEMA},
+                    "json_schema": {"name": "agent_output", "schema": _tt_answer_schema_for(question)},
                 },
                 max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
             )
@@ -542,7 +686,13 @@ class ReMEmbRAgent(Agent):
 
             model = gen_prompt | self.chat
 
-        response = model.invoke({"question": question, "chat_history": messages[1:]})
+        invoke_inputs = {
+            "question": question,
+            "chat_history": messages[1:],
+        }
+        if self.llm_type.startswith('tt/'):
+            invoke_inputs["expected_type"] = _expected_answer_type(question)
+        response = model.invoke(invoke_inputs)
 
         # let us parse and check the output is a dictionary. raise error otherwise
         response = ''.join(response.content.splitlines())
@@ -560,6 +710,9 @@ class ReMEmbRAgent(Agent):
             for key in keys_to_check_for:
                 if key not in parsed:
                     raise ValueError("Missing all the required keys during generate. Retrying...")
+
+            parsed['time'] = _canonicalize_minutes(parsed.get('time'), question)
+            parsed['duration'] = _canonicalize_minutes(parsed.get('duration'), question)
             
             if (parsed['position'] is not None) and len(parsed['position']) != 3:
                 raise ValueError(f"Shape of position was incorrect. {parsed['position']}. Retrying...")
@@ -569,6 +722,7 @@ class ReMEmbRAgent(Agent):
 
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
+        self.used_tt_actions = set()
         return {"messages": [json.dumps(parsed)]}
 
 

@@ -1,5 +1,10 @@
 from dataclasses import dataclass, asdict
 
+# ignore Milvus Warning
+import warnings
+warnings.filterwarnings("ignore", message=".*ORM-style PyMilvus API.*", category=Warning)
+warnings.filterwarnings("ignore", message=".*The class `Milvus` was deprecated.*", category=Warning)
+
 import datetime, time
 from time import strftime, localtime
 from typing import Any, List, Optional, Tuple
