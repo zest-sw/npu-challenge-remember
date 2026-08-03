@@ -18,6 +18,7 @@ _최종 수정: 2026-07-21 · branch `main`_
 |---|---|
 | Unified NPU inference server (LLM+VLM, HTTP) | ✅ Done |
 | NonAgent `tt/` backend + JSON-constrained decoding | ✅ Done |
+| ReMEmbRAgent `tt/` structured planner | 🔄 Implemented — XML-like tool protocol 제거, 작은 JSON action schema로 tool 선택 |
 | NPU captioner (Qwen2.5-VL) | ✅ Done |
 | end-to-end smoke test | ✅ Done |
 | Original paper data acquired (data.csv + CODa seq0) | ✅ Done |
@@ -80,7 +81,8 @@ _최종 수정: 2026-07-21 · branch `main`_
 ## 5. Key design decisions (why we did it this way)
 
 - **두 venv를 HTTP 뒤로 분리** — ttnn/transformers(server)와 langchain/pymilvus(remembr) 사이의 버전 충돌을 피함.
-- **NonAgent 채택** (ReMEmbRAgent 대신) — 3B에서 tool-calling은 불안정. 단일 JSON 호출이 NPU에 적합.
+- **NonAgent 채택** (ReMEmbRAgent 대신) — 3B에서 자유형 tool-calling은 불안정. 단일 JSON 호출이 NPU에 가장 안정적이다.
+  `remembr+tt`는 선택 평가용으로 XML-like protocol을 제거하고 작은 JSON action schema 기반 planner를 사용한다.
 - **LLM을 3B로 유지(8B로 안 감)** — 평가만 보면 eval 시점에는 VLM이 필요 없으므로
   `TT_ENABLE_VLM=0`으로 8B만 로드해 더 나은 품질을 얻을 수 있음(8B는 12GiB DRAM에 단독으로만 들어감). **하지만 최종
   목표는 로봇 배치**이고, 주행 중에는 caption 생성과 QA가 동시에 일어나므로 **두 모델이 반드시 공존해야 함.**
@@ -97,6 +99,21 @@ _최종 수정: 2026-07-21 · branch `main`_
 - **Clean shutdown + teardown 중 signal 무시** — worker가 daemon이라 device close가 건너뛰어지던 문제를 고치고, Ctrl-C 연타로 인한 wedging을 방지.
 
 ## 6. Changelog
+
+### 2026-08-03 — `remembr+tt` XML-like tool protocol 제거 + 작은 JSON action schema planner
+`remembr+tt`에서 `<THOUGHT>/<CALL_TOOL>/<ANSWER>`류의 자유형 문자열 tool protocol을 쓰지 않도록
+`ReMEmbRAgent`의 `tt/` 경로를 분리했다. TT 경로는 이제 `FunctionsWrapper`를 거치지 않고
+`ChatOpenAI`에 작은 `json_schema`를 직접 전달해 단일 action object만 생성한다. 허용 tool 이름은
+`retrieve_from_text`, `retrieve_from_position`, `retrieve_from_time`, `__conversational_response`로
+enum 제한하고, 첫 planner call에서는 `__conversational_response`를 schema에서 제외해 memory retrieval 없이
+바로 답하는 실패 모드를 줄였다. runtime은 JSON을 검증한 뒤 LangGraph `ToolCall`로 변환해 기존
+`ToolNode`를 그대로 사용한다. final answer는 기존 `ANSWER_SCHEMA` 제약을 유지한다.
+
+서버 쪽은 `JsonTokenEnforcerFactory`에 schema별 `TokenEnforcer` cache를 추가했다. full-vocab logits를
+host로 가져오는 근본 병목은 아직 남아 있지만, 반복되는 tool/final schema에서 parser/enforcer 객체를
+매 요청 재생성하지 않는다. 실제 NPU-side allowed-token mask/gather는 tt-metal generator/model op 수정과
+보드 검증이 필요해 이번 변경 범위에는 넣지 않았다. 검증: `PYTHONPYCACHEPREFIX=.pycache-check python3 -m
+py_compile remembr/agents/remembr_agent.py tt_server/infrastructure/tenstorrent/sampling.py` 통과.
 
 ### 2026-08-02 (3) — NPU 서버 레이어드 아키텍처 마이그레이션 (`refacoter` branch)
 

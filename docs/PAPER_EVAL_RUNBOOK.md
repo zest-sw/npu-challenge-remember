@@ -193,7 +193,7 @@ python scripts/eval.py \
   --coda_dir /home/user/coda_raw/coda_data \
   --postfix _0
 ```
-**Full RAG (선택) — Milvus retrieval + agent** (3B tool-calling은 불안정):
+**Full RAG (선택) — Milvus retrieval + agent** (`tt/`는 XML-like tool protocol 대신 JSON action schema 사용):
 ```bash
 python scripts/eval.py \
   --model remembr+tt/Llama-3.2-3B-Instruct \
@@ -219,7 +219,7 @@ python scripts/eval.py \
 | `--model` | Memory | Context | NPU에서 3B 적합성 |
 |---|---|---|---|
 | `optimal+tt/...` | Oracle context | 작음 (answer captions만) | ✅ 권장 |
-| `remembr+tt/...` | Milvus RAG top-k | 제한적 | △ 약한 tool-calling |
+| `remembr+tt/...` | Milvus RAG top-k | 제한적 | △ structured planner 적용됨, 실제 NPU smoke 필요 |
 | `tt/...` | 전체 TextMemory | **overflow 위험** | ✗ |
 
 ---

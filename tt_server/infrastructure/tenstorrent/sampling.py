@@ -1,5 +1,6 @@
 import torch
 from loguru import logger
+import json
 
 try:
     from lmformatenforcer import JsonSchemaParser, TokenEnforcer
@@ -52,6 +53,7 @@ class JsonTokenEnforcerFactory:
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
         self._tokenizer_data = None
+        self._enforcers = {}
 
     def create(self, schema):
         if not HAS_LMFE:
@@ -62,4 +64,7 @@ class JsonTokenEnforcerFactory:
                 self.tokenizer,
                 vocab_size=self.vocab_size,
             )
-        return TokenEnforcer(self._tokenizer_data, JsonSchemaParser(schema))
+        key = json.dumps(schema or {}, sort_keys=True, separators=(",", ":"))
+        if key not in self._enforcers:
+            self._enforcers[key] = TokenEnforcer(self._tokenizer_data, JsonSchemaParser(schema))
+        return self._enforcers[key]

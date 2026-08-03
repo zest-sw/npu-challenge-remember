@@ -1,6 +1,7 @@
 from typing import Annotated, Literal, Sequence, TypedDict
 import json
 import traceback
+import uuid
 import sys, re
 
 # from langchain_openai import OpenAIEmbeddings
@@ -16,7 +17,7 @@ from langchain.prompts import (
     ChatPromptTemplate,
     MessagesPlaceholder
 )
-from langchain_core.messages import ToolMessage, AIMessage
+from langchain_core.messages import ToolMessage, AIMessage, ToolCall
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -86,6 +87,23 @@ Use null for any field that does not apply.
 - orientation: an array like [yaw] when position is provided, otherwise null
 - time: a number or string for minutes-ago answers, otherwise null
 - duration: a number or string for duration answers, otherwise null"""
+
+TT_AGENT_SYSTEM_PROMPT = """You are a memory retrieval planner for a robot.
+Choose exactly one action as JSON. Do not write XML, markdown, or prose.
+
+Available actions:
+- retrieve_from_time: use for questions about when something happened, or when a question includes a time window.
+- retrieve_from_position: use for questions about where something is, or when a useful 3D query position is given.
+- retrieve_from_text: use for objects, places, activities, entrances, exits, doors, stairs, signs, or other visual concepts.
+- __conversational_response: use only after retrieved memory gives enough evidence to answer.
+
+Rules:
+1. On the first planner call for an episodic memory question, retrieve memory instead of answering directly.
+2. Use only the listed action names.
+3. For retrieve_from_time, tool_input.x must be exactly HH:MM:SS.
+4. For retrieve_from_position, tool_input.x must be [x, y, z].
+5. For retrieve_from_text, tool_input.x must be a short visual search phrase, not a full prompt.
+6. If retrieved memory is enough, summarize the relevant evidence with __conversational_response."""
 
 
 
@@ -225,6 +243,128 @@ class ReMEmbRAgent(Agent):
         self.create_tools(memory)
         self.build_graph()
 
+    def _tt_action_schema(self, allow_answer: bool):
+        tools = ["retrieve_from_text", "retrieve_from_position", "retrieve_from_time"]
+        if allow_answer:
+            tools.append("__conversational_response")
+        return {
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string", "enum": tools},
+                "tool_input": {
+                    "type": "object",
+                    "properties": {
+                        "x": {
+                            "anyOf": [
+                                {"type": "string", "maxLength": 200},
+                                {
+                                    "type": "array",
+                                    "items": {"type": "number"},
+                                    "minItems": 3,
+                                    "maxItems": 3,
+                                },
+                            ]
+                        },
+                        "response": {"type": "string", "maxLength": 500},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["tool", "tool_input"],
+            "additionalProperties": False,
+        }
+
+    def _parse_tt_action(self, content: str) -> dict:
+        try:
+            action = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"TT planner did not return valid JSON: {content}") from e
+
+        tool = action.get("tool")
+        tool_input = action.get("tool_input")
+        if not isinstance(tool_input, dict):
+            raise ValueError(f"TT planner tool_input must be an object: {action}")
+
+        if tool == "retrieve_from_text":
+            query = tool_input.get("x")
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError(f"retrieve_from_text requires non-empty string x: {action}")
+            action["tool_input"] = {"x": query.strip()[:200]}
+        elif tool == "retrieve_from_time":
+            query = tool_input.get("x")
+            if not isinstance(query, str) or not re.match(r"^\d{2}:\d{2}:\d{2}$", query.strip()):
+                raise ValueError(f"retrieve_from_time requires HH:MM:SS string x: {action}")
+            action["tool_input"] = {"x": query.strip()}
+        elif tool == "retrieve_from_position":
+            query = tool_input.get("x")
+            if not isinstance(query, list) or len(query) != 3:
+                raise ValueError(f"retrieve_from_position requires [x, y, z]: {action}")
+            action["tool_input"] = {"x": [float(v) for v in query]}
+        elif tool == "__conversational_response":
+            response = tool_input.get("response")
+            if not isinstance(response, str) or not response.strip():
+                raise ValueError(f"__conversational_response requires response: {action}")
+            action["tool_input"] = {"response": response.strip()[:500]}
+        else:
+            raise ValueError(f"TT planner selected unknown tool: {action}")
+        return action
+
+    def _tt_agent(self, state):
+        messages = state["messages"]
+        allow_answer = self.agent_call_count > 0
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", TT_AGENT_SYSTEM_PROMPT),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{previous_tool_requests}"),
+                ("human", "{question}"),
+            ]
+        )
+        model = prompt | self.llm.bind(
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "memory_action",
+                    "schema": self._tt_action_schema(allow_answer=allow_answer),
+                },
+            },
+            max_tokens=int(os.environ.get("TT_TOOL_MAX_TOKENS", "96")),
+            temperature=float(os.environ.get("TT_TOOL_TEMPERATURE", "0")),
+        )
+
+        # The local TT backend handles ordinary message content better than
+        # LangChain ToolMessage objects. Preserve tool outputs as assistant text.
+        chat_history = []
+        for message in messages[1:]:
+            if isinstance(message, ToolMessage):
+                chat_history.append(AIMessage(id=message.id, content=message.content))
+            else:
+                chat_history.append(message)
+
+        question = getattr(messages[0], "content", str(messages[0]))
+        response = model.invoke({
+            "question": f"The question is: {question}",
+            "chat_history": chat_history,
+            "previous_tool_requests": self.previous_tool_requests,
+        })
+        action = self._parse_tt_action("".join(response.content.splitlines()))
+        self.agent_call_count += 1
+
+        if action["tool"] == "__conversational_response":
+            return {"messages": [AIMessage(content=action["tool_input"]["response"])]}
+
+        self.previous_tool_requests += (
+            f"I previously used the {action['tool']} tool with the arguments: "
+            f"{action['tool_input']}.\n"
+        )
+        tool_call = ToolCall(
+            name=action["tool"],
+            args=action["tool_input"],
+            id=f"call_{str(uuid.uuid4()).replace('-', '')}",
+        )
+        return {"messages": [AIMessage(content="", tool_calls=[tool_call])]}
+
 
 
     def create_tools(self, memory):
@@ -281,87 +421,6 @@ class ReMEmbRAgent(Agent):
 
         self.tool_list = [self.retriever_tool, self.position_retriever_tool, self.time_retriever_tool]
         self.tool_definitions = [convert_to_openai_function(t) for t in self.tool_list]
-        self.tool_call_schema = {
-            "type": "array",
-            "items": {
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"const": "__conversational_response"},
-                            "tool_input": {
-                                "type": "object",
-                                "properties": {
-                                    "response": {"type": "string", "maxLength": 500}
-                                },
-                                "required": ["response"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": ["tool", "tool_input"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"const": "retrieve_from_text"},
-                            "tool_input": {
-                                "type": "object",
-                                "properties": {
-                                    "x": {"type": "string", "maxLength": 200}
-                                },
-                                "required": ["x"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": ["tool", "tool_input"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"const": "retrieve_from_position"},
-                            "tool_input": {
-                                "type": "object",
-                                "properties": {
-                                    "x": {
-                                        "type": "array",
-                                        "items": {"type": "number"},
-                                        "minItems": 3,
-                                        "maxItems": 3,
-                                    }
-                                },
-                                "required": ["x"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": ["tool", "tool_input"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"const": "retrieve_from_time"},
-                            "tool_input": {
-                                "type": "object",
-                                "properties": {
-                                    "x": {
-                                        "type": "string",
-                                        "pattern": "^\\d{2}:\\d{2}:\\d{2}$"
-                                    }
-                                },
-                                "required": ["x"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": ["tool", "tool_input"],
-                        "additionalProperties": False,
-                    },
-                ]
-            },
-            "minItems": 1,
-            "maxItems": 4,
-        }
 
     ### Nodes
 
@@ -376,6 +435,9 @@ class ReMEmbRAgent(Agent):
         Returns:
             dict: The updated state with the agent response appended to messages
         """
+        if self.llm_type.startswith('tt/'):
+            return self._tt_agent(state)
+
         messages = state["messages"]
 
         model = self.chat
@@ -383,13 +445,6 @@ class ReMEmbRAgent(Agent):
 
         # limit to 5 tool calls.
         tool_kwargs = {}
-        if self.llm_type.startswith('tt/'):
-            tool_kwargs = {
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {"name": "tool_calls", "schema": self.tool_call_schema},
-                }
-            }
         if self.agent_call_count < 3:
             model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
             prompt = self.agent_prompt
@@ -426,7 +481,7 @@ class ReMEmbRAgent(Agent):
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call['name'] != "__conversational_response":
-                    args = re.sub("\{.*?\}", "", str(tool_call['args'])) # remove curly braces
+                    args = re.sub(r"\{.*?\}", "", str(tool_call['args'])) # remove curly braces
                     self.previous_tool_requests += f"I previously used the {tool_call['name']} tool with the arguments: {args}.\n"
 
         self.agent_call_count += 1
