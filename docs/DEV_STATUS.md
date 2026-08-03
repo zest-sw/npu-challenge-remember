@@ -71,7 +71,7 @@ _최종 수정: 2026-07-21 · branch `main`_
 | **Board wedged** | 원인 = captioning/compilation 중 강제 종료(특히 Ctrl-C 연타). shutdown cleanup 로직 추가([f9bc7bf]). **`-9`는 절대 쓰지 말 것.** 복구는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 6장. |
 | **Reboot constraint** | 이 PC는 부팅 전에 NPU가 켜져 있어야만 NPU를 인식함. wedged 상태에서는 리부팅 전에 프로세스 정리 + 재시작을 먼저 시도할 것. |
 | **Device node = `/dev/bos/0`** | Tenstorrent이 아님(`/dev/tenstorrent`가 없음). `fuser -v /dev/bos/0`, `lsmod \| grep bos`로 확인. |
-| ~~**eval infinite retry**~~ | ✅ **Fixed** ([b2dab02]). 원인 = 서버가 temperature를 무시하고 greedy로 돌아서 → eval의 retry가 매번 같은 답을 냄. 서버가 OpenAI의 `temperature`를 존중하도록 수정(0은 greedy 유지, >0은 grammar 허용 token에서 sampling). 최초 트리거였던 "3B가 time 질문에 `time=None`으로 답함"은 여전하지만, 이제 retry가 진전됨. |
+| ~~**eval infinite retry**~~ | ✅ **Fixed** — 단, **두 커밋에 걸쳐 있다.** ① [b2dab02]가 서버를 고쳤다: temperature를 무시하고 greedy로 돌아서 eval의 retry가 매번 같은 답을 냈던 문제(0은 greedy 유지, >0은 sampling). ② 그런데 `NonAgent.query()`의 `while True`에 **상한이 없어서 루프 자체가 남아 있었다** — `temperature=0`이면 여전히 무한 루프였다. [c997922]가 `MAX_PARSE_RETRIES=5`로 닫았다. **①만 보고 "해결됨"으로 읽으면 오진한다**(실제로 그랬다 — 아래 2026-08-03 changelog 참고). |
 | **3B quality** | JSON validity는 보장되지만 grounding은 3B의 한계에 부딪힘 — 질문 유형에 맞는 필드를 채우지 못하는 경우가 있음(retry로 흡수됨). **왜 8B로 올리지 않는지는 design decision 5 참고**(로봇 배치에는 공존이 필요함). |
 | ~~**Mixed caption quality**~~ | 🔄 진행 중인 재생성으로 해소 중. (기존 mixed set은 `*.MIXED-BACKUP.json`으로 보관) |
 | **Fidelity deviations** | Captioner VILA→Qwen, LLM 8B→3B(포팅상 불가피), frames 6→1(타협). fidelity 표는 [PAPER_EVAL_RUNBOOK](PAPER_EVAL_RUNBOOK.md) 참고. |
@@ -97,6 +97,37 @@ _최종 수정: 2026-07-21 · branch `main`_
 - **Clean shutdown + teardown 중 signal 무시** — worker가 daemon이라 device close가 건너뛰어지던 문제를 고치고, Ctrl-C 연타로 인한 wedging을 방지.
 
 ## 6. Changelog
+
+### 2026-08-03 — eval을 27분간 멈춘 무한 루프 + 서버가 잘못된 모델을 보고한 문제
+
+**① `NonAgent` 무한 재시도 ([c997922], PR #19).** 30문제 eval이 10번 질문에서 27분간
+멈췄다. 연쇄: 모델이 `position`에 `[0, 0, 0], `를 끝없이 반복 → `max_tokens=256`에 걸려
+JSON이 문자열 중간에서 잘림 → `json.loads`가 `Unterminated string` → `NonAgent.query()`의
+**상한 없는 `while True`**가 재시도 → `temperature=0`이라 출력이 바이트 단위로 동일 →
+**무한 루프**. 로그에 증거가 있었다(`"Generate call failed"` 27회 vs `"Attempt elapsed"`
+21회 → 차이 26회가 내부 재시도, 26×~35초 ≈ 910초 = 관측된 975초).
+수정은 두 층: 스키마의 `position`/`orientation`에 `maxLength`(80/40) 부여 — **없는 길이
+제한이 폭주를 구조적으로 가능하게 한 원인** — 그리고 `while True` → `MAX_PARSE_RETRIES=5`
+후 raise(eval의 `MAX_ATTEMPTS`가 unanswered로 기록하고 다음 질문으로 진행).
+검증: `remembr/agents/test_non_agent_retry.py` 3개 통과, 그리고 **테스트를 옛 `while True`
+코드에 돌리면 timeout(exit 124)으로 무한루프를 재현**하는 것까지 확인.
+
+**② 서버가 요청받은 모델 이름을 그대로 되돌려줬다 ([acd6aa3], PR #17).** 보드는 한 번에
+모델 하나만 올리고 요청의 `model`은 존중되지 않는데(교체는 `/mode`), 응답에
+`request.model or snapshot.llm_model`을 넣어서 **돌지도 않은 모델이 돌았다고 보고**했다.
+`eval.py`는 결과 파일 이름을 자기 `--model` 인자로 짓기 때문에 8B가 만든 결과가 3B 결과로
+저장된다 — 이 세션에서 실제로 그렇게 오인한 측정을 했다. 항상 `snapshot.llm_model`을 보고한다.
+
+**진단 과정에서 얻은 성능 실측** (8B/accuracy, `AGENTS.md`에도 반영):
+지연 ≈ 요청당 **3초** + 생성 **토큰당 0.26초(≈3.8 tok/s)**. JSON 강제 디코딩은 같은 토큰
+수에서 device greedy와 **~3% 차이뿐**(plain 28.6s vs json 29.6s) — 기존 `AGENTS.md`의
+"device-side greedy보다 느리다"는 서술은 과장이라 정정했다. 프롬프트 길이 영향도 작다
+(22→529 words에서 3.0→4.3초). `temperature=0.7`로 바꾸는 것만으로 동일 9문제에서
+LLM 824초→**445초**, attempts 25→12, 미답변 4→**0**.
+
+**교훈(문서에 반영)**: `## 4`의 "eval infinite retry ✅ Fixed" 항목이 ①의 앞쪽 절반만
+가리키고 있어서, 이 세션에서 나는 그 항목을 보고 무한 루프 가능성을 배제한 뒤 엉뚱한 곳
+(JSON 디코딩 속도)을 의심했다. 부분 수정을 "Fixed"로 적으면 다음 사람이 오진한다.
 
 ### 2026-08-03 — docs: `run_server.sh` 예시 명령에서 불필요한 tt-metal cd/activate 제거
 
