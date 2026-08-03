@@ -4,6 +4,7 @@ from langchain.tools import BaseTool, StructuredTool, tool
 import numpy as np
 from time import strftime, localtime
 import time, datetime
+import json, os, re
 
 from typing import Any, Iterable, List, Optional, Tuple, Union
 from langchain_core.documents import Document
@@ -157,3 +158,162 @@ def similarity_search_with_score_by_vector(
             ret.append(pair)
 
         return [doc for doc, _ in ret]
+
+
+# ===========================================================================
+# Space/time calculators — the bodies behind ReMEmbRAgent's calculator tools
+# (compute_minutes_ago / compute_duration_minutes / find_nearest_position).
+#
+# Everything the agent reads is ABSOLUTE: the question preamble states "The
+# current time is 2023-01-16 08:03:02 and you are located at [12.3, 56.7, 0.1]",
+# and memory_to_string() renders each memory as "At time=2023-01-16 07:55:32, the
+# robot was at an average position of [...]". But NaVQA wants RELATIVE answers —
+# `time` in minutes-ago, `duration` in minutes, "nearest X" as an argmin over
+# distances — and eval scores those numbers directly (position = L2 norm,
+# time/duration = absolute difference), so a slip in the model's mental arithmetic
+# becomes error.
+#
+# So the agent delegates: it decides a calculation is needed, calls the tool, and
+# passes every operand explicitly (including "now" and its own position, both of
+# which it reads off the question). These functions are pure — no hidden state, no
+# inspecting the question or the answer to work out what to do. The regex inside
+# parse_timestamp only turns an argument string into a datetime; it decides
+# nothing.
+# ===========================================================================
+
+_TS_FULL = "%Y-%m-%d %H:%M:%S"
+_TS_HMS = "%H:%M:%S"
+
+
+def parse_timestamp(value, reference=None):
+    """Parse a timestamp the model copied out of memory/preamble text.
+
+    Accepts a full '%Y-%m-%d %H:%M:%S' or a bare '%H:%M:%S' (which borrows the
+    date from `reference`, since memory captions sometimes echo only the clock
+    time). Also accepts a datetime unchanged. Returns None when there is nothing
+    usable, so callers can fall back instead of raising mid-eval.
+    """
+    if isinstance(value, datetime.datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    match = re.search(r"(\d{4}-\d{2}-\d{2})[ T]+(\d{2}:\d{2}:\d{2})", text)
+    if match:
+        try:
+            return datetime.datetime.strptime(f"{match.group(1)} {match.group(2)}", _TS_FULL)
+        except ValueError:
+            return None
+
+    match = re.search(r"\b(\d{1,2}:\d{2}:\d{2})\b", text)
+    if not match:
+        return None
+    try:
+        clock = datetime.datetime.strptime(match.group(1).zfill(8), _TS_HMS).time()
+    except ValueError:
+        return None
+    ref = reference if isinstance(reference, datetime.datetime) else None
+    if ref is None:
+        return None
+    return datetime.datetime.combine(ref.date(), clock)
+
+
+def minutes_ago(event, now):
+    """Minutes elapsed from `event` until `now` (the `time` answer field).
+
+    Returns None if either side is unparseable, or if `event` is in the future:
+    a negative minutes-ago is never a valid answer here, and silently returning
+    one would be scored as a large error rather than surfacing as unanswered.
+    """
+    now_dt = parse_timestamp(now)
+    event_dt = parse_timestamp(event, reference=now_dt)
+    if now_dt is None or event_dt is None:
+        return None
+    delta = (now_dt - event_dt).total_seconds() / 60.0
+    return None if delta < 0 else float(delta)
+
+
+def duration_minutes(start, end, reference=None):
+    """Minutes between two timestamps (the `duration` answer field).
+
+    Order-independent: the model routinely reports the pair backwards, and a
+    duration is a magnitude either way.
+    """
+    ref = parse_timestamp(reference) if reference is not None else None
+    start_dt = parse_timestamp(start, reference=ref)
+    end_dt = parse_timestamp(end, reference=ref if ref is not None else start)
+    if start_dt is None or end_dt is None:
+        return None
+    return float(abs((end_dt - start_dt).total_seconds()) / 60.0)
+
+
+def _coords(value):
+    """Coerce '[1, 2, 3]' / (1,2,3) / [1,2,3] to a float list, else None."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value.replace("(", "[").replace(")", "]"))
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    try:
+        return [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def distance(a, b):
+    """Euclidean distance between two coordinates. None if either is unusable.
+
+    Full 3-D on purpose: the benchmark asks about elevators and stairs, so the
+    z axis genuinely separates candidates on different floors. Shorter vectors
+    are compared on the axes they share.
+    """
+    pa, pb = _coords(a), _coords(b)
+    if pa is None or pb is None:
+        return None
+    width = min(len(pa), len(pb))
+    return float(np.linalg.norm(np.array(pa[:width]) - np.array(pb[:width])))
+
+
+def _coord_list(value):
+    """Normalize to a list of coordinates.
+
+    Tolerates what the model actually emits: a list of coordinates, a single flat
+    coordinate, or either of those as a JSON string.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value.replace("(", "[").replace(")", "]"))
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(value, (list, tuple)) or not value:
+        return []
+    if all(isinstance(v, (int, float)) for v in value):
+        single = _coords(value)  # flat [x, y, z], not a list of them
+        return [single] if single else []
+    out = []
+    for item in value:
+        coordinate = _coords(item)
+        if coordinate:
+            out.append(coordinate)
+    return out
+
+
+def nearest(candidates, origin):
+    """Pick the candidate closest to `origin` -> (index, coordinate, distance).
+
+    Answers the "where is the closest/nearest X" questions without the model
+    having to compare distances itself. Returns (None, None, None) when nothing
+    is usable.
+    """
+    best = (None, None, None)
+    for index, candidate in enumerate(_coord_list(candidates)):
+        d = distance(candidate, origin)
+        if d is None:
+            continue
+        if best[2] is None or d < best[2]:
+            best = (index, candidate, d)
+    return best
+

@@ -279,7 +279,73 @@ class ReMEmbRAgent(Agent):
             # coroutine= ... <- you can specify an async method if desired as well
         )
 
-        self.tool_list = [self.retriever_tool, self.position_retriever_tool, self.time_retriever_tool]
+        # --- calculator tools ---
+        # The planner reads absolute timestamps and coordinates but has to answer in
+        # minutes-ago / elapsed-minutes / nearest-coordinate, so it would otherwise
+        # be doing timestamp subtraction and 3-D distance comparisons token by token.
+        #
+        # Every operand is an explicit argument, including "now" and "my position":
+        # the question preamble states both, so reading them off and passing them in
+        # is the planner's job. An earlier version had these tools quietly read a
+        # `self._reference_*` attribute that the agent had regex-parsed out of the
+        # question, which hid an operand from the model and put a prose parser on the
+        # critical path. Pure functions instead — nothing implicit, nothing stateful.
+        # NOTE: describe the FORMAT, never show a filled-in example value. Observed on
+        # the board: a 3B copies literal sample values straight out of these
+        # descriptions (it called this tool with the sample date instead of the
+        # question's, and called retrieve_from_position with the (0.5, 0.2, 0.1) from
+        # that tool's own description). A sample is an instruction to a small model.
+        class MinutesAgoInput(BaseModel):
+            event_time: str = Field(description="The absolute timestamp of the event, in \
+                                YYYY-MM-DD HH:MM:SS form, copied character for character from the \
+                                'At time=' field of the memory you mean. Never invent a date.")
+            now: str = Field(description="The current time, in YYYY-MM-DD HH:MM:SS form, copied \
+                                character for character from the question's 'The current time is' \
+                                clause. Never invent a date.")
+
+        self.minutes_ago_tool = StructuredTool.from_function(
+            func=lambda event_time, now: str(minutes_ago(event_time, now)),
+            name="compute_minutes_ago",
+            description="How many minutes ago an absolute timestamp was. Use this for 'when' "
+                        "questions instead of subtracting the times yourself.",
+            args_schema=MinutesAgoInput,
+        )
+
+        class DurationInput(BaseModel):
+            start_time: str = Field(description="Absolute timestamp when the event started, in \
+                                YYYY-MM-DD HH:MM:SS form, copied from the earliest relevant \
+                                memory's 'At time=' field. Never invent a date.")
+            end_time: str = Field(description="Absolute timestamp when the event ended, in \
+                                YYYY-MM-DD HH:MM:SS form, copied from the latest relevant \
+                                memory's 'At time=' field. Never invent a date.")
+
+        self.duration_tool = StructuredTool.from_function(
+            func=lambda start_time, end_time: str(duration_minutes(start_time, end_time)),
+            name="compute_duration_minutes",
+            description="How many minutes elapsed between two absolute timestamps. Use this for "
+                        "'how long' questions instead of subtracting the times yourself.",
+            args_schema=DurationInput,
+        )
+
+        class NearestInput(BaseModel):
+            candidates: str = Field(description="JSON list of the candidate positions, each an \
+                                [x, y, z] array copied from the 'average position of' field of a \
+                                memory that matches what was asked. Never invent coordinates.")
+            origin: str = Field(description="The [x, y, z] position to measure from, normally your \
+                                current position copied from the question's 'you are located at' \
+                                clause. Never invent coordinates.")
+
+        self.nearest_tool = StructuredTool.from_function(
+            func=lambda candidates, origin: str(nearest(candidates, origin)[1]),
+            name="find_nearest_position",
+            description="Which of several candidate positions is closest to a given position. Use "
+                        "this for 'closest'/'nearest' questions instead of comparing distances "
+                        "yourself.",
+            args_schema=NearestInput,
+        )
+
+        self.tool_list = [self.retriever_tool, self.position_retriever_tool, self.time_retriever_tool,
+                          self.minutes_ago_tool, self.duration_tool, self.nearest_tool]
         self.tool_definitions = [convert_to_openai_function(t) for t in self.tool_list]
         self.tool_call_schema = {
             "type": "array",
@@ -351,6 +417,62 @@ class ReMEmbRAgent(Agent):
                                     }
                                 },
                                 "required": ["x"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["tool", "tool_input"],
+                        "additionalProperties": False,
+                    },
+                    # Calculator tools. On the tt/ backend this schema is what the
+                    # server's grammar-constrained decoding enforces, so a tool
+                    # missing from here cannot be called at all no matter what
+                    # bind_tools() advertises — the enum of names below IS the
+                    # agent's option list.
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"const": "compute_minutes_ago"},
+                            "tool_input": {
+                                "type": "object",
+                                "properties": {
+                                    "event_time": {"type": "string", "maxLength": 40},
+                                    "now": {"type": "string", "maxLength": 40},
+                                },
+                                "required": ["event_time", "now"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["tool", "tool_input"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"const": "compute_duration_minutes"},
+                            "tool_input": {
+                                "type": "object",
+                                "properties": {
+                                    "start_time": {"type": "string", "maxLength": 40},
+                                    "end_time": {"type": "string", "maxLength": 40},
+                                },
+                                "required": ["start_time", "end_time"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["tool", "tool_input"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"const": "find_nearest_position"},
+                            "tool_input": {
+                                "type": "object",
+                                "properties": {
+                                    "candidates": {"type": "string", "maxLength": 240},
+                                    "origin": {"type": "string", "maxLength": 60},
+                                },
+                                "required": ["candidates", "origin"],
                                 "additionalProperties": False,
                             },
                         },
@@ -505,7 +627,7 @@ class ReMEmbRAgent(Agent):
             for key in keys_to_check_for:
                 if key not in parsed:
                     raise ValueError("Missing all the required keys during generate. Retrying...")
-            
+
             if (parsed['position'] is not None) and len(parsed['position']) != 3:
                 raise ValueError(f"Shape of position was incorrect. {parsed['position']}. Retrying...")
 
