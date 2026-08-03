@@ -1,4 +1,5 @@
 from typing import Annotated, Literal, Sequence, TypedDict
+import copy
 import json
 import traceback
 import sys, re
@@ -112,6 +113,16 @@ def inspect(state):
 def parse_json(string):
     parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
     return json.loads(parsed)
+
+
+# Tools that compute over evidence rather than fetch it. They are withheld until
+# retrieval has returned something, so the planner is never in a position where the
+# only way to fill an operand is to invent one.
+CALCULATOR_TOOL_NAMES = frozenset({
+    "compute_minutes_ago",
+    "compute_duration_minutes",
+    "find_nearest_position",
+})
 
 class AgentState(TypedDict):
     # The add_messages function defines how an update should be processed
@@ -482,8 +493,29 @@ class ReMEmbRAgent(Agent):
                 ]
             },
             "minItems": 1,
-            "maxItems": 4,
+            # One decision per turn. At 4 the planner stopped choosing and just
+            # fired everything: observed on the board it emitted retrieve_from_text
+            # + retrieve_from_position + retrieve_from_time + a calculator in a
+            # single array, with filler arguments for the ones it had no basis for.
+            # The graph loops back here after each tool, so a genuine multi-step
+            # plan is still possible — it just has to be deliberate.
+            "maxItems": 1,
         }
+
+    def _tool_call_schema(self, allow_calculators):
+        """The tool-call grammar for this turn.
+
+        On the tt/ backend this schema is what the server's constrained decoding
+        enforces, so the set of `tool` consts in it IS the planner's option list —
+        a tool absent here cannot be called whatever bind_tools() advertised.
+        """
+        schema = copy.deepcopy(self.tool_call_schema)
+        if not allow_calculators:
+            schema["items"]["oneOf"] = [
+                option for option in schema["items"]["oneOf"]
+                if option["properties"]["tool"]["const"] not in CALCULATOR_TOOL_NAMES
+            ]
+        return schema
 
     ### Nodes
 
@@ -502,6 +534,18 @@ class ReMEmbRAgent(Agent):
 
         model = self.chat
 
+        # A calculator is only offerable once retrieval has actually returned
+        # something to calculate ON. Offered from the first turn, the planner had
+        # no real timestamp in context yet, so any operand it supplied had to be
+        # invented — observed on the board: it called compute_minutes_ago with a
+        # made-up '2022-01-01 12:00:00' in the same breath as its first retrieval.
+        # Withholding them until there is evidence removes that situation instead
+        # of asking the model not to walk into it.
+        has_retrieved = any(isinstance(message, ToolMessage) for message in messages[1:])
+        allowed_tools = [
+            definition for definition in self.tool_definitions
+            if has_retrieved or definition.get("name") not in CALCULATOR_TOOL_NAMES
+        ]
 
         # limit to 5 tool calls.
         tool_kwargs = {}
@@ -509,11 +553,14 @@ class ReMEmbRAgent(Agent):
             tool_kwargs = {
                 "response_format": {
                     "type": "json_schema",
-                    "json_schema": {"name": "tool_calls", "schema": self.tool_call_schema},
+                    "json_schema": {
+                        "name": "tool_calls",
+                        "schema": self._tool_call_schema(allow_calculators=has_retrieved),
+                    },
                 }
             }
         if self.agent_call_count < 3:
-            model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
+            model = model.bind_tools(tools=allowed_tools, **tool_kwargs)
             prompt = self.agent_prompt
         else:
             model = model.bind_tools(tools=[], **tool_kwargs)
