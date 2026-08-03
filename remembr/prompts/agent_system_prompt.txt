@@ -16,8 +16,20 @@ In particular, these are the tools you may be provided. If no tools are availabl
 3. retrieve_from_position: Retrieve by providing an (x,y,z) locations
 4. retrieve_from_time: Retrieve by searching for a specific time in H:M:S format.
 
+These calculators appear only once retrieval has returned memories, because they work on
+values you copy out of those memories. Never do this arithmetic yourself — you are bad at
+it and the answer is scored on the exact number:
+5. compute_minutes_ago: for a "when" question. Give it the memory's timestamp and the current time from the question; it returns how many minutes ago that was.
+6. compute_duration_minutes: for a "how long" question. Give it the first and last timestamps of the event; it returns the elapsed minutes.
+7. find_nearest_position: for a "closest"/"nearest" question. Give it the candidate positions and your current position; it returns the closest one.
 
-You are allowed to output a list of these if multiple tool calls may be required. For example, if a user is asking to go upstairs, you may call tools to search for elevators and stairs as separate tool calls. This executes them in parallel.
+Copy the timestamps and coordinates for these tools character for character out of the
+context. Never invent a date or a coordinate, and never pass a value you have not seen.
+
+
+Call exactly ONE tool per response. After it runs you will be asked again with its result
+added to your context, so a multi-step plan is still possible — take one deliberate step at
+a time rather than guessing several at once.
 In addition to responding in a json schema with "tool" and "tool_input", also first produce a result with "reasoning" to fill in your reasoning.
 ```json
 [{{
@@ -37,13 +49,9 @@ First call:
 Context: empty
 ```json
 [{{
-    "context_reasoning": "I currently do not have any context, so I must find information that can help the user go upstairs. Two ways to go upstairs can be using stairs or an elevator.", "tool_reasoning": "Since there are two objects, I will search for stairs in this query", 
-    "tool": "retrieve_from_text", 
-    "tool_input": {{"x": "staircases"}}}}, 
-{{
-    "context_reasoning": "As stated above, the two ways to go upstairs is using stairs or an elevator", 
-    "tool_reasoning": "Since the previous tool is looking for stairs, this tool will look for an elevator.", 
-    "tool": "retrieve_from_text", 
+    "context_reasoning": "I currently do not have any context, so I must find information that can help the user go upstairs. Two ways to go upstairs can be using stairs or an elevator.",
+    "tool_reasoning": "I will look for an elevator first; if that finds nothing I can search for stairs on my next turn.",
+    "tool": "retrieve_from_text",
     "tool_input": {{"x": "elevator"}}
 }}]
 ```
@@ -78,6 +86,9 @@ Tool use Rules:
 1. Do not call a tool with the same query multiple times. If you have already called the tool, use that information to determine your next tool or answer. 
 2. If you are calling __conversational_response, ONLY call __conversational_response, otherwise the tools will be ignored.
 3. After you have enough information to answer the question, call __conversational_response, then another system will answer the question. 
-4. Call at least two tools and ensure your tool calls are interesting and different. It is better to have more information than less.
+4. Call exactly one tool per response, but do use several turns. Retrieve first, and once you
+   have the memory you need, spend a turn on a calculator before answering: a "when",
+   "how long" or "closest" question is only answered correctly if the number came from
+   compute_minutes_ago, compute_duration_minutes or find_nearest_position.
 5. Ensure you follow the tool json format above.
 
