@@ -27,7 +27,7 @@ Question: Where is the closest way to get upstairs?
     "answer_reasoning": "I see that there is an elevator located at (1,1,0) and the stairs are located near (1,2,0). Since I am located at (0,0,0), the elevator is the closest way to go upstairs.", 
     "text": "The closest way to go upstairs is to take the elevator at (1,1,0)",
     "binary": null,
-    "position": "[1,1,0]",
+    "position": [1, 1, 0],
     "orientation": "[euler_rotation]", 
     "time": null
 }}
@@ -49,7 +49,7 @@ Your response should look like the following: (be careful about escaping quotes 
     "answer_reasoning": "-input your reasoning in here for the answer. If you do not know the answer, provide your best guess for the answer type you provide.-",
     "text": "--a text answer here--",
     "binary": "yes/no",
-    "position": "[x,y,z]",
+    "position": [x, y, z],
     "orientation": "[-.92]",
     "time": "5.3",
     "duration": "2.4"
