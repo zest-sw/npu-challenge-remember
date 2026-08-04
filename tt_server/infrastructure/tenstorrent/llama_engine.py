@@ -9,7 +9,7 @@ from models.bos_model.llama32.tt.common import (
     preprocess_inputs_prefill,
 )
 from models.bos_model.llama32.tt.generator import Generator as LlamaGenerator
-from models.bos_model.llama32.tt.generator import SamplingParams, create_submeshes
+from models.bos_model.llama32.tt.generator import create_submeshes
 from models.bos_model.llama32.tt.model_config import DecodersPrecision
 
 from .model_env import select_hf_model
@@ -115,24 +115,34 @@ class LlamaEngine:
             prompt_lens=decoding_pos,
         )
 
-        if force_json:
-            enforcer = self.json_enforcers.create(json_schema)
-            return self._decode_on_host(
-                logits,
-                decoding_pos[0],
-                max_new_tokens,
-                temperature,
-                enforcer,
-            )
-        if temperature > 0:
-            return self._decode_on_host(
-                logits,
-                decoding_pos[0],
-                max_new_tokens,
-                temperature,
-                None,
-            )
-        return self._decode_greedy_on_device(logits, decoding_pos[0], max_new_tokens)
+        # One decode path only, on purpose. There used to be a second one that let
+        # the device do the argmax (`sampling_params=SamplingParams(...)`), taken
+        # for plain temperature=0 requests because it skips the per-token logits
+        # readback. It has to go: tt-metal caches the decode trace on
+        # `hasattr(self, "trace_ids_text")` alone (generator.py:370), so the trace
+        # is NOT keyed on what it returns. Whichever kind of request arrived first
+        # captured the trace, and every request of the other kind then replayed it
+        # and read the wrong buffer -- for the rest of the process's life:
+        #
+        #   fresh server -> plain then JSON : JSON returns '{"!!!!!!!!...'
+        #                                     (token 0 wins the masked argmax)
+        #   fresh server -> JSON then plain : plain returns 'Hello9001/+,,+,**+++'
+        #   fresh server -> one kind only   : correct
+        #
+        # That silently poisoned measurements: a single plain warm-up call made
+        # every later schema-constrained answer garbage. Keeping only the host
+        # path means one trace shape is ever captured, so the mismatch cannot
+        # happen. Cost is a 513 KB logits read per token (~20 us over PCIe)
+        # against a measured 293.5 ms/token decode -- under 0.1%, and the earlier
+        # end-to-end comparison of the two paths came out at ~3%. See issue #21.
+        enforcer = self.json_enforcers.create(json_schema) if force_json else None
+        return self._decode_on_host(
+            logits,
+            decoding_pos[0],
+            max_new_tokens,
+            temperature,
+            enforcer,
+        )
 
     def _clear_kv_cache(self) -> None:
         for loaded_model in self.model:
@@ -181,40 +191,6 @@ class LlamaEngine:
             generated.append(next_token)
             self._print_token(next_token, True)
             output_token = torch.tensor([[next_token]])
-
-        ttnn.synchronize_device(self.mesh_device)
-        return self._finish_decode(generated)
-
-    def _decode_greedy_on_device(self, logits, decoding_pos: int, max_new_tokens: int) -> str:
-        tokenizer = self.tokenizer
-        output_token = torch.argmax(logits, dim=-1)
-        sampling_params = SamplingParams(temperature=0.0, top_k=-1, top_p=1.0)
-        first = int(output_token[0].item())
-        generated = [] if first in tokenizer.stop_tokens else [first]
-        self._print_token(first, bool(generated))
-        current_pos = torch.tensor([decoding_pos])
-        operation_event = ttnn.record_event(self.mesh_device, 0)
-
-        for _ in range(max_new_tokens - 1):
-            ttnn.wait_for_event(1, operation_event)
-            next_token_tensor = self.generator.decode_forward_text(
-                output_token,
-                current_pos,
-                enable_trace=True,
-                page_table=self.page_table,
-                kv_cache=self.tt_kv_cache,
-                sampling_params=sampling_params,
-            )
-            output_token = next_token_tensor.unsqueeze(1)
-            current_pos = current_pos + 1
-            write_event = ttnn.record_event(self.mesh_device, 1)
-            ttnn.wait_for_event(0, write_event)
-            token = int(output_token[0].item())
-            if token in tokenizer.stop_tokens:
-                break
-            generated.append(token)
-            self._print_token(token, True)
-            operation_event = ttnn.record_event(self.mesh_device, 0)
 
         ttnn.synchronize_device(self.mesh_device)
         return self._finish_decode(generated)

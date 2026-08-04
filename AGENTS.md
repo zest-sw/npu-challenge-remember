@@ -71,6 +71,14 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
   마스킹 — 소형 모델의 깨진 JSON을 막아준다. **느리다고 오해하지 말 것**: 실측하면 같은
   토큰 수에서 device-side greedy와 차이가 ~3%다(8B: plain 28.6s vs json 29.6s). 토큰마다
   호스트로 읽는 513KB(128256×fp32)는 8B forward pass에 묻힌다.
+- **decode 경로는 하나뿐이고, 속도를 위해 두 번째를 만들면 안 된다(#21).** 예전에 plain +
+  `temperature=0`을 device가 argmax까지 하는 경로로 보냈는데, tt-metal이 decode trace를
+  `hasattr(self, "trace_ids_text")` 하나로만 캐시해서(`generator.py:370`) **trace가 토큰을
+  돌려주는지 logits를 돌려주는지가 캐시 키에 없다.** 프로세스에 먼저 온 요청 종류가 trace를
+  차지하고 다른 종류는 영구히 깨진다 — plain 먼저면 JSON이 `'{"!!!!...'`, JSON 먼저면
+  plain이 `'Hello9001/+,,+,**+++'`. 조용히 깨져서 측정을 오염시킨다(실제로 실험 하나를
+  무효로 만들었다). device 경로 이득은 0.1% 미만이라 삭제했고,
+  `tt_server/tests/test_single_decode_path.py`가 재발을 막는다.
 - **지연은 거의 전부 "생성 토큰 수 × 토큰당 비용"이다.** 실측(8B, accuracy): 요청당 고정비
   ~3초 + **토큰당 ~0.26초(≈3.8 tok/s)**. 프롬프트 길이 영향은 작다(22→529 words에서
   3.0→4.3초). 느리면 프롬프트나 grammar를 의심하기 전에 **생성 토큰 수와 재시도 횟수**를 보라.
