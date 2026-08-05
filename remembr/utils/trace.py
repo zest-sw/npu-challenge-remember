@@ -39,15 +39,23 @@ def question(index, total, qtype, asked):
     print(f"\n[{index:2d}/{total} {qtype}] {asked}", flush=True)
 
 
-def step(label, text, arrow="→"):
-    """One line inside the current question.
+def step(label, text, arrow="→", extra=()):
+    """One line inside the current question, plus optional indented detail lines.
 
     Use `→` for something the model produced and `←` for something handed back to
     it, so the direction of information is readable without parsing the words.
+
+    `extra` exists because LangGraph's ToolNode runs a turn's tool calls
+    concurrently. Printing a header and then its detail lines separately let two
+    threads interleave mid-line -- observed
+    `검색 ← time('...')  4개               2  01:02:59  ...`. One string, one print,
+    so a block stays whole.
     """
     if not ENABLED:
         return
-    print(f"  {label:<{_LABEL_WIDTH}} {arrow} {text}", flush=True)
+    lines = [f"  {label:<{_LABEL_WIDTH}} {arrow} {text}"]
+    lines += [f"  {'':<{_LABEL_WIDTH}}   {line}" for line in extra]
+    print("\n".join(lines), flush=True)
 
 
 def note(text):

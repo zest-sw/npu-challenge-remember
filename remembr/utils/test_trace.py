@@ -53,6 +53,25 @@ def test_prints_when_on():
     assert "→" in out and "←" in out, out
 
 
+def test_a_block_prints_as_one_call():
+    """ToolNode runs a turn's tool calls concurrently, so a header plus its detail
+    lines must not be separate prints -- two threads interleaved mid-line before."""
+    calls = []
+    was = trace.ENABLED
+    trace.ENABLED = True
+    real = print
+    try:
+        import builtins
+
+        builtins.print = lambda *a, **k: calls.append(a[0] if a else "")
+        trace.step("검색", "time('x')  2개", arrow="←", extra=["1 ...", "2 ..."])
+    finally:
+        builtins.print = real
+        trace.ENABLED = was
+    assert len(calls) == 1, f"expected one print, got {len(calls)}"
+    assert calls[0].count("\n") == 2, calls[0]
+
+
 def test_warn_prints_even_when_off():
     """A parse failure must not be silent just because tracing is off."""
     _, err = captured(False, lambda: trace.warn("파싱 실패"))

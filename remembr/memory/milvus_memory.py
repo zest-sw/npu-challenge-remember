@@ -198,7 +198,7 @@ class MilvusMemory(Memory):
         """
         if not trace.ENABLED:
             return
-        trace.step("검색", f"{kind}({query!r})  {len(docs)}개", arrow="←")
+        rows = []
         for number, doc in enumerate(docs, 1):
             stamp = doc.metadata['time']
             stamp = stamp[0] if hasattr(stamp, '__len__') and len(stamp) == 2 else stamp
@@ -206,7 +206,10 @@ class MilvusMemory(Memory):
                 stamp += self.time_offset
             shown = strftime('%H:%M:%S', localtime(stamp))
             where = np.array(doc.metadata['position']).round(1).tolist()
-            trace.note(f"{number}  {shown}  {str(where):28s} {_caption_gist(doc.page_content)}")
+            rows.append(f"{number}  {shown}  {str(where):28s} {_caption_gist(doc.page_content)}")
+        # One call, because ToolNode runs a turn's tool calls concurrently and separate
+        # prints interleave mid-line.
+        trace.step("검색", f"{kind}({query!r})  {len(docs)}개", arrow="←", extra=rows)
 
     def search_by_position(self, query: tuple) -> str:
         # docs = pos_db.similarity_search_by_vector(np.array(query))
