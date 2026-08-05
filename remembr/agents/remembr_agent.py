@@ -45,13 +45,13 @@ Use the retrieved conversation context to answer the user's question.
 Respond with exactly one JSON object and nothing else.
 The JSON object must contain all of these keys: type, text, binary, position, orientation, time, duration.
 Use null for any field that does not apply.
-- type: the answer category
+- type: exactly one of position, time, duration, binary, text -- nothing else
 - text: a short answer to the user
 - binary: yes/no for binary questions, otherwise null
 - position: an array like [x, y, z] for where questions, otherwise null
 - orientation: the yaw in radians as a number when position is provided, otherwise null
-- time: a number or string for minutes-ago answers, otherwise null
-- duration: a number or string for duration answers, otherwise null"""
+- time: minutes ago as a number, not words. 11, not "11 minutes ago". Otherwise null
+- duration: minutes as a number, not words. Otherwise null"""
 
 
 ### Print out state of the system
@@ -415,7 +415,9 @@ class ReMEmbRAgent(Agent):
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call['name'] != "__conversational_response":
-                    args = re.sub("\{.*?\}", "", str(tool_call['args'])) # remove curly braces
+                    # ChatPromptTemplate reads `{...}` as a variable, so the braces
+                    # go. Only the braces: a regex over them took the dict with it.
+                    args = str(tool_call['args']).replace('{', '').replace('}', '')
                     self.previous_tool_requests += f"I previously used the {tool_call['name']} tool with the arguments: {args}.\n"
                     trace.step(f"턴{turn}", f"{tool_call['name']}({tool_call['args']})")
         else:
