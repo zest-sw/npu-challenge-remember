@@ -5,6 +5,8 @@ from transformers import AutoProcessor
 
 from llama_models.llama3.api.datatypes import ImageMedia, UserMessage
 
+from tt_server.domain.models import check_generation_fits
+
 from .model_env import select_hf_model
 from .vlm_backends import load_vlm_backend
 
@@ -65,6 +67,7 @@ class QwenVLEngine:
         prompt_tokens = model_input.tokens
         prefill_lens = torch.tensor([len(prompt_tokens)], dtype=torch.long)
         total_lens = prefill_lens + max_gen_len
+        check_generation_fits(int(prefill_lens[0]), max_gen_len, self.max_seq_len)
 
         tokens = torch.full(
             (1, int(max(total_lens))),
