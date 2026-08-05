@@ -39,12 +39,25 @@ class NonAgent(Agent):
             # (the equivalent of Ollama's format="json", but stronger): it forces
             # the required keys, caps free-text length, and forbids extra keys so a
             # small model can't ramble in a reasoning field and blow the budget.
+            # Every nullable field is written as `anyOf`, never as
+            # `{'type': ['string', 'null'], ...}`. lm-format-enforcer silently drops
+            # the sibling constraints on a type-union: measured with the real
+            # tokenizer, `{'type': ['string','null'], 'maxLength': 40}` let 60+
+            # characters through while both `{'type': 'string', 'maxLength': 40}` and
+            # the anyOf spelling stopped at exactly 40. `orientation` was the union
+            # form and ran away on the board --
+            # `"[-0.92, 0.21, 0.12, 0.12, 0.21, -0.92, 0.12, ...`  repeating until it
+            # ate max_tokens, which truncates the JSON mid-string and turns the whole
+            # answer into a parse failure. `time`/`duration` were worse: unions with
+            # no maxLength at all, so their string branch was unbounded.
             answer_schema = {
                 'type': 'object',
                 'properties': {
-                    'type': {'type': 'string'},
+                    'type': {'type': 'string', 'maxLength': 20},
                     'text': {'type': 'string', 'maxLength': 300},
-                    'binary': {'type': ['string', 'null']},
+                    # eval compares this case-insensitively against "yes"/"no", so an
+                    # enum makes anything else ungenerable rather than merely short.
+                    'binary': {'anyOf': [{'enum': ['yes', 'no']}, {'type': 'null'}]},
                     # A coordinate is three numbers, so let the grammar say so
                     # rather than accepting any string. As a string this field let
                     # through shapes that are scored as if they were answers:
@@ -66,9 +79,28 @@ class NonAgent(Agent):
                             {'type': 'null'},
                         ]
                     },
-                    'orientation': {'type': ['string', 'null'], 'maxLength': 40},
-                    'time': {'type': ['number', 'string', 'null']},
-                    'duration': {'type': ['number', 'string', 'null']},
+                    'orientation': {
+                        'anyOf': [
+                            {'type': 'string', 'maxLength': 40},
+                            {'type': 'null'},
+                        ]
+                    },
+                    # A number is what eval wants; the string branch stays because
+                    # upstream tolerates "5.3" and eval()s it, but it is now bounded.
+                    'time': {
+                        'anyOf': [
+                            {'type': 'number'},
+                            {'type': 'string', 'maxLength': 24},
+                            {'type': 'null'},
+                        ]
+                    },
+                    'duration': {
+                        'anyOf': [
+                            {'type': 'number'},
+                            {'type': 'string', 'maxLength': 24},
+                            {'type': 'null'},
+                        ]
+                    },
                 },
                 # AgentOutput requires all of these (no defaults), so force the model
                 # to emit every key — otherwise AgentOutput.from_dict() raises and

@@ -39,12 +39,19 @@ from remembr.memory.memory import Memory
 from remembr.agents.agent import Agent, AgentOutput
 
 
+# Every nullable field is written as `anyOf`, never as `{'type': ['x', 'null'], ...}`.
+# lm-format-enforcer silently drops the sibling constraints on a type-union: measured
+# with the real tokenizer, `{'type': ['string','null'], 'maxLength': 40}` let 60+
+# characters through, while `{'type': 'string', 'maxLength': 40}` and the anyOf
+# spelling both stopped at exactly 40. An unbounded string runs to max_tokens, which
+# truncates the JSON mid-string and costs the whole answer.
 ANSWER_SCHEMA = {
     'type': 'object',
     'properties': {
-        'type': {'type': 'string'},
+        'type': {'type': 'string', 'maxLength': 20},
         'text': {'type': 'string', 'maxLength': 300},
-        'binary': {'type': ['string', 'null']},
+        # eval compares this case-insensitively against "yes"/"no".
+        'binary': {'anyOf': [{'enum': ['yes', 'no']}, {'type': 'null'}]},
         'position': {
             'anyOf': [
                 {
@@ -67,8 +74,22 @@ ANSWER_SCHEMA = {
                 {'type': 'null'},
             ]
         },
-        'time': {'type': ['number', 'string', 'null']},
-        'duration': {'type': ['number', 'string', 'null']},
+        # A number is what eval wants; the string branch stays because upstream
+        # tolerates "5.3" and eval()s it, but it is now bounded.
+        'time': {
+            'anyOf': [
+                {'type': 'number'},
+                {'type': 'string', 'maxLength': 24},
+                {'type': 'null'},
+            ]
+        },
+        'duration': {
+            'anyOf': [
+                {'type': 'number'},
+                {'type': 'string', 'maxLength': 24},
+                {'type': 'null'},
+            ]
+        },
     },
     'required': ['type', 'text', 'binary', 'position', 'orientation', 'time', 'duration'],
     'additionalProperties': False,
