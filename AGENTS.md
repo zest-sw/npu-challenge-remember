@@ -88,6 +88,22 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 - **grammar 스키마의 문자열에 `maxLength`가 없으면 모델이 그 안에서 폭주한다.** `position`에
   제한이 없어서 `[0, 0, 0], `를 끝없이 반복하다 max_tokens에 잘려 JSON이 깨졌고, 상한 없는
   재시도와 겹쳐 eval이 27분간 멈췄다([c997922]). 새 필드를 추가할 때 길이를 반드시 준다.
+- **그런데 `maxLength`를 적어도 안 먹히는 자리가 있다 — nullable 필드는 반드시 `anyOf`로
+  쓴다.** lm-format-enforcer는 **타입이 리스트면 형제 키워드를 조용히 버린다.** 실제
+  토크나이저로 문자열을 한 글자씩 넣어보며 측정한 결과:
+
+  | 스키마 | `maxLength: 40` |
+  |---|---|
+  | `{'type': 'string', 'maxLength': 40}` | 40자에서 멈춤 ✅ |
+  | `{'anyOf': [{'type':'string','maxLength':40}, {'type':'null'}]}` | 40자에서 멈춤 ✅ |
+  | `{'type': ['string','null'], 'maxLength': 40}` | **60자 넘어서도 계속 ❌** |
+
+  `NonAgent`의 `orientation`이 union 형태였고 보드에서 실제로 폭주했다 —
+  `"[-0.92, 0.21, 0.12, 0.12, 0.21, -0.92, 0.12, ...`를 max_tokens까지 반복하다 JSON이
+  문자열 중간에서 잘려 `Unterminated string starting at: line 1 column 103`으로 죽었다.
+  `time`/`duration`은 `maxLength`조차 없는 union이었다. `#31`에서 `position`을 `anyOf`로
+  바꿨더니 폭주가 멈춘 게 우연이 아니었다 — **제약이 살아남는 형태였던 것**이다.
+  가드: `remembr/agents/test_schema_constraints.py`.
 - tt-metal 소스는 원칙적으로 무손상 유지 — 편집한 곳은 위 model_name 패치가 거의 유일하고,
   이유가 `docs/DEV_STATUS.md` changelog에 기록돼 있다.
 

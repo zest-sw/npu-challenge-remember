@@ -39,12 +39,19 @@ from remembr.memory.memory import Memory
 from remembr.agents.agent import Agent, AgentOutput
 
 
+# Every nullable field is written as `anyOf`, never as `{'type': ['x', 'null'], ...}`.
+# lm-format-enforcer silently drops the sibling constraints on a type-union: measured
+# with the real tokenizer, `{'type': ['string','null'], 'maxLength': 40}` let 60+
+# characters through, while `{'type': 'string', 'maxLength': 40}` and the anyOf
+# spelling both stopped at exactly 40. An unbounded string runs to max_tokens, which
+# truncates the JSON mid-string and costs the whole answer.
 ANSWER_SCHEMA = {
     'type': 'object',
     'properties': {
-        'type': {'type': 'string'},
+        'type': {'type': 'string', 'maxLength': 20},
         'text': {'type': 'string', 'maxLength': 300},
-        'binary': {'type': ['string', 'null']},
+        # eval compares this case-insensitively against "yes"/"no".
+        'binary': {'anyOf': [{'enum': ['yes', 'no']}, {'type': 'null'}]},
         'position': {
             'anyOf': [
                 {
@@ -56,19 +63,26 @@ ANSWER_SCHEMA = {
                 {'type': 'null'},
             ]
         },
-        'orientation': {
+        # A number, not a 1-element array: AgentOutput declares `orientation: float`,
+        # MemoryItem carries `theta: float`, and the memory string the model reads says
+        # "with an average orientation of {theta} radians".
+        'orientation': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
+        # A number is what eval wants; the string branch stays because upstream
+        # tolerates "5.3" and eval()s it, but it is now bounded.
+        'time': {
             'anyOf': [
-                {
-                    'type': 'array',
-                    'items': {'type': 'number'},
-                    'minItems': 1,
-                    'maxItems': 1,
-                },
+                {'type': 'number'},
+                {'type': 'string', 'maxLength': 24},
                 {'type': 'null'},
             ]
         },
-        'time': {'type': ['number', 'string', 'null']},
-        'duration': {'type': ['number', 'string', 'null']},
+        'duration': {
+            'anyOf': [
+                {'type': 'number'},
+                {'type': 'string', 'maxLength': 24},
+                {'type': 'null'},
+            ]
+        },
     },
     'required': ['type', 'text', 'binary', 'position', 'orientation', 'time', 'duration'],
     'additionalProperties': False,
@@ -83,7 +97,7 @@ Use null for any field that does not apply.
 - text: a short answer to the user
 - binary: yes/no for binary questions, otherwise null
 - position: an array like [x, y, z] for where questions, otherwise null
-- orientation: an array like [yaw] when position is provided, otherwise null
+- orientation: the yaw in radians as a number when position is provided, otherwise null
 - time: a number or string for minutes-ago answers, otherwise null
 - duration: a number or string for duration answers, otherwise null"""
 
