@@ -45,13 +45,13 @@ Use the retrieved conversation context to answer the user's question.
 Respond with exactly one JSON object and nothing else.
 The JSON object must contain all of these keys: type, text, binary, position, orientation, time, duration.
 Use null for any field that does not apply.
-- type: the answer category
+- type: exactly one of position, time, duration, binary, text -- nothing else
 - text: a short answer to the user
 - binary: yes/no for binary questions, otherwise null
 - position: an array like [x, y, z] for where questions, otherwise null
 - orientation: the yaw in radians as a number when position is provided, otherwise null
-- time: a number or string for minutes-ago answers, otherwise null
-- duration: a number or string for duration answers, otherwise null"""
+- time: minutes ago as a number, not words. 11, not "11 minutes ago". Otherwise null
+- duration: minutes as a number, not words. Otherwise null"""
 
 
 
@@ -261,6 +261,14 @@ class ReMEmbRAgent(Agent):
 
         self.tool_list = [self.retriever_tool, self.position_retriever_tool, self.time_retriever_tool]
         self.tool_definitions = [convert_to_openai_function(t) for t in self.tool_list]
+        # A retrieval-only variant for the turns where the planner still has tool
+        # budget. `__conversational_response` is useless there: this node runs to pick
+        # tools, and `generate` writes the answer afterwards. Worse, the model emitted it
+        # alongside a real tool call, FunctionsWrapper kept the tool and threw the reply
+        # away (see #35), and we still paid to generate it -- 500 characters, ~125 tokens,
+        # about 31s at the measured decode rate, for text nothing reads. Dropping the
+        # option makes it ungenerable. The turn after the budget runs out does not call
+        # the LLM at all (see MAX_TOOL_TURNS above), so no turn needs the option.
         self.tool_call_schema = {
             "type": "array",
             "items": {
@@ -342,6 +350,14 @@ class ReMEmbRAgent(Agent):
             "minItems": 1,
             "maxItems": 4,
         }
+        # Same schema minus the conversational option, for the turns that still have
+        # tool budget. Derived rather than written out again -- the two drifting apart
+        # is exactly the class of bug this file already had twice.
+        self.retrieval_only_tool_call_schema = json.loads(json.dumps(self.tool_call_schema))
+        self.retrieval_only_tool_call_schema["items"]["oneOf"] = [
+            option for option in self.retrieval_only_tool_call_schema["items"]["oneOf"]
+            if option["properties"]["tool"].get("const") != "__conversational_response"
+        ]
 
     ### Nodes
 
@@ -381,7 +397,8 @@ class ReMEmbRAgent(Agent):
             tool_kwargs = {
                 "response_format": {
                     "type": "json_schema",
-                    "json_schema": {"name": "tool_calls", "schema": self.tool_call_schema},
+                    "json_schema": {"name": "tool_calls",
+                                    "schema": self.retrieval_only_tool_call_schema},
                 }
             }
         model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
@@ -416,7 +433,16 @@ class ReMEmbRAgent(Agent):
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call['name'] != "__conversational_response":
-                    args = re.sub("\{.*?\}", "", str(tool_call['args'])) # remove curly braces
+                    # Strip the braces only, not what is inside them. They have to go
+                    # because `previous_tool_requests` is fed to a ChatPromptTemplate,
+                    # which reads `{...}` as a variable. But the old
+                    # `re.sub("\{.*?\}", "", ...)` deleted the whole dict -- its own repr
+                    # is brace-delimited -- so the model was told "I previously used the
+                    # retrieve_from_text tool with the arguments: ." and could not tell it
+                    # had already run that search. Measured on the board: it repeated the
+                    # identical search on the next turn, burning a third of the 3-turn
+                    # budget.
+                    args = str(tool_call['args']).replace('{', '').replace('}', '')
                     self.previous_tool_requests += f"I previously used the {tool_call['name']} tool with the arguments: {args}.\n"
 
         self.agent_call_count += 1
