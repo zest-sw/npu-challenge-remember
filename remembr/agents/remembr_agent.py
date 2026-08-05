@@ -200,16 +200,6 @@ class ReMEmbRAgent(Agent):
 
 
     def create_tools(self, memory):
-        # How far back the memory actually goes, in minutes, so the grammar can forbid
-        # asking beyond it. Measured on the board: for a 7.5-minute recording the planner
-        # asked for 27, 48 and 40 minutes ago. Those land outside the window, Milvus
-        # returns the boundary, and the turn is wasted. Telling it in prose did not work
-        # (#48); making the number ungenerable does.
-        window_minutes = None
-        span = getattr(memory, 'now_offset', None)
-        if span:
-            window_minutes = max(1, int(round(float(span) / 60.0)))
-        self.window_minutes = window_minutes
 
 
         template = "At time={{time}} seconds, the robot was at an average position of {{position}} with an average orientation of {{theta}} radians. "
@@ -246,8 +236,10 @@ class ReMEmbRAgent(Agent):
         )
 
         class PositionRetrieverInput(BaseModel):
-            x: tuple = Field(description="An (x,y,z) array of numbers, copied from a \
-                                coordinate the question or a retrieved memory gave you. Never invent one.")
+            x: tuple = Field(description="An (x,y,z) array copied from a coordinate a \
+                                RETRIEVED MEMORY gave you. Never the position stated in the \
+                                question -- that is where you are now, not where the thing \
+                                you are looking for is. Never invent one.")
         # position-based tool
         self.position_retriever_tool = StructuredTool.from_function(
             func=lambda x: memory.search_by_position(x),
@@ -257,14 +249,10 @@ class ReMEmbRAgent(Agent):
             # coroutine= ... <- you can specify an async method if desired as well
         )
 
-        _time_hint = ("How many minutes ago, as a number. 0 is now. "
-                      + (f"Your memory only goes back {window_minutes} minutes, so this "
-                         f"must be between 0 and {window_minutes}."
-                         if window_minutes else
-                         "The question tells you the current time, so work back from it."))
-
         class TimeRetrieverInput(BaseModel):
-            x: float = Field(description=_time_hint)
+            x: str = Field(description="An HH:MM:SS clock time, copied from the question \
+                                or from a retrieved memory. Never invent one. Only useful \
+                                when you already know when something happened.")
 
         # position-based tool
         self.time_retriever_tool = StructuredTool.from_function(
@@ -349,9 +337,10 @@ class ReMEmbRAgent(Agent):
                             "tool_input": {
                                 "type": "object",
                                 "properties": {
-                                    "x": ({"type": "number", "minimum": 0,
-                                           "maximum": window_minutes}
-                                          if window_minutes else {"type": "number"})
+                                    "x": {
+                                        "type": "string",
+                                        "pattern": "^\\d{2}:\\d{2}:\\d{2}$"
+                                    }
                                 },
                                 "required": ["x"],
                                 "additionalProperties": False,
@@ -365,30 +354,26 @@ class ReMEmbRAgent(Agent):
             "minItems": 1,
             "maxItems": 4,
         }
-        # Per-turn variants of the schema above, because what the planner should be
-        # allowed to do changes with the turn.
+        # Every tool stays available on every turn. The prompt says to start with
+        # retrieve_from_text -- to learn when or where something happened you have to find
+        # the thing first, and only a retrieved memory can give you a time or a position to
+        # search by -- but that is left as instruction rather than grammar on purpose.
         #
-        # Turn 1 is text-only. To answer anything about an event you have to find the
-        # event first, and you can only search by time if you already know the time -- so
-        # a "when did X happen" question searching by time has the order backwards. This
-        # dataset makes that concrete: 0 of 30 questions name a clock time, yet the
-        # planner spent whole 3-turn budgets on `retrieve_from_time`, never once calling
-        # `retrieve_from_text`, and answered from memories it had not looked up. Telling
-        # it in prose does not hold (#48); the grammar does.
+        # Restricting turn 1 to text was tried and pulled back. It was derived from this
+        # dataset having 0 of 30 questions that name a clock time, which overfits: "what did
+        # you see at 08:02?" legitimately starts with a time search. And the evidence for
+        # "the prompt gets ignored, only grammar holds" was collected while this prompt was
+        # itself telling the model to call at least two tools and showing a two-call example.
+        # That prompt is fixed now, so the claim is untested. Measure the instruction first;
+        # constrain only if it does not hold.
         #
-        # Later turns get everything, so it can follow up by the time or position a
-        # retrieved memory gave it -- which is what those tools are for.
-        #
-        # The conversational reply stays in every variant: it is the loop's only exit
-        # signal (`should_continue` ends on a message with no tool_calls, and
-        # FunctionsWrapper only produces one for `__conversational_response`). Removing it
-        # was measured and made things worse, 270s -> 389s per question, because every
-        # question then burned all 3 turns. Its *length* is the waste -- the reply is
-        # discarded whenever it arrives next to a real tool call (#35) and we still pay
-        # ~125 tokens to write it -- so it is capped at 40 characters per turn instead.
-        self.first_turn_schema = self._schema_allowing(
-            {"__conversational_response", "retrieve_from_text"}, reply_length=40)
-        self.later_turn_schema = self._schema_allowing(None, reply_length=40)
+        # The conversational reply stays in every variant: it is the loop's only exit signal
+        # (`should_continue` ends on a message with no tool_calls, and FunctionsWrapper only
+        # produces one for `__conversational_response`). Removing it was measured at
+        # 270s -> 389s per question because every question then burned all 3 turns. Its
+        # length is the waste -- the reply is discarded whenever it arrives next to a real
+        # tool call (#35) and we still pay ~125 tokens -- so it is capped at 40 characters.
+        self.turn_schema = self._schema_allowing(None, reply_length=40)
 
     def _schema_allowing(self, tool_names, reply_length):
         """A copy of tool_call_schema keeping only `tool_names` (None keeps all)."""
@@ -443,8 +428,7 @@ class ReMEmbRAgent(Agent):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "tool_calls",
-                        "schema": (self.first_turn_schema if self.agent_call_count == 0
-                                   else self.later_turn_schema)},
+                        "schema": self.turn_schema},
                 }
             }
         model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)

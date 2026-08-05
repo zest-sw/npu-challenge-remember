@@ -249,10 +249,17 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
 
     if use_milvus:
         # milv = MilvusWrapper(ip_address=ip_address)
-        # now_offset: the question's "current time" on the same axis as the stored
-        # memory times, so retrieve_from_time("N minutes ago") lands inside the window.
+        # The clock anchor: the question states its current time in the dataset's
+        # timezone, and end_time is the epoch that names. Pairing them lets
+        # search_by_time convert any clock time the model copies from the question,
+        # instead of building the date from this machine's localtime -- the two frames
+        # differ by 17 hours here (#54).
+        stated_now = re.search(r'current time is (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})',
+                               qa_instance['question'])
         memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address,
-                              time_offset=start_time, now_offset=end_time - start_time)
+                              time_offset=start_time,
+                              now_clock=stated_now.group(1) if stated_now else None,
+                              now_epoch=end_time)
     elif 'vlm' in args.model:
         memory = VideoMemory()
     else:

@@ -28,9 +28,10 @@ from remembr.agents.remembr_agent import ReMEmbRAgent  # noqa: E402
 
 
 class StubMemory:
-    """A 450-second recording, like the first SUBSET question."""
+    """The first SUBSET question's clock anchor."""
 
-    now_offset = 450.0
+    now_clock = "2023-01-16 08:03:02"
+    now_epoch = 1673884983.0
 
     def search_by_text(self, query):
         return ""
@@ -42,12 +43,6 @@ class StubMemory:
         return ""
 
 
-class StreamingMemory(StubMemory):
-    """A live robot has no end time."""
-
-    now_offset = None
-
-
 def built_agent(memory=None):
     agent = ReMEmbRAgent.__new__(ReMEmbRAgent)
     agent.tool_calls_made = set()
@@ -57,76 +52,81 @@ def built_agent(memory=None):
     return agent
 
 
+AGENT_PROMPT = os.path.join(os.path.dirname(__file__), "..", "prompts",
+                            "agent_system_prompt.txt")
+
+
+def agent_prompt_text():
+    return open(AGENT_PROMPT).read()
+
+
 def tool_names(schema):
     return [o["properties"]["tool"].get("const") for o in schema["items"]["oneOf"]]
 
 
-def test_the_first_turn_can_only_search_by_text():
-    """To answer anything about an event you must find the event first, and you can only
-    search by time if you already know the time. 0 of 30 questions in this dataset name a
-    clock time, yet whole 3-turn budgets went to retrieve_from_time."""
-    allowed = tool_names(built_agent().first_turn_schema)
-    assert "retrieve_from_text" in allowed, allowed
-    assert "retrieve_from_time" not in allowed, allowed
-    assert "retrieve_from_position" not in allowed, allowed
+def test_every_tool_is_available_on_every_turn():
+    """Restricting turn 1 to text was pulled back: it overfits a dataset with 0 clock-time
+    questions, and the prompt it was meant to compensate for was itself broken at the time."""
+    allowed = tool_names(built_agent().turn_schema)
+    assert {"retrieve_from_text", "retrieve_from_time", "retrieve_from_position",
+            "__conversational_response"} == set(allowed), allowed
 
 
-def test_later_turns_get_every_tool():
-    """Following up on a time or position a retrieved memory gave you is what they are for."""
-    allowed = tool_names(built_agent().later_turn_schema)
-    assert {"retrieve_from_text", "retrieve_from_time", "retrieve_from_position"} <= set(allowed)
-
-
-def test_every_turn_keeps_the_exit_signal_but_caps_it():
+def test_the_exit_signal_survives_but_is_capped():
     """It is the loop's only way out; removing it was measured at 270s -> 389s."""
     agent = built_agent()
-    for schema, name in ((agent.first_turn_schema, "first"), (agent.later_turn_schema, "later")):
-        assert "__conversational_response" in tool_names(schema), name
-        for option in schema["items"]["oneOf"]:
-            if option["properties"]["tool"].get("const") == "__conversational_response":
-                cap = option["properties"]["tool_input"]["properties"]["response"]["maxLength"]
-                assert cap == 40, (name, cap)
+    for option in agent.turn_schema["items"]["oneOf"]:
+        if option["properties"]["tool"].get("const") == "__conversational_response":
+            cap = option["properties"]["tool_input"]["properties"]["response"]["maxLength"]
+            assert cap == 40, cap
 
 
-def test_the_per_turn_schemas_are_copies():
+def test_the_turn_schema_is_a_copy():
     agent = built_agent()
-    agent.first_turn_schema["items"]["oneOf"].clear()
-    assert agent.later_turn_schema["items"]["oneOf"], "the variants share a list"
-    assert agent.tool_call_schema["items"]["oneOf"], "a variant aliases the base schema"
+    agent.turn_schema["items"]["oneOf"].clear()
+    assert agent.tool_call_schema["items"]["oneOf"], "the variant aliases the base schema"
 
 
-def time_argument_schema(agent):
-    for option in agent.tool_call_schema["items"]["oneOf"]:
-        if option["properties"]["tool"].get("const") == "retrieve_from_time":
-            return option["properties"]["tool_input"]["properties"]["x"]
-    raise AssertionError("retrieve_from_time is missing from the schema")
+def test_the_prompt_tells_it_to_start_with_text():
+    """Now that this is instruction rather than grammar, the instruction has to be there."""
+    assert "Start with retrieve_from_text" in agent_prompt_text()
 
 
-def test_the_window_is_read_from_the_memory():
-    assert built_agent().window_minutes == 8  # 450s rounds to 8 minutes
+def test_the_prompt_and_the_tool_agree_on_the_time_format():
+    """They did not for an hour: the tool took minutes-ago while the prompt still said
+    H:M:S. The model was given two different instructions. Both are clock times now."""
+    text = agent_prompt_text()
+    assert "HH:MM:SS clock time" in text, text
+    described = [t for t in built_agent().tool_list if t.name == "retrieve_from_time"][0]
+    assert "HH:MM:SS" in described.args_schema.__fields__["x"].field_info.description
 
 
-def test_a_time_outside_the_recording_is_ungenerable():
-    schema = time_argument_schema(built_agent())
-    assert schema["minimum"] == 0, schema
-    assert schema["maximum"] == 8, schema
-    # 48 and 27, the values actually observed, are now outside the grammar.
-    for observed in (27, 48, 40):
-        assert observed > schema["maximum"], observed
+def test_the_prompt_does_not_let_position_search_copy_the_question():
+    """Turn 1 searched by the question's own current position, 77.2 m from the answer.
+    The description used to permit exactly that: "copied from a coordinate the question
+    or a retrieved memory gave you"."""
+    for text, where in ((agent_prompt_text(), "agent_system_prompt.txt"),
+                        (open(os.path.join(os.path.dirname(__file__),
+                                           "remembr_agent.py")).read(), "remembr_agent.py")):
+        assert "coordinate the question" not in text, where
+        assert "RETRIEVED MEMORY" in text, where
 
 
-def test_the_tool_description_states_the_limit():
-    agent = built_agent()
-    described = [t for t in agent.tool_list if t.name == "retrieve_from_time"][0]
-    text = described.args_schema.__fields__["x"].field_info.description
-    assert "8 minutes" in text, text
+def test_the_prompt_does_not_demand_extra_tool_calls():
+    """"Call at least two tools ... better to have more information than less" is why
+    whole 3-turn budgets were spent on searches whose results went unused."""
+    text = agent_prompt_text()
+    assert "at least two tools" not in text, text
+    assert "better to have more information than less" not in text, text
 
 
-def test_a_streaming_robot_gets_no_upper_bound():
-    """Live, there is no end time and no window to bound by."""
-    agent = built_agent(StreamingMemory())
-    assert agent.window_minutes is None
-    assert time_argument_schema(agent) == {"type": "number"}
+def test_the_prompt_says_what_to_do_when_information_is_missing():
+    """Two rules used to say the same thing ("if you are able to answer" / "if you do have
+    enough information"), so nothing covered the case where information is missing -- the
+    only case where a retrieval tool is the right move."""
+    text = agent_prompt_text()
+    assert "If it does not" in text, text[:200]
+    assert "If it answers the question" in text, text[:200]
 
 
 class FakeResponse:

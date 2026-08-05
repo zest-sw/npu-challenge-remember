@@ -144,16 +144,27 @@ class MilvusMemory(Memory):
 
 
     def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530,
-                 time_offset=FIXED_SUBTRACT, now_offset=None):
+                 time_offset=FIXED_SUBTRACT, now_clock=None, now_epoch=None):
 
         self.db_collection_name = db_collection_name
         self.db_ip = db_ip
         self.db_port = db_port
         self.time_offset = time_offset
-        # Seconds from time_offset to "now". A live robot leaves this None and gets the
-        # wall clock; eval replays a finished recording and passes the question's
-        # current time, so time searches land inside the window (#54).
-        self.now_offset = now_offset
+        # An anchor pairing a clock string with the epoch it names, used to convert any
+        # clock time the caller asks about into this recording's axis.
+        #
+        # Needed because the clock times in a question are written in the dataset's
+        # timezone, not this machine's. `search_by_time` used to build the date from
+        # `localtime(time_offset)` and take the time-of-day from its argument; on this
+        # dataset those frames differ by 17 hours, so the composed instant landed 7.0
+        # hours outside a 450-second recording and Milvus returned the window boundary
+        # for every query (#54). With an anchor from the question itself, both the date
+        # and the time-of-day come from the same frame and the offset cancels.
+        #
+        # A live robot leaves these None: there the machine clock and the clock the robot
+        # talks about are the same, so no conversion is needed.
+        self.now_clock = now_clock
+        self.now_epoch = now_epoch
 
         self.embedder = HuggingFaceEmbeddings(model_name='mixedbread-ai/mxbai-embed-large-v1')
 
@@ -249,46 +260,54 @@ class MilvusMemory(Memory):
         """Look up things online."""
         return docs
 
-    def seconds_since_start_of_now(self) -> float:
-        """Where "now" sits on the same axis the memories are stored on.
+    CLOCK_TEMPLATE = "%m/%d/%Y %H:%M:%S"
 
-        Memory times are seconds since `time_offset`. For a robot running live, "now" is
-        the wall clock. Eval replays a finished recording, so it passes `now_offset`
-        (the question's current time) and this returns that instead.
+    def _timezone_shift(self) -> float:
+        """Seconds this machine's clock reading differs from the question's clock.
+
+        Zero when there is no anchor, which is the live-robot case.
         """
-        if self.now_offset is not None:
-            return float(self.now_offset)
-        return time.time() - self.time_offset
+        if not (self.now_clock and self.now_epoch):
+            return 0.0
+        stated = datetime.datetime.strptime(self.now_clock, "%Y-%m-%d %H:%M:%S")
+        return time.mktime(stated.timetuple()) - float(self.now_epoch)
 
-    def search_by_time(self, minutes_ago) -> str:
-        """Memories from around `minutes_ago` minutes before now.
+    def _clock_to_relative_seconds(self, hms_time: str) -> float:
+        """A clock time from the question, as seconds since this recording started."""
+        hms_time = str(hms_time).strip()
+        # Take the date from the anchor, not from localtime -- that mismatch was the bug.
+        if self.now_clock:
+            date = self.now_clock.split()[0].split('-')
+            mdy = f"{date[1]}/{date[2]}/{date[0]}"
+        else:
+            mdy = strftime('%m/%d/%Y', localtime(self.time_offset))
 
-        Minutes-ago, not a clock time. The clock version was unusable: it built the date
-        from `localtime(self.time_offset)` and took the time-of-day from what the model
-        passed, and the model copies that from the question text, which is written in a
-        different timezone. Measured on this dataset the two differ by 17 hours, so the
-        composed instant landed 7.0 hours outside a 450-second recording and Milvus
-        returned the window boundary no matter what was asked -- three different clock
-        times in one question came back with the identical four memories. See #54.
+        try:
+            # The model may already have sent a full date, or just HH:MM:SS.
+            asked = datetime.datetime.strptime(hms_time, self.CLOCK_TEMPLATE)
+        except ValueError:
+            asked = datetime.datetime.strptime(f"{mdy} {hms_time}", self.CLOCK_TEMPLATE)
 
-        Minutes-ago has one axis and no timezone in it. The question states the current
-        time, the answers are in minutes, and the stored times are seconds since the
-        start, so everything meets here.
+        machine_epoch = time.mktime(asked.timetuple())
+        return machine_epoch - self._timezone_shift() - self.time_offset
+
+    def search_by_time(self, hms_time: str) -> str:
+        """Memories from around the clock time `hms_time`, as the question states times.
+
+        A clock time on purpose: the questions state times that way, so the model copies
+        one rather than computing anything. When this took minutes-ago instead, the model
+        had to do the arithmetic and got it wrong -- it asked for 27, 48 and 40 minutes
+        back on a 7.5-minute recording, every one of them outside the window.
         """
         try:
-            seconds_ago = float(str(minutes_ago).strip()) * 60.0
+            target = self._clock_to_relative_seconds(hms_time)
         except (TypeError, ValueError):
-            # The grammar asks for a number, so this means something bypassed it. Treat
-            # it as "now" and say so rather than killing the question.
-            trace.warn(f"search_by_time: {minutes_ago!r}를 분으로 읽을 수 없다 — 지금으로 간주")
-            seconds_ago = 0.0
-
-        # Asking further back than the recording goes just returns its earliest memory,
-        # which is the honest answer to "as far back as I have".
-        target = self.seconds_since_start_of_now() - seconds_ago
+            trace.warn(f"search_by_time: {hms_time!r}를 시각으로 읽을 수 없다 — 지금으로 간주")
+            target = self._clock_to_relative_seconds(
+                self.now_clock.split()[1]) if self.now_clock else 0.0
 
         docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([target, 0]))
-        self._trace_hits("time", f"{seconds_ago/60:.1f}분 전 = t{target:+.0f}s", docs)
+        self._trace_hits("time", f"{hms_time} = t{target:+.0f}s", docs)
 
         self.working_memory += docs
 
