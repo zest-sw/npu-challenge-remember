@@ -91,8 +91,8 @@ class RetrieveAgent(NonAgent):
             # round. Enough for the position questions the probe measured; if
             # "how long were you in X" needs both the entering and the leaving
             # memory, add a second query here rather than restoring the agent loop.
+            # The memory traces what came back, so nothing to add here.
             self.memory.search_by_text(search_query)
-            trace.step("검색", f"메모리 {len(self.memory.get_working_memory())}개", arrow="←")
         else:
             trace.warn("빈 검색어 — 컨텍스트 없이 답변한다")
         return super().query(question)
