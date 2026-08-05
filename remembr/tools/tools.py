@@ -55,36 +55,9 @@ def search_by_position(pos_db, ref_time, query: tuple) -> str:
     """Look up things online."""
     return docs
 
-def search_by_time(time_db, ref_time, hms_time: str) -> str:
-
-    # Input is time like 08:20:30
-    # need to convert to searchable time
-    t = localtime(ref_time)
-    mdy_date = strftime('%m/%d/%Y', t)
-    template = "%m/%d/%Y %H:%M:%S"
-
-    # if the hms_time is already in the mdy hms format without me doing anything, let's just use that.
-    # bad llms don't listen :(
-    try:
-        res = bool(datetime.strptime(query, template))
-    except ValueError:
-        res = False
-
-    hms_time = hms_time.strip()
-    if not res: # convert to the right format then
-        hms_time = mdy_date + ' ' + hms_time
-
-    query = time.mktime(datetime.datetime.strptime(hms_time,template).timetuple()) - ref_time
-    # convert from hms_time to something searchable
-
-
-    docs = similarity_search_with_score_by_vector(time_db, np.array([query, 0]))
-
-    docs = format_document(docs, ref_time=ref_time)
-    # np.unique([doc.metadata['time'][0] for doc in docs])
-    """Look up things online."""
-    return docs
-
+# `search_by_time` used to live here, taking an HH:MM:SS clock time. It was dead code
+# (only Memory.search_by_time is ever called) and it carried the same timezone bug that
+# #54 fixed, so it is gone rather than left as a wrong second copy.
 
 
 def search_by_text(retriever, ref_time, query: str) -> str:

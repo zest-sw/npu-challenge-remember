@@ -1,6 +1,7 @@
 from dataclasses import dataclass, asdict
 
 import datetime, time
+import warnings
 from time import strftime, localtime
 from typing import Any, List, Optional, Tuple
 from langchain_core.documents import Document
@@ -11,6 +12,20 @@ from remembr.utils import trace
 
 from langchain_community.vectorstores import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
+
+# LangChain installs its own filter for deprecation warnings, so `-W ignore` and
+# PYTHONWARNINGS do not silence them. `Milvus` is constructed three times per question
+# (text, position, time), so its notice drowned the pipeline trace it sits next to.
+# Silencing it here, at the one place we construct the deprecated class, rather than
+# globally. Migrating to langchain-milvus is the real fix but pulls a new dependency
+# into a pinned stack (see AGENTS.md on the venv dependency trap) -- tracked separately.
+try:
+    from langchain_core._api.deprecation import LangChainDeprecationWarning
+
+    warnings.filterwarnings("ignore", category=LangChainDeprecationWarning,
+                            module=r".*milvus_memory")
+except Exception:  # noqa: BLE001  -- never let a log tweak break imports
+    pass
 
 from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Collection, utility
 
@@ -122,12 +137,17 @@ class MilvusWrapper:
 class MilvusMemory(Memory):
 
 
-    def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530, time_offset=FIXED_SUBTRACT):
+    def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530,
+                 time_offset=FIXED_SUBTRACT, now_offset=None):
 
         self.db_collection_name = db_collection_name
         self.db_ip = db_ip
         self.db_port = db_port
         self.time_offset = time_offset
+        # Seconds from time_offset to "now". A live robot leaves this None and gets the
+        # wall clock; eval replays a finished recording and passes the question's
+        # current time, so time searches land inside the window (#54).
+        self.now_offset = now_offset
 
         self.embedder = HuggingFaceEmbeddings(model_name='mixedbread-ai/mxbai-embed-large-v1')
 
@@ -223,36 +243,50 @@ class MilvusMemory(Memory):
         """Look up things online."""
         return docs
 
-    def search_by_time(self, hms_time: str) -> str:
+    def seconds_since_start_of_now(self) -> float:
+        """Where "now" sits on the same axis the memories are stored on.
 
-        # Input is time like 08:20:30
-        # need to convert to searchable time
-        t = localtime(self.time_offset)
-        mdy_date = strftime('%m/%d/%Y', t)
-        template = "%m/%d/%Y %H:%M:%S"
+        Memory times are seconds since `time_offset`. For a robot running live, "now" is
+        the wall clock. Eval replays a finished recording, so it passes `now_offset`
+        (the question's current time) and this returns that instead.
+        """
+        if self.now_offset is not None:
+            return float(self.now_offset)
+        return time.time() - self.time_offset
 
-        # if the hms_time is already in the mdy hms format without me doing anything, let's just use that.
-        # bad llms don't listen :(
+    def search_by_time(self, minutes_ago) -> str:
+        """Memories from around `minutes_ago` minutes before now.
+
+        Minutes-ago, not a clock time. The clock version was unusable: it built the date
+        from `localtime(self.time_offset)` and took the time-of-day from what the model
+        passed, and the model copies that from the question text, which is written in a
+        different timezone. Measured on this dataset the two differ by 17 hours, so the
+        composed instant landed 7.0 hours outside a 450-second recording and Milvus
+        returned the window boundary no matter what was asked -- three different clock
+        times in one question came back with the identical four memories. See #54.
+
+        Minutes-ago has one axis and no timezone in it. The question states the current
+        time, the answers are in minutes, and the stored times are seconds since the
+        start, so everything meets here.
+        """
         try:
-            res = bool(datetime.datetime.strptime(hms_time, template))
-        except ValueError:
-            res = False
+            seconds_ago = float(str(minutes_ago).strip()) * 60.0
+        except (TypeError, ValueError):
+            # The grammar asks for a number, so this means something bypassed it. Treat
+            # it as "now" and say so rather than killing the question.
+            trace.warn(f"search_by_time: {minutes_ago!r}를 분으로 읽을 수 없다 — 지금으로 간주")
+            seconds_ago = 0.0
 
-        hms_time = hms_time.strip()
-        if not res: # convert to the right format then
-            hms_time = mdy_date + ' ' + hms_time
+        # Asking further back than the recording goes just returns its earliest memory,
+        # which is the honest answer to "as far back as I have".
+        target = self.seconds_since_start_of_now() - seconds_ago
 
-        query = time.mktime(datetime.datetime.strptime(hms_time,template).timetuple()) - self.time_offset
-        # convert from hms_time to something searchable
-
-
-        docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([query, 0]))
-        self._trace_hits("time", hms_time, docs)
+        docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([target, 0]))
+        self._trace_hits("time", f"{seconds_ago/60:.1f}분 전 = t{target:+.0f}s", docs)
 
         self.working_memory += docs
 
         docs = self.memory_to_string(docs)
-        # np.unique([doc.metadata['time'][0] for doc in docs])
         """Look up things online."""
         return docs
 

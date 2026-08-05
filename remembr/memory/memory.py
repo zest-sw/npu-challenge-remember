@@ -32,7 +32,7 @@ class Memory:
     def search_by_position(self, query: tuple) -> list[MemoryItem]:
         raise NotImplementedError
 
-    def search_by_time(self, hms_time_query: str) -> list[MemoryItem]:
+    def search_by_time(self, minutes_ago) -> list[MemoryItem]:
         raise NotImplementedError
 
     def search_by_text(self, query: str) -> list[MemoryItem]:

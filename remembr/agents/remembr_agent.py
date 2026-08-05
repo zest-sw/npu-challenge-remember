@@ -248,8 +248,8 @@ class ReMEmbRAgent(Agent):
         )
 
         class TimeRetrieverInput(BaseModel):
-            x: str = Field(description="An HH:MM:SS time, copied from the question or a \
-                                retrieved memory. Never invent one. Only for questions naming a clock time.")
+            x: float = Field(description="How many minutes ago, as a number. 0 is now. \
+                                The question tells you the current time, so work back from it.")
 
         # position-based tool
         self.time_retriever_tool = StructuredTool.from_function(
@@ -334,10 +334,7 @@ class ReMEmbRAgent(Agent):
                             "tool_input": {
                                 "type": "object",
                                 "properties": {
-                                    "x": {
-                                        "type": "string",
-                                        "pattern": "^\\d{2}:\\d{2}:\\d{2}$"
-                                    }
+                                    "x": {"type": "number"}
                                 },
                                 "required": ["x"],
                                 "additionalProperties": False,

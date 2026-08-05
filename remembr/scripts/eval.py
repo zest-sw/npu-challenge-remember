@@ -252,7 +252,10 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
 
     if use_milvus:
         # milv = MilvusWrapper(ip_address=ip_address)
-        memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address, time_offset=start_time)
+        # now_offset: the question's "current time" on the same axis as the stored
+        # memory times, so retrieve_from_time("N minutes ago") lands inside the window.
+        memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address,
+                              time_offset=start_time, now_offset=end_time - start_time)
     elif 'vlm' in args.model:
         memory = VideoMemory()
     else:
