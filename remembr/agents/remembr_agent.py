@@ -239,19 +239,26 @@ class ReMEmbRAgent(Agent):
         template += "The robot saw the following: {{page_content}}"
 
 
-        # Keep these descriptions short and give them NO value to copy. A filled-in
-        # sample is an instruction to a small model, not an illustration. Measured on
-        # the board (Llama-3.1-8B): every irrelevant argument the planner produced was
-        # a verbatim copy of the sample that used to sit here — asked when the robot
-        # left a building it searched for "a green car driving down the road" and
-        # "a crowd gathering", queried time 08:02:03 and position (0.5, 0.2, 0.1).
-        # 4 of 4 bad arguments traced back to these strings. Removing the samples but
-        # leaving long prose was not enough either: it then passed the description
-        # sentence itself as the query. Less text here is less text to copy instead
-        # of reading the question.
+        # Give these descriptions NO value to copy, but DO tell the model to search.
+        # A filled-in sample is an instruction to a small model, not an illustration:
+        # measured on the board (Llama-3.1-8B), every irrelevant argument the planner
+        # produced was a verbatim copy of the sample that used to sit here — asked
+        # when the robot left a building it searched for "a green car driving down the
+        # road" and "a crowd gathering", queried time 08:02:03 and position
+        # (0.5, 0.2, 0.1). 4 of 4 bad arguments traced back to those strings.
+        #
+        # But cutting the samples took the imperative out with them, and that went
+        # too far: with only "the thing to look for", the model stopped calling the
+        # tool at all and answered "I do not have enough information" from an empty
+        # memory (0 retrievals across 9 questions). Restoring "There must always be
+        # text here / decide what to search for" — the instruction, not the examples —
+        # brought retrieval back with a sane query ("place to sit"). Keep both
+        # properties: an imperative to search, and nothing that can be copied.
         class TextRetrieverInput(BaseModel):
             x: str = Field(description="The thing to look for, as a short visual phrase \
-                                taken from what the question asks about.")
+                                taken from what the question asks about. There must always be \
+                                text here. Based on the question, decide what to search your \
+                                memory for.")
 
         self.retriever_tool = StructuredTool.from_function(
             func=lambda x: memory.search_by_text(x),

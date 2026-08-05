@@ -354,7 +354,24 @@ class FunctionsWrapper(BaseChatModel, BaseLanguageModel):
             parsed_chat_result = [parsed_chat_result]
 
         # print("CHAT CONTENT:", parsed_chat_result)
-      
+
+        # A model that asks to retrieve AND to reply in the same response wants the
+        # retrieval; the reply is written before it has seen what comes back. The
+        # loop below returns on the first __conversational_response it meets and
+        # throws every real tool call away, which is backwards -- measured on the
+        # board (Llama-3.1-8B, remembr+), 2 of 3 questions asked for
+        # retrieve_from_text alongside a conversational reply and got no retrieval
+        # at all, so the agent answered "I do not have enough information" from an
+        # empty memory. Drop the reply instead and let the tools run; the agent
+        # loop comes back here for the reply on the next turn anyway.
+        if len(parsed_chat_result) > 1:
+            real_tool_calls = [
+                tool for tool in parsed_chat_result
+                if tool.get("tool") != DEFAULT_RESPONSE_FUNCTION["name"]
+            ]
+            if real_tool_calls:
+                parsed_chat_result = real_tool_calls
+
         tool_calls = []
 
         for tool in parsed_chat_result:
