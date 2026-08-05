@@ -1,3 +1,6 @@
+import json
+import re
+
 
 from PIL import Image
 import numpy as np
@@ -67,3 +70,17 @@ def get_frames(file):
 def file_to_string(filename):
     with open(filename, "r", encoding="utf-8") as file:
         return file.read().strip()
+
+
+def parse_json(string):
+    """The JSON object out of a ```json fenced block.
+
+    One copy, because there were four and one of them differed: eval.py used `eval()`
+    instead of `json.loads()`, which runs model output as Python. That accepts things
+    JSON rejects (None, single quotes, expressions) and is an arbitrary-code path on
+    text a language model wrote. `json.loads` everywhere.
+    """
+    fenced = re.search(r"```json(.*?)```", string, re.DOTALL | re.IGNORECASE)
+    if fenced is None:
+        raise ValueError("no ```json block in the response")
+    return json.loads(fenced.group(1).strip())

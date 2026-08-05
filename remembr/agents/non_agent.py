@@ -8,55 +8,19 @@ from langchain_core.prompts import PromptTemplate
 
 sys.path.append(sys.path[0] + '/..')
 from remembr.tools.tools import format_docs
-from remembr.utils.util import file_to_string
+from remembr.utils.util import file_to_string, parse_json
 
-from remembr.agents.agent import ANSWER_SCHEMA, ANSWER_TYPES, Agent, AgentOutput
+from remembr.agents.agent import (ANSWER_SCHEMA, ANSWER_TYPES, Agent, AgentOutput,
+                                  answer_summary, asked_line, schema_for_type,
+                                  settle_answer_type, validate_answer)
 from remembr.utils import trace
 from remembr.memory.memory import Memory
 
 
-def parse_json(string):
-    parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
-    parsed = json.loads(parsed)
-    return parsed
-
-
-# Which key the grammar must force to be non-null once the type is known. 'text' is
-# already required and non-nullable, so it needs no extra pinning.
-TYPE_FIELD = {'position': 'position', 'time': 'time', 'duration': 'duration', 'binary': 'binary'}
-
-# The answer for the pinned field, with null removed. Measured on the board: asked
-# where a statue was, the model replied
-#   type="text", position=null,
-#   text="I'm not sure where the statue ... is, but ... Based on my previous location
-#         at [-60.197, 196.541, -1.097]"
-# and that coordinate matches ground truth to three decimals. The answer was right;
-# only the field was empty, and eval scores an empty field as unanswered. The prompt
-# already says to fill position for a "where" question and the model does not break
-# that rule -- it escapes by choosing type="text", for which a null position is
-# consistent. So close the escape: settle the type in its own cheap call, then make
-# the grammar unable to leave that type's field null.
-NON_NULL_FIELD = {
-    'position': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 3, 'maxItems': 3},
-    'time': {'type': 'number'},
-    'duration': {'type': 'number'},
-    'binary': {'enum': ['yes', 'no']},
-}
-
-ANSWER_TYPE_SCHEMA = {
-    'type': 'object',
-    'properties': {'answer_type': {'enum': list(ANSWER_TYPES)}},
-    'required': ['answer_type'],
-    'additionalProperties': False,
-}
-
-
-
-def _answer_summary(output: AgentOutput) -> str:
-    """The filled fields only, so the trace line shows what the model committed to."""
-    filled = [(name, getattr(output, name, None))
-              for name in ('type', 'position', 'time', 'duration', 'binary')]
-    return "  ".join(f"{name}={value!r}" for name, value in filled if value is not None)
+# Re-exported from agent.py, where they live next to ANSWER_SCHEMA. Kept importable from
+# here because tests and scripts already reach for them at this path.
+from remembr.agents.agent import (ANSWER_TYPE_SCHEMA, NON_NULL_FIELD,  # noqa: E402,F401
+                                  TYPE_FIELD)
 
 
 class NonAgent(Agent):
@@ -99,44 +63,16 @@ class NonAgent(Agent):
         self.answer_type_prompt = file_to_string(
             str(os.path.dirname(__file__)) + '/../' + 'prompts/answer_type_prompt.txt').strip()
 
-    def answer_type_for(self, question: str) -> str | None:
-        """Which kind of answer the question wants, decided by the model.
-
-        A separate call on purpose, and a cheap one: the output is a single word, so
-        at the measured ~0.25 s/token it costs about a second. Deriving the type from
-        the question's wording in code would be a regex pretending to be a decision,
-        and taking it from the eval label would be reading the answer key.
-
-        Returns None when the type cannot be settled, in which case the caller keeps
-        the permissive schema rather than guessing.
-        """
+    def answer_type_for(self, question: str):
+        """Delegates to the shared helper so both answer paths behave the same."""
         if self.answer_schema is None:
             return None
-        asked = [line.strip() for line in question.strip().splitlines() if line.strip()]
-        try:
-            reply = self.chain.bind(
-                response_format={'type': 'json_schema',
-                                 'json_schema': {'name': 'answer_type', 'schema': ANSWER_TYPE_SCHEMA}},
-                # One word of content, but the grammar lets the model open with
-                # whitespace and it does -- observed `'{\r\n\r\n  \r\n\r\n\r\n"items"'`.
-                # At 16 the newlines ate the budget and the JSON came back truncated
-                # ("Expecting value: line 5 column 16"), so leave room for them.
-                max_tokens=48,
-            ).invoke(f"{self.answer_type_prompt}\n\nQuestion: {asked[-1] if asked else question}")
-            answer_type = json.loads(reply.content).get('answer_type')
-        except Exception as error:  # noqa: BLE001
-            trace.warn(f"답변 유형 확정 실패 ({error}) — permissive 스키마로 진행")
-            return None
-        return answer_type if answer_type in ANSWER_TYPES else None
+        return settle_answer_type(self.chain, question, self.answer_type_prompt)
 
     def schema_for(self, answer_type):
-        """The answer schema with `answer_type`'s field pinned non-null."""
-        if self.answer_schema is None or answer_type not in TYPE_FIELD:
-            return self.answer_schema
-        schema = json.loads(json.dumps(self.answer_schema))  # cheap deep copy
-        schema['properties']['type'] = {'const': answer_type}
-        schema['properties'][TYPE_FIELD[answer_type]] = NON_NULL_FIELD[answer_type]
-        return schema
+        if self.answer_schema is None:
+            return None
+        return schema_for_type(answer_type)
 
 
     def set_memory(self, memory: Memory):
@@ -204,11 +140,7 @@ class NonAgent(Agent):
                 else:
                     parsed = parse_json(response)
 
-                # then check it has all the required keys
-                keys_to_check_for = ["time", "text", "binary", "position"]
-                for key in keys_to_check_for:
-                    if key not in parsed:
-                        raise ValueError("Missing all the required keys during generate. Retrying...")
+                validate_answer(parsed)
                 response = AgentOutput.from_dict(parsed)
 
             except Exception as e:
@@ -217,7 +149,7 @@ class NonAgent(Agent):
                 trace.note(f"원본: {response[:160]}")
                 continue
 
-            trace.step("답변", _answer_summary(response))
+            trace.step("답변", answer_summary(response))
             break
 
         else:

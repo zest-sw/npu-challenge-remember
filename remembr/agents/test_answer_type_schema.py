@@ -24,6 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from remembr.agents.agent import ANSWER_SCHEMA  # noqa: E402
 from remembr.agents.non_agent import (  # noqa: E402
     ANSWER_TYPES,
     NON_NULL_FIELD,
@@ -31,28 +32,9 @@ from remembr.agents.non_agent import (  # noqa: E402
     NonAgent,
 )
 
-PERMISSIVE = {
-    "type": "object",
-    "properties": {
-        "type": {"type": "string", "maxLength": 20},
-        "text": {"type": "string", "maxLength": 300},
-        "binary": {"anyOf": [{"enum": ["yes", "no"]}, {"type": "null"}]},
-        "position": {
-            "anyOf": [
-                {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-                {"type": "null"},
-            ]
-        },
-        "orientation": {"anyOf": [{"type": "string", "maxLength": 40}, {"type": "null"}]},
-        "time": {"anyOf": [{"type": "number"}, {"type": "string", "maxLength": 24}, {"type": "null"}]},
-        "duration": {"anyOf": [{"type": "number"}, {"type": "string", "maxLength": 24}, {"type": "null"}]},
-    },
-    "required": ["type", "text", "binary", "position", "orientation", "time", "duration"],
-    "additionalProperties": False,
-}
 
 
-def agent(schema=PERMISSIVE):
+def agent(schema=ANSWER_SCHEMA):
     """A NonAgent with just the attributes the schema logic touches."""
     made = NonAgent.__new__(NonAgent)
     made.answer_schema = schema
@@ -81,18 +63,18 @@ def test_other_fields_stay_nullable():
         assert allows_null(schema["properties"][key]), key
 
 
-def test_the_permissive_schema_is_not_mutated():
-    before = repr(PERMISSIVE)
+def test_the_shared_schema_is_not_mutated():
+    before = repr(ANSWER_SCHEMA)
     agent().schema_for("position")
     agent().schema_for("duration")
-    assert repr(PERMISSIVE) == before, "schema_for edited the shared schema in place"
+    assert repr(ANSWER_SCHEMA) == before, "schema_for edited the shared schema in place"
 
 
-def test_text_and_unknown_types_fall_back_to_permissive():
+def test_text_and_unknown_types_fall_back_to_the_shared_schema():
     # 'text' needs no pinning (it is already required and non-nullable), and anything
     # unrecognised must not silently produce a broken schema.
     for answer_type in ("text", None, "banana"):
-        assert agent().schema_for(answer_type) is PERMISSIVE, answer_type
+        assert agent().schema_for(answer_type) is ANSWER_SCHEMA, answer_type
 
 
 def test_no_schema_means_no_pinning():

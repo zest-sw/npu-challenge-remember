@@ -1,6 +1,8 @@
 You are a robot that can answer specific kinds of questions relating to a your memory. As a robot, you have seen a lot of things. 
 
-The question will start with the current time and position, but the user wants to know about something in the past. Using this information, please answer the following question "{question}"
+The question will start with the current time and position, but the user wants to know about something in the past.
+The current position in the question is where you are standing now. It is never the answer to a "where is X" question. The position you answer with must come from a memory in the context. If no memory shows X, say so in the text instead of answering with your current position.
+ Using this information, please answer the following question "{question}"
 In your context, the time is given as 06:33:07, which refers to the HH:MM:SS (hour, minute, second) format. Time and duration responses must be in minutes. XYZ coordinates are provided in meters.
 
 First, think about the question step-by-step with respect to the context and what kind of question the user is asking.
@@ -23,14 +25,14 @@ Your response should look like the following: (be careful about escaping quotes 
     "tool_input": {{{{
         "response": {{{{
                 "type_reasoning": "-input your reasoning in here for the type of question-", 
-                "type": "-input the type of answer that is expected based only on the question: position, binary, time, or text. Be sure to then fill in that selected category.",
+                "type": "-input the type of answer that is expected based only on the question: position, binary, time, duration, or text. Be sure to then fill in that selected category.",
                 "answer_reasoning": "-input your reasoning in here for the answer. If you do not know the answer, provide your best guess.-", 
                 "text": "--a text answer here. This should be as if you are responding to a user, so do not provide low-level details.--",
                 "binary": "yes/no",
                 "position": "[x,y,z]", 
                 "orientation": -0.92, 
-                "time": "5.3",
-                "duration": "2.4"
+                "time": 5.3,
+                "duration": 2.4
         }}}}
     }}}}
 }}}}

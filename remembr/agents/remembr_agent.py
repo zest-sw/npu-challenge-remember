@@ -30,13 +30,14 @@ import sys, os
 sys.path.append(sys.path[0] + '/..')
 
 
-from remembr.utils.util import file_to_string
+from remembr.utils.util import file_to_string, parse_json
 from remembr.tools.tools import *
 from remembr.tools.functions_wrapper import FunctionsWrapper
 
 from remembr.memory.memory import Memory
 
-from remembr.agents.agent import ANSWER_SCHEMA, Agent, AgentOutput
+from remembr.agents.agent import (ANSWER_SCHEMA, Agent, AgentOutput, answer_summary,
+                                  schema_for_type, settle_answer_type, validate_answer)
 from remembr.utils import trace
 
 
@@ -74,11 +75,6 @@ def inspect(state):
 
     # print(state)
     return state
-
-
-def parse_json(string):
-    parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
-    return json.loads(parsed)
 
 
 # How many turns the planner may spend calling tools before it must answer. Each
@@ -144,6 +140,7 @@ class ReMEmbRAgent(Agent):
         self.agent_prompt = file_to_string(top_level_path+'prompts/agent_system_prompt.txt')
         self.generate_prompt = file_to_string(top_level_path+'prompts/generate_system_prompt.txt')
         self.agent_gen_only_prompt = file_to_string(top_level_path+'prompts/agent_gen_system_prompt.txt')
+        self.answer_type_prompt = file_to_string(top_level_path+'prompts/answer_type_prompt.txt').strip()
 
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
@@ -479,6 +476,14 @@ class ReMEmbRAgent(Agent):
         question = messages[0].content \
                 + "\n Please responsed in the desired format."
         if self.llm_type.startswith('tt/'):
+            # Settle the answer type first, then answer under a grammar that cannot leave
+            # that type's field null. Without this the planner produced `type="position"`
+            # for a time question, scored unanswered, and eval retried the whole 3-turn
+            # tool loop five times -- up to 20 LLM calls for one question. NonAgent has
+            # had this since #40; this path was the gap.
+            answer_type = settle_answer_type(self.llm, messages[0].content,
+                                             self.answer_type_prompt)
+            trace.step("유형", answer_type if answer_type else "확정 실패 — permissive 스키마")
             gen_prompt = ChatPromptTemplate.from_messages(
                 [
                     ("system", GENERATE_SCHEMA_PROMPT),
@@ -489,7 +494,8 @@ class ReMEmbRAgent(Agent):
             model = gen_prompt | self.llm.bind(
                 response_format={
                     "type": "json_schema",
-                    "json_schema": {"name": "agent_output", "schema": ANSWER_SCHEMA},
+                    "json_schema": {"name": "agent_output",
+                                    "schema": schema_for_type(answer_type)},
                 },
                 max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
             )
@@ -529,24 +535,14 @@ class ReMEmbRAgent(Agent):
             else:
                 parsed = parse_json(response)
 
-            # then check it has all the required keys
-            keys_to_check_for = ["time", "text", "binary", "position", "duration"]
-
-            for key in keys_to_check_for:
-                if key not in parsed:
-                    raise ValueError("Missing all the required keys during generate. Retrying...")
-            
-            if (parsed['position'] is not None) and len(parsed['position']) != 3:
-                raise ValueError(f"Shape of position was incorrect. {parsed['position']}. Retrying...")
+            validate_answer(parsed)
 
         except Exception as error:
             trace.warn(f"답변 파싱 실패: {error}")
             trace.note(f"원본: {response[:160]}")
             raise ValueError("Generate call failed. Retrying...")
 
-        trace.step("답변", "  ".join(f"{k}={parsed[k]!r}" for k in
-                                    ('type', 'position', 'time', 'duration', 'binary')
-                                    if parsed.get(k) is not None))
+        trace.step("답변", answer_summary(parsed))
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
         return {"messages": [json.dumps(parsed)]}

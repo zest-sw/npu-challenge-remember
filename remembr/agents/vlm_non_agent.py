@@ -13,16 +13,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 sys.path.append(sys.path[0] + '/..')
 from tools.tools import format_docs
 from utils.util import file_to_string
+from remembr.utils.util import parse_json
 
-from remembr.agents.agent import Agent, AgentOutput
+from remembr.agents.agent import Agent, AgentOutput, validate_answer
 from remembr.memory.memory import Memory
 from remembr.memory.video_memory import VideoMemory, ImageMemoryItem
 
-
-def parse_json(string):
-    parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
-    parsed = json.loads(parsed)
-    return parsed
 
 def np_image_to_base64(image):
 
@@ -131,10 +127,7 @@ class VLMNonAgent(Agent):
                     parsed = parse_json(response)
 
                 # then check it has all the required keys
-                keys_to_check_for = ["time", "text", "binary", "position"]
-                for key in keys_to_check_for:
-                    if key not in parsed:
-                        raise ValueError("Missing all the required keys during generate. Retrying...")
+                validate_answer(parsed)
                 response = AgentOutput.from_dict(parsed)
 
             except Exception as e:

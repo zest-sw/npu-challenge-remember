@@ -36,11 +36,8 @@ from memory.video_memory import VideoMemory, ImageMemoryItem
 
 from tools.tools import format_docs
 from remembr.utils import trace
+from remembr.utils.util import parse_json  # noqa: F401  (kept importable here)
 
-
-def parse_json(string):
-    parsed = re.search(r"```json(.*?)```", string, re.DOTALL| re.IGNORECASE).group(1).strip()
-    return eval(parsed)
 
 # we can have binary, position-based, time-based, or description-based. let's answer accordingly
 def _num_or_none(v):
