@@ -350,14 +350,24 @@ class ReMEmbRAgent(Agent):
             "minItems": 1,
             "maxItems": 4,
         }
-        # Same schema minus the conversational option, for the turns that still have
-        # tool budget. Derived rather than written out again -- the two drifting apart
-        # is exactly the class of bug this file already had twice.
+        # A variant with the conversational reply kept but capped short, for the turns
+        # that still have tool budget.
+        #
+        # Do NOT remove the option. It is the loop's only exit signal: `should_continue`
+        # ends when a message has no tool_calls, and FunctionsWrapper produces such a
+        # message only for `__conversational_response`. Removing it was measured on the
+        # board and made things worse -- every question then burned all 3 turns before
+        # the budget cap forced an answer, 270s -> 389s per question.
+        #
+        # What is wasteful is its length, not its existence. The 500-character reply is
+        # discarded whenever it arrives next to a real tool call (FunctionsWrapper keeps
+        # the tool, see #35) and we still pay to generate it: ~125 tokens, about 31s at
+        # the measured decode rate. 40 characters is enough to say "I have what I need"
+        # and cuts that by roughly 90%.
         self.retrieval_only_tool_call_schema = json.loads(json.dumps(self.tool_call_schema))
-        self.retrieval_only_tool_call_schema["items"]["oneOf"] = [
-            option for option in self.retrieval_only_tool_call_schema["items"]["oneOf"]
-            if option["properties"]["tool"].get("const") != "__conversational_response"
-        ]
+        for option in self.retrieval_only_tool_call_schema["items"]["oneOf"]:
+            if option["properties"]["tool"].get("const") == "__conversational_response":
+                option["properties"]["tool_input"]["properties"]["response"]["maxLength"] = 40
 
     ### Nodes
 

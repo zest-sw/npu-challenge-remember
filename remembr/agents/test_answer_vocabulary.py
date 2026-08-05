@@ -66,22 +66,48 @@ def test_the_prompt_no_longer_invites_a_string_time():
     assert "a number or string" not in GENERATE_SCHEMA_PROMPT, GENERATE_SCHEMA_PROMPT
 
 
-def test_retrieval_only_schema_drops_the_conversational_option():
-    """On a turn with tool budget left, a conversational reply is generated and then
-    thrown away -- about 31s of decode for text nothing reads."""
+def conversational_cap(schema):
+    for option in schema["items"]["oneOf"]:
+        if option["properties"]["tool"].get("const") == "__conversational_response":
+            return option["properties"]["tool_input"]["properties"]["response"]["maxLength"]
+    return None
+
+
+def test_the_conversational_option_is_never_removed():
+    """It is the loop's only exit signal.
+
+    `should_continue` ends when a message has no tool_calls, and FunctionsWrapper makes
+    such a message only for `__conversational_response`. Removing it was measured on the
+    board and made things worse: every question then burned all 3 turns before the budget
+    cap forced an answer, 270s -> 389s per question.
+    """
     agent = built_agent()
-    full = [option["properties"]["tool"].get("const")
-            for option in agent.tool_call_schema["items"]["oneOf"]]
-    only = [option["properties"]["tool"].get("const")
-            for option in agent.retrieval_only_tool_call_schema["items"]["oneOf"]]
-    assert "__conversational_response" in full, full
-    assert "__conversational_response" not in only, only
-    # Every retrieval tool survives.
-    assert set(only) == set(full) - {"__conversational_response"}, (only, full)
+    for schema, name in ((agent.tool_call_schema, "tool_call_schema"),
+                         (agent.retrieval_only_tool_call_schema, "per-turn schema")):
+        options = [option["properties"]["tool"].get("const")
+                   for option in schema["items"]["oneOf"]]
+        assert "__conversational_response" in options, (name, options)
 
 
-def test_retrieval_only_schema_is_a_copy_not_a_view():
-    """Editing one must not edit the other."""
+def test_the_per_turn_schema_caps_the_conversational_reply():
+    """Its length is the waste, not its existence: the reply is discarded when it
+    arrives next to a real tool call (#35) and we still pay ~125 tokens to write it."""
+    agent = built_agent()
+    assert conversational_cap(agent.tool_call_schema) == 500
+    assert conversational_cap(agent.retrieval_only_tool_call_schema) == 40
+
+
+def test_the_per_turn_schema_keeps_every_retrieval_tool():
+    agent = built_agent()
+    full = {option["properties"]["tool"].get("const")
+            for option in agent.tool_call_schema["items"]["oneOf"]}
+    per_turn = {option["properties"]["tool"].get("const")
+                for option in agent.retrieval_only_tool_call_schema["items"]["oneOf"]}
+    assert per_turn == full, (per_turn, full)
+
+
+def test_the_per_turn_schema_is_a_copy_not_a_view():
+    """Editing one must not edit the other -- the cap is set on the copy only."""
     agent = built_agent()
     agent.retrieval_only_tool_call_schema["items"]["oneOf"].clear()
     assert agent.tool_call_schema["items"]["oneOf"], "the two share a list"
