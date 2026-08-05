@@ -374,6 +374,24 @@ class ReMEmbRAgent(Agent):
         # length is the waste -- the reply is discarded whenever it arrives next to a real
         # tool call (#35) and we still pay ~125 tokens -- so it is capped at 40 characters.
         self.turn_schema = self._schema_allowing(None, reply_length=40)
+        # Used while no memory has been retrieved yet. Searching by a time or a position
+        # needs a value, and the only honest sources are a retrieved memory or the
+        # question -- and the question's values are already ruled out (its position is
+        # where you stand now, its time is the present, neither is what you are looking
+        # for). With nothing retrieved there is no value to search by, so text is the
+        # only move that can work.
+        #
+        # This is enforced rather than asked because it was measured both ways. The
+        # prompt now says "Start with retrieve_from_text" in as many words, and the
+        # planner still spent all three turns on retrieve_from_time -- 07:52:11,
+        # 08:00:53, 08:00:00 -- and never called text search once. The instruction does
+        # not hold.
+        #
+        # Cost: a question that legitimately opens with a known time ("what did you see
+        # at 08:02?") loses its first turn. This dataset has none of those (0 of 30 name
+        # a clock time) and the remaining two turns can still do it.
+        self.no_memory_yet_schema = self._schema_allowing(
+            {"__conversational_response", "retrieve_from_text"}, reply_length=40)
 
     def _schema_allowing(self, tool_names, reply_length):
         """A copy of tool_call_schema keeping only `tool_names` (None keeps all)."""
@@ -428,7 +446,9 @@ class ReMEmbRAgent(Agent):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "tool_calls",
-                        "schema": self.turn_schema},
+                        "schema": (self.no_memory_yet_schema
+                                   if not self.memory.get_working_memory()
+                                   else self.turn_schema)},
                 }
             }
         model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
