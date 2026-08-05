@@ -51,6 +51,9 @@ def make_agent(reply):
     agent.chain = FakeChain(reply)
     agent.memory = FakeMemory()
     agent.prompt = "Context: {context}\nQuestion: {question}\nFormat: {output_format}"
+    # No grammar, so no answer-type pinning: query() keeps the permissive path, which
+    # is the one these tests are about.
+    agent.answer_schema = None
     return agent
 
 

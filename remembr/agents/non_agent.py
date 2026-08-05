@@ -19,6 +19,39 @@ def parse_json(string):
     parsed = json.loads(parsed)
     return parsed
 
+
+ANSWER_TYPES = ('position', 'time', 'duration', 'binary', 'text')
+
+# Which key the grammar must force to be non-null once the type is known. 'text' is
+# already required and non-nullable, so it needs no extra pinning.
+TYPE_FIELD = {'position': 'position', 'time': 'time', 'duration': 'duration', 'binary': 'binary'}
+
+# The answer for the pinned field, with null removed. Measured on the board: asked
+# where a statue was, the model replied
+#   type="text", position=null,
+#   text="I'm not sure where the statue ... is, but ... Based on my previous location
+#         at [-60.197, 196.541, -1.097]"
+# and that coordinate matches ground truth to three decimals. The answer was right;
+# only the field was empty, and eval scores an empty field as unanswered. The prompt
+# already says to fill position for a "where" question and the model does not break
+# that rule -- it escapes by choosing type="text", for which a null position is
+# consistent. So close the escape: settle the type in its own cheap call, then make
+# the grammar unable to leave that type's field null.
+NON_NULL_FIELD = {
+    'position': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 3, 'maxItems': 3},
+    'time': {'type': 'number'},
+    'duration': {'type': 'number'},
+    'binary': {'enum': ['yes', 'no']},
+}
+
+ANSWER_TYPE_SCHEMA = {
+    'type': 'object',
+    'properties': {'answer_type': {'enum': list(ANSWER_TYPES)}},
+    'required': ['answer_type'],
+    'additionalProperties': False,
+}
+
+
 class NonAgent(Agent):
     def __init__(self, llm_type='llama3', num_ctx=8192, temperature=0):
         
@@ -123,9 +156,52 @@ class NonAgent(Agent):
                     'json_schema': {'name': 'agent_output', 'schema': answer_schema},
                 }},
             )
+            self.answer_schema = answer_schema
         else:
             self.chain = ChatOllama(model=llm_type, num_ctx=num_ctx, temperature=temperature)
+            self.answer_schema = None
         self.prompt = file_to_string(str(os.path.dirname(__file__)) + '/../' + 'prompts/non_agent_system_prompt.txt')
+        self.answer_type_prompt = file_to_string(
+            str(os.path.dirname(__file__)) + '/../' + 'prompts/answer_type_prompt.txt').strip()
+
+    def answer_type_for(self, question: str) -> str | None:
+        """Which kind of answer the question wants, decided by the model.
+
+        A separate call on purpose, and a cheap one: the output is a single word, so
+        at the measured ~0.25 s/token it costs about a second. Deriving the type from
+        the question's wording in code would be a regex pretending to be a decision,
+        and taking it from the eval label would be reading the answer key.
+
+        Returns None when the type cannot be settled, in which case the caller keeps
+        the permissive schema rather than guessing.
+        """
+        if self.answer_schema is None:
+            return None
+        asked = [line.strip() for line in question.strip().splitlines() if line.strip()]
+        try:
+            reply = self.chain.bind(
+                response_format={'type': 'json_schema',
+                                 'json_schema': {'name': 'answer_type', 'schema': ANSWER_TYPE_SCHEMA}},
+                # One word of content, but the grammar lets the model open with
+                # whitespace and it does -- observed `'{\r\n\r\n  \r\n\r\n\r\n"items"'`.
+                # At 16 the newlines ate the budget and the JSON came back truncated
+                # ("Expecting value: line 5 column 16"), so leave room for them.
+                max_tokens=48,
+            ).invoke(f"{self.answer_type_prompt}\n\nQuestion: {asked[-1] if asked else question}")
+            answer_type = json.loads(reply.content).get('answer_type')
+        except Exception as error:  # noqa: BLE001
+            print(f"NonAgent: could not settle the answer type ({error}); using the permissive schema")
+            return None
+        return answer_type if answer_type in ANSWER_TYPES else None
+
+    def schema_for(self, answer_type):
+        """The answer schema with `answer_type`'s field pinned non-null."""
+        if self.answer_schema is None or answer_type not in TYPE_FIELD:
+            return self.answer_schema
+        schema = json.loads(json.dumps(self.answer_schema))  # cheap deep copy
+        schema['properties']['type'] = {'const': answer_type}
+        schema['properties'][TYPE_FIELD[answer_type]] = NON_NULL_FIELD[answer_type]
+        return schema
 
 
     def set_memory(self, memory: Memory):
@@ -157,6 +233,18 @@ class NonAgent(Agent):
         filled_prompt = prompt.invoke({'context': self.memory.memory_to_string(self.memory.get_working_memory()), 'question':question, 'output_format':output_format})
         inputs = filled_prompt.text
 
+        # Settle the answer type first, then answer under a grammar that cannot leave
+        # that type's field null. Falls back to the permissive schema (and so to the
+        # old behaviour) whenever the type cannot be settled.
+        answer_type = self.answer_type_for(question)
+        chain = self.chain
+        if answer_type in TYPE_FIELD:
+            chain = self.chain.bind(response_format={
+                'type': 'json_schema',
+                'json_schema': {'name': 'agent_output', 'schema': self.schema_for(answer_type)},
+            })
+        print(f"NonAgent answer type: {answer_type}")
+
         # Cap the retries. This loop was `while True`, which hangs outright when
         # the model cannot produce parseable output: at temperature=0 every retry
         # is byte-identical, so a single bad generation repeats forever. Measured
@@ -172,7 +260,7 @@ class NonAgent(Agent):
 
         for _ in range(MAX_PARSE_RETRIES):
 
-            response = self.chain.invoke(inputs)
+            response = chain.invoke(inputs)
             response = ''.join(response.content.splitlines())
             try:
                 if '```json' not in response:

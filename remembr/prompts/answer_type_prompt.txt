@@ -1,0 +1,9 @@
+A robot is asked a question about what it saw and where it went. Decide which single kind of answer the question asks for.
+
+position - asks where something is, or asks to be taken somewhere. "Where is X" is always position, however long the description of X is, and even if the robot would have to describe the place to say where it is.
+time     - asks when something happened
+duration - asks how long something took, or how long the robot has been somewhere
+binary   - asks a yes/no question
+text     - asks what something looks like, or none of the above
+
+Reply with only that one word.
