@@ -13,18 +13,24 @@ from remembr.utils import trace
 from langchain_community.vectorstores import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# LangChain installs its own filter for deprecation warnings, so `-W ignore` and
-# PYTHONWARNINGS do not silence them. `Milvus` is constructed three times per question
-# (text, position, time), so its notice drowned the pipeline trace it sits next to.
-# Silencing it here, at the one place we construct the deprecated class, rather than
-# globally. Migrating to langchain-milvus is the real fix but pulls a new dependency
-# into a pinned stack (see AGENTS.md on the venv dependency trap) -- tracked separately.
-try:
-    from langchain_core._api.deprecation import LangChainDeprecationWarning
-
-    warnings.filterwarnings("ignore", category=LangChainDeprecationWarning,
-                            module=r".*milvus_memory")
-except Exception:  # noqa: BLE001  -- never let a log tweak break imports
+# Both LangChain and pymilvus install their own warning filters, so `-W ignore` and
+# PYTHONWARNINGS do not silence their deprecation notices. They fire on every
+# MilvusMemory.reset(), which happens once per eval question, and each notice prints two
+# lines (the message and the offending source line) -- they buried the pipeline trace
+# they sit next to.
+#
+# Filtered by category with no module restriction on purpose: the warnings are raised
+# inside pymilvus and langchain internals, not here, so a module pattern misses them.
+# Migrating off the deprecated `Milvus` class is the real fix but pulls a new dependency
+# into a pinned stack (AGENTS.md, venv dependency trap) -- tracked separately.
+for _warning_class in ("langchain_core._api.deprecation:LangChainDeprecationWarning",
+                       "pymilvus:PyMilvusDeprecationWarning"):
+    try:
+        _module, _name = _warning_class.split(":")
+        warnings.filterwarnings(
+            "ignore", category=getattr(__import__(_module, fromlist=[_name]), _name))
+    except Exception:  # noqa: BLE001  -- never let a log tweak break imports
+        pass
     pass
 
 from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Collection, utility
