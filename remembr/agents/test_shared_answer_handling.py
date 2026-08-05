@@ -102,12 +102,31 @@ def test_both_answer_paths_pin_the_settled_type():
         assert "schema_for_type" in source, f"{path} does not pin the type's field"
 
 
-def test_schema_for_type_pins_the_field_and_the_type():
-    for answer_type, field in TYPE_FIELD.items():
+def test_schema_for_type_pins_the_type_for_every_type():
+    """Every type in ANSWER_TYPES, not just the four in TYPE_FIELD. This test used to
+    iterate TYPE_FIELD, which is exactly the set the bug did not cover: `text` is not in
+    it, so `schema_for_type("text")` returned the shared permissive schema and the model
+    answered `type="time", time=5` to a "where" question whose type had settled to text."""
+    for answer_type in ANSWER_TYPES:
         schema = schema_for_type(answer_type)
         assert schema["properties"]["type"] == {"const": answer_type}, answer_type
+        assert schema is not ANSWER_SCHEMA, answer_type
+
+
+def test_schema_for_type_pins_the_typed_field_non_null():
+    for answer_type, field in TYPE_FIELD.items():
+        schema = schema_for_type(answer_type)
         branches = schema["properties"][field].get("anyOf", [schema["properties"][field]])
         assert not any(b.get("type") == "null" for b in branches), (answer_type, branches)
+
+
+def test_the_type_is_settled_at_temperature_zero():
+    """Choosing among five words is classification, not generation. At the eval default
+    of 0.7 it sampled `text` for "Where is X" against instructions that say that is
+    always position -- and the whole answer shape follows from this one word."""
+    source = read("remembr/agents/agent.py")
+    settle = source.split("def settle_answer_type")[1].split("\ndef ")[0]
+    assert "temperature=0" in settle, settle
 
 
 def test_schema_for_type_leaves_the_shared_schema_alone():

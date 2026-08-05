@@ -137,6 +137,11 @@ def settle_answer_type(chain, question: str, instructions: str):
 
     Returns None when the type cannot be settled, so the caller keeps the permissive
     schema rather than guessing.
+
+    Decoded at temperature 0 regardless of the chain's setting: this is a classification
+    into five words, not generation, and sampling it is a coin flip on the answer's whole
+    shape. At 0.7 "Where is the yellow police call pole?" settled to `text` even though
+    the instructions say "Where is X" is always position.
     """
     import json as _json
 
@@ -146,6 +151,7 @@ def settle_answer_type(chain, question: str, instructions: str):
                              'json_schema': {'name': 'answer_type',
                                              'schema': ANSWER_TYPE_SCHEMA}},
             max_tokens=ANSWER_TYPE_MAX_TOKENS,
+            temperature=0,
         ).invoke(f"{instructions}\n\nQuestion: {asked_line(question)}")
         settled = _json.loads(reply.content).get('answer_type')
     except Exception as error:  # noqa: BLE001
@@ -157,14 +163,23 @@ def settle_answer_type(chain, question: str, instructions: str):
 
 
 def schema_for_type(answer_type):
-    """ANSWER_SCHEMA with `answer_type`'s field pinned non-null and `type` fixed."""
+    """ANSWER_SCHEMA with `type` fixed, and that type's field pinned non-null.
+
+    Pinned for every type in ANSWER_TYPES, not just the four in TYPE_FIELD. `text` is
+    not in TYPE_FIELD -- its field is already required and non-null -- and the guard
+    used to key on TYPE_FIELD, so a settled `text` fell through to the shared permissive
+    schema and lost the `type` pin as well. Measured: the type settled to `text`, the
+    trace said `text`, and the model answered `type="time", time=5` to "Where is the
+    yellow police call pole?".
+    """
     import json as _json
 
-    if answer_type not in TYPE_FIELD:
+    if answer_type not in ANSWER_TYPES:
         return ANSWER_SCHEMA
     schema = _json.loads(_json.dumps(ANSWER_SCHEMA))  # cheap deep copy
     schema['properties']['type'] = {'const': answer_type}
-    schema['properties'][TYPE_FIELD[answer_type]] = NON_NULL_FIELD[answer_type]
+    if answer_type in TYPE_FIELD:
+        schema['properties'][TYPE_FIELD[answer_type]] = NON_NULL_FIELD[answer_type]
     return schema
 
 
