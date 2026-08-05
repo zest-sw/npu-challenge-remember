@@ -144,6 +144,8 @@ class ReMEmbRAgent(Agent):
 
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
+        # (tool name, args) already run for this question, so a repeat can be dropped.
+        self.tool_calls_made = set()
 
         self.chat_history = ChatMessageHistory()
 
@@ -198,6 +200,17 @@ class ReMEmbRAgent(Agent):
 
 
     def create_tools(self, memory):
+        # How far back the memory actually goes, in minutes, so the grammar can forbid
+        # asking beyond it. Measured on the board: for a 7.5-minute recording the planner
+        # asked for 27, 48 and 40 minutes ago. Those land outside the window, Milvus
+        # returns the boundary, and the turn is wasted. Telling it in prose did not work
+        # (#48); making the number ungenerable does.
+        window_minutes = None
+        span = getattr(memory, 'now_offset', None)
+        if span:
+            window_minutes = max(1, int(round(float(span) / 60.0)))
+        self.window_minutes = window_minutes
+
 
         template = "At time={{time}} seconds, the robot was at an average position of {{position}} with an average orientation of {{theta}} radians. "
         template += "The robot saw the following: {{page_content}}"
@@ -244,9 +257,14 @@ class ReMEmbRAgent(Agent):
             # coroutine= ... <- you can specify an async method if desired as well
         )
 
+        _time_hint = ("How many minutes ago, as a number. 0 is now. "
+                      + (f"Your memory only goes back {window_minutes} minutes, so this "
+                         f"must be between 0 and {window_minutes}."
+                         if window_minutes else
+                         "The question tells you the current time, so work back from it."))
+
         class TimeRetrieverInput(BaseModel):
-            x: float = Field(description="How many minutes ago, as a number. 0 is now. \
-                                The question tells you the current time, so work back from it.")
+            x: float = Field(description=_time_hint)
 
         # position-based tool
         self.time_retriever_tool = StructuredTool.from_function(
@@ -331,7 +349,9 @@ class ReMEmbRAgent(Agent):
                             "tool_input": {
                                 "type": "object",
                                 "properties": {
-                                    "x": {"type": "number"}
+                                    "x": ({"type": "number", "minimum": 0,
+                                           "maximum": window_minutes}
+                                          if window_minutes else {"type": "number"})
                                 },
                                 "required": ["x"],
                                 "additionalProperties": False,
@@ -345,24 +365,43 @@ class ReMEmbRAgent(Agent):
             "minItems": 1,
             "maxItems": 4,
         }
-        # A variant with the conversational reply kept but capped short, for the turns
-        # that still have tool budget.
+        # Per-turn variants of the schema above, because what the planner should be
+        # allowed to do changes with the turn.
         #
-        # Do NOT remove the option. It is the loop's only exit signal: `should_continue`
-        # ends when a message has no tool_calls, and FunctionsWrapper produces such a
-        # message only for `__conversational_response`. Removing it was measured on the
-        # board and made things worse -- every question then burned all 3 turns before
-        # the budget cap forced an answer, 270s -> 389s per question.
+        # Turn 1 is text-only. To answer anything about an event you have to find the
+        # event first, and you can only search by time if you already know the time -- so
+        # a "when did X happen" question searching by time has the order backwards. This
+        # dataset makes that concrete: 0 of 30 questions name a clock time, yet the
+        # planner spent whole 3-turn budgets on `retrieve_from_time`, never once calling
+        # `retrieve_from_text`, and answered from memories it had not looked up. Telling
+        # it in prose does not hold (#48); the grammar does.
         #
-        # What is wasteful is its length, not its existence. The 500-character reply is
-        # discarded whenever it arrives next to a real tool call (FunctionsWrapper keeps
-        # the tool, see #35) and we still pay to generate it: ~125 tokens, about 31s at
-        # the measured decode rate. 40 characters is enough to say "I have what I need"
-        # and cuts that by roughly 90%.
-        self.retrieval_only_tool_call_schema = json.loads(json.dumps(self.tool_call_schema))
-        for option in self.retrieval_only_tool_call_schema["items"]["oneOf"]:
+        # Later turns get everything, so it can follow up by the time or position a
+        # retrieved memory gave it -- which is what those tools are for.
+        #
+        # The conversational reply stays in every variant: it is the loop's only exit
+        # signal (`should_continue` ends on a message with no tool_calls, and
+        # FunctionsWrapper only produces one for `__conversational_response`). Removing it
+        # was measured and made things worse, 270s -> 389s per question, because every
+        # question then burned all 3 turns. Its *length* is the waste -- the reply is
+        # discarded whenever it arrives next to a real tool call (#35) and we still pay
+        # ~125 tokens to write it -- so it is capped at 40 characters per turn instead.
+        self.first_turn_schema = self._schema_allowing(
+            {"__conversational_response", "retrieve_from_text"}, reply_length=40)
+        self.later_turn_schema = self._schema_allowing(None, reply_length=40)
+
+    def _schema_allowing(self, tool_names, reply_length):
+        """A copy of tool_call_schema keeping only `tool_names` (None keeps all)."""
+        schema = json.loads(json.dumps(self.tool_call_schema))
+        options = schema["items"]["oneOf"]
+        if tool_names is not None:
+            options = [o for o in options
+                       if o["properties"]["tool"].get("const") in tool_names]
+            schema["items"]["oneOf"] = options
+        for option in options:
             if option["properties"]["tool"].get("const") == "__conversational_response":
-                option["properties"]["tool_input"]["properties"]["response"]["maxLength"] = 40
+                option["properties"]["tool_input"]["properties"]["response"]["maxLength"] = reply_length
+        return schema
 
     ### Nodes
 
@@ -402,8 +441,10 @@ class ReMEmbRAgent(Agent):
             tool_kwargs = {
                 "response_format": {
                     "type": "json_schema",
-                    "json_schema": {"name": "tool_calls",
-                                    "schema": self.retrieval_only_tool_call_schema},
+                    "json_schema": {
+                        "name": "tool_calls",
+                        "schema": (self.first_turn_schema if self.agent_call_count == 0
+                                   else self.later_turn_schema)},
                 }
             }
         model = model.bind_tools(tools=self.tool_definitions, **tool_kwargs)
@@ -436,6 +477,28 @@ class ReMEmbRAgent(Agent):
         response = model.invoke({"question": question, "chat_history": messages[:]})
 
         turn = self.agent_call_count + 1
+
+        # A turn that only repeats a search already run is the loop telling us it has
+        # nothing left to look for. Measured on the board: with a 3-turn budget the
+        # planner asked `retrieve_from_time(48)` on turns 1 and 3, and 8 on turns 2 and 3
+        # of another question -- identical arguments, identical results, a third of the
+        # budget spent twice. `previous_tool_requests` does tell it what it already used
+        # (that was #48's fix) and it repeats anyway, so drop the repeats here instead of
+        # asking again. With every call dropped the message has no tool_calls left, which
+        # `should_continue` already routes to `generate` -- so a repeat becomes an early
+        # exit rather than a wasted turn.
+        if response.tool_calls:
+            fresh = []
+            for tool_call in response.tool_calls:
+                signature = (tool_call['name'], repr(tool_call['args']))
+                if signature in self.tool_calls_made:
+                    trace.step(f"턴{turn}", f"{tool_call['name']}({tool_call['args']}) — 중복, 건너뜀")
+                    continue
+                self.tool_calls_made.add(signature)
+                fresh.append(tool_call)
+            if len(fresh) != len(response.tool_calls):
+                response.tool_calls = fresh
+
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call['name'] != "__conversational_response":
@@ -545,6 +608,7 @@ class ReMEmbRAgent(Agent):
         trace.step("답변", answer_summary(parsed))
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
+        self.tool_calls_made = set()
         return {"messages": [json.dumps(parsed)]}
 
 
