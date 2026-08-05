@@ -28,6 +28,37 @@ import json
 import tqdm
 
 
+# A caption is an entry in a search index, not a reply to a person. The paper's prompt
+# asks the VLM to "describe in detail" and "think step by step", and both Qwen2.5-VL-3B
+# and Qwen3-VL-8B answer it as an assistant would: 271/272 captions opened with
+# "Certainly! Let's break down the image description step by step:" and ran to a median
+# 1182 characters of markdown lists (#50). Every caption then shared the same opening,
+# which is dead weight in the embedding and dead tokens in the answer context.
+#
+# No worked example here on purpose. A one-shot example of a campus scene would name
+# objects that really are in this dataset (a bench, a utility box, a drainage grate),
+# and #27 measured this model copying example values verbatim into its output. So the
+# shape is given as a skeleton and the content is left to the frames.
+TERSE_QUERY = (
+    "You are the camera on a robot moving through a university campus. "
+    "Write what is in view as one entry in a search index.\n"
+    "\n"
+    "Shape: \"<where this is>. <what is there and where it sits relative to the rest>. "
+    "<people and what they are doing>.\"\n"
+    "\n"
+    "Rules:\n"
+    "- Two or three plain sentences. Under 60 words total.\n"
+    "- Name concrete things: what they are, what they are made of, where they are.\n"
+    "- Say how many people and what they are doing, or say there are none.\n"
+    "- No greeting, no preamble, no markdown, no headings, no numbered or bulleted lists.\n"
+    "- Do not write \"the image\", \"the photo\", \"appears to be\", \"likely\", "
+    "\"step by step\", or anything about yourself.\n"
+    "- Start with the place. First word is a noun."
+)
+
+CAPTION_STYLES = {'paper': None, 'terse': TERSE_QUERY}
+
+
 def build_captioner(args):
     """Pick the captioner backend. Both implement Captioner.caption(images)->str,
     so the rest of the preprocessing pipeline is identical regardless of choice.
@@ -127,6 +158,10 @@ def run_video_in_segs(args):
         print(f"[resume] {len(done_ids)} captions loaded from checkpoint; continuing")
     partial_fh = open(partial_file, 'a')
 
+    if args.max_segments:
+        segments = segments[:args.max_segments]
+        print(f"[probe] 앞 {len(segments)}개 구간만 캡션한다")
+
     for i, file_names in tqdm.tqdm(enumerate(segments), total=len(segments)):
 
         if file_names[0] in done_ids:
@@ -200,6 +235,14 @@ def run_video_in_segs(args):
 
     partial_fh.close()
 
+    # A probe is not a run. Writing the final JSON from 3 captions would make the top-of-
+    # function "captions already exist" check skip the real run forever; leaving the
+    # checkpoint in place instead lets the full run pick up the probe's captions.
+    if args.max_segments:
+        print(f"[probe] {len(outputs)}개 캡션을 체크포인트에 남겼다 -> {partial_file}")
+        print("[probe] 최종 JSON 은 쓰지 않는다. 전체 실행이 여기서 이어받는다.")
+        return
+
     # now save the outputs into a json (same path checked at the top)
     with open(out_file, 'w') as f:
         json.dump(outputs, f, cls=NumpyEncoder)
@@ -241,6 +284,12 @@ if __name__ == "__main__":
     parser.add_argument("--captioner", type=str, default="vila", choices=["vila", "tenstorrent"])
 
     parser.add_argument("--seconds_per_caption", type=int, default=3)
+    # 'paper' keeps the original --query verbatim; 'terse' swaps in TERSE_QUERY (#50).
+    parser.add_argument("--caption_style", type=str, default="paper",
+                        choices=sorted(CAPTION_STYLES))
+    # Caption only the first N segments and stop. For probing a prompt before
+    # committing the board: 272 captions at 92 s each is about 7 hours.
+    parser.add_argument("--max_segments", type=int, default=0)
 
     parser.add_argument("--video-file", type=str, default=None)
     parser.add_argument("--num-video-frames", type=int, default=6)
@@ -264,6 +313,10 @@ if __name__ == "__main__":
     else:
         # trust the default conv_mode
         args.conv_mode = args.conv_mode
+
+    styled = CAPTION_STYLES[args.caption_style]
+    if styled is not None:
+        args.query = styled
 
     run_video_in_segs(args)
 
