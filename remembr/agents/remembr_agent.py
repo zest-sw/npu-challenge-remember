@@ -63,17 +63,10 @@ ANSWER_SCHEMA = {
                 {'type': 'null'},
             ]
         },
-        'orientation': {
-            'anyOf': [
-                {
-                    'type': 'array',
-                    'items': {'type': 'number'},
-                    'minItems': 1,
-                    'maxItems': 1,
-                },
-                {'type': 'null'},
-            ]
-        },
+        # A number, not a 1-element array: AgentOutput declares `orientation: float`,
+        # MemoryItem carries `theta: float`, and the memory string the model reads says
+        # "with an average orientation of {theta} radians".
+        'orientation': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
         # A number is what eval wants; the string branch stays because upstream
         # tolerates "5.3" and eval()s it, but it is now bounded.
         'time': {
@@ -104,7 +97,7 @@ Use null for any field that does not apply.
 - text: a short answer to the user
 - binary: yes/no for binary questions, otherwise null
 - position: an array like [x, y, z] for where questions, otherwise null
-- orientation: an array like [yaw] when position is provided, otherwise null
+- orientation: the yaw in radians as a number when position is provided, otherwise null
 - time: a number or string for minutes-ago answers, otherwise null
 - duration: a number or string for duration answers, otherwise null"""
 

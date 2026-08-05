@@ -28,7 +28,7 @@ Your response should look like the following: (be careful about escaping quotes 
                 "text": "--a text answer here. This should be as if you are responding to a user, so do not provide low-level details.--",
                 "binary": "yes/no",
                 "position": "[x,y,z]", 
-                "orientation": "[euler_rotation]", 
+                "orientation": -0.92, 
                 "time": "5.3",
                 "duration": "2.4"
         }}}}
@@ -55,7 +55,7 @@ Question: Where is the closest way to get upstairs?
                 "text": "The closest way to go upstairs is to take the elevator at (1,1,0)",
                 "binary": null,
                 "position": "[1.54,2.14,0.0]",
-                "orientation": "[-.92]", 
+                "orientation": -0.92, 
                 "time": null,
                 "duration": null
         }}}}
@@ -78,7 +78,7 @@ Question: Can you take me to the green exit sign?
                 "answer_reasoning": "I have not seen a green exit sign, however, I have seen exits that might be helpful. I will select one of those as my answer",
                 "binary": null,
                 "position": "[1.54,2.14,0.0]",
-                "orientation": "[-.92]", 
+                "orientation": -0.92, 
                 "time": null,
                 "duration": null
         }}}}

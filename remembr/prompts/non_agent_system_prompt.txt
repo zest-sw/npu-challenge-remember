@@ -28,7 +28,7 @@ Question: Where is the closest way to get upstairs?
     "text": "The closest way to go upstairs is to take the elevator at (1,1,0)",
     "binary": null,
     "position": [1, 1, 0],
-    "orientation": "[euler_rotation]", 
+    "orientation": -0.92, 
     "time": null
 }}
 ```
@@ -50,7 +50,7 @@ Your response should look like the following: (be careful about escaping quotes 
     "text": "--a text answer here--",
     "binary": "yes/no",
     "position": [x, y, z],
-    "orientation": "[-.92]",
+    "orientation": -0.92,
     "time": "5.3",
     "duration": "2.4"
 }}

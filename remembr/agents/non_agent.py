@@ -79,12 +79,16 @@ class NonAgent(Agent):
                             {'type': 'null'},
                         ]
                     },
-                    'orientation': {
-                        'anyOf': [
-                            {'type': 'string', 'maxLength': 40},
-                            {'type': 'null'},
-                        ]
-                    },
+                    # A number, because that is what this field holds: AgentOutput
+                    # declares `orientation: float`, MemoryItem carries `theta: float`,
+                    # and the memory string the model reads says "with an average
+                    # orientation of {theta} radians". It was a string here, an
+                    # [yaw] array in ReMEmbRAgent, and "[euler_rotation]" in the
+                    # prompt -- three spellings of one float, and nothing scores the
+                    # field, so nobody noticed until it ran away. Saying "number"
+                    # removes the runaway instead of capping it: the grammar for a
+                    # number is finite by construction, so no maxLength is needed.
+                    'orientation': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
                     # A number is what eval wants; the string branch stays because
                     # upstream tolerates "5.3" and eval()s it, but it is now bounded.
                     'time': {
