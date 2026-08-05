@@ -50,6 +50,12 @@ TERSE_QUERY = (
     "- Two or three plain sentences. Under 60 words total.\n"
     "- Name concrete things: what they are, what they are made of, where they are.\n"
     "- Say how many people and what they are doing, or say there are none.\n"
+    # The questions ask for named places ("the Bill and Melinda Gates Computer Science
+    # building") and for one-off objects ("the yellow police call pole"). Of the 272
+    # captions the paper prompt produced, 33 named a building and exactly 1 mentioned
+    # the call pole -- retrieval cannot find what was never written down.
+    "- Copy any words visible on signs, doors or banners exactly, in quotes.\n"
+    "- Name a distinctive one-off object if you see one, even a small one.\n"
     "- No greeting, no preamble, no markdown, no headings, no numbered or bulleted lists.\n"
     "- Do not write \"the image\", \"the photo\", \"appears to be\", \"likely\", "
     "\"step by step\", or anything about yourself.\n"
@@ -159,8 +165,14 @@ def run_video_in_segs(args):
     partial_fh = open(partial_file, 'a')
 
     if args.max_segments:
-        segments = segments[:args.max_segments]
-        print(f"[probe] 앞 {len(segments)}개 구간만 캡션한다")
+        # Spread the sample over the whole recording rather than taking the first N.
+        # The first three segments are three seconds apart, from one spot, and produced
+        # near-identical captions -- which says nothing about whether captions differ
+        # from each other across the route, the one thing retrieval depends on.
+        stride = max(1, len(segments) // args.max_segments)
+        segments = segments[::stride][:args.max_segments]
+        print(f"[probe] 녹화 전체에서 {len(segments)}개 구간을 고르게 뽑아 캡션한다 "
+              f"(구간 {stride}개마다 하나)")
 
     for i, file_names in tqdm.tqdm(enumerate(segments), total=len(segments)):
 
