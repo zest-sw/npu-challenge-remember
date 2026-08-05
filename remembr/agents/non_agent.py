@@ -45,14 +45,27 @@ class NonAgent(Agent):
                     'type': {'type': 'string'},
                     'text': {'type': 'string', 'maxLength': 300},
                     'binary': {'type': ['string', 'null']},
-                    # maxLength matters here, it is not cosmetic. Without it the
-                    # grammar permits an unbounded string and the model runs away
-                    # inside it: observed on the board, position filled with
-                    # "[-55.74, 86.31, -2.11], [0, 0, 0], [0, 0, 1], [0, 0, 0], ..."
-                    # until max_tokens cut the JSON mid-string, so every parse
-                    # raised "Unterminated string" and the answer was never usable.
-                    # A 3-D coordinate needs ~60 characters at full float precision.
-                    'position': {'type': ['string', 'null'], 'maxLength': 80},
+                    # A coordinate is three numbers, so let the grammar say so
+                    # rather than accepting any string. As a string this field let
+                    # through shapes that are scored as if they were answers:
+                    #   "[-55.74, 86.31, -2.11], [0, 0, 0], [0, 0, 1], ..."  ran on
+                    #     until max_tokens cut the JSON mid-string, so every parse
+                    #     raised "Unterminated string" (fixed before by maxLength,
+                    #     but the real problem was the type)
+                    #   "[[-22.67, 37.41, -1.5]]"  a nested list, which eval()s fine
+                    #     and then scores against a 3-vector by numpy broadcasting,
+                    #     producing a meaningless distance
+                    # ReMEmbRAgent's ANSWER_SCHEMA already constrains it this way and
+                    # runs against the same server, so the shape is known to work with
+                    # constrained decoding. null stays allowed: an honest miss that
+                    # eval counts as unanswered beats a number that gets scored.
+                    'position': {
+                        'anyOf': [
+                            {'type': 'array', 'items': {'type': 'number'},
+                             'minItems': 3, 'maxItems': 3},
+                            {'type': 'null'},
+                        ]
+                    },
                     'orientation': {'type': ['string', 'null'], 'maxLength': 40},
                     'time': {'type': ['number', 'string', 'null']},
                     'duration': {'type': ['number', 'string', 'null']},
@@ -92,7 +105,7 @@ class NonAgent(Agent):
                                 "type": "-input the type of answer that is expected based only on the question: position, binary, time, or text. Be sure to then fill in that selected category.",
                                 "text: "--a text answer here--",
                                 "binary: "yes/no",
-                                "position: "[x,y,z]",
+                                "position": [x, y, z],
                                 "time: "5.3",
                                 }"""
 
