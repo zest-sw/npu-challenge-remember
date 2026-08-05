@@ -25,10 +25,28 @@ DEFAULT_PROMPT = (
 )
 
 
+# Frames went to the server at the camera's full 1224x1024, which Qwen's processor turns
+# into ~1200 image tokens -- over TT_VLM_MAX_SEQ_LEN (1024) before the text prompt is even
+# counted. Every caption request had been decoding past the KV cache, which is undefined
+# and eventually spins a thread inside ttnn and wedges the board. Measured prefill for the
+# terse prompt against the long side of the frame:
+#
+#     1224 -> 1429    896 -> 857    768 -> 693    640 -> 553    512 -> 421
+#
+# 768 leaves ~200 tokens of headroom at max_gen_len 128. Raise it (and TT_VLM_MAX_SEQ_LEN
+# with it) if the captions turn out to be missing text on signs -- the server now rejects
+# an over-budget request with a clear message instead of hanging, so this is safe to tune.
+MAX_IMAGE_LONG_SIDE = int(os.environ.get("TT_VLM_IMAGE_LONG_SIDE", "768"))
+
+
 def _encode_image(image: Image.Image) -> str:
-    """PIL image -> base64-encoded JPEG string (RGB)."""
+    """PIL image -> base64-encoded JPEG string (RGB), downscaled to fit the token budget."""
+    image = image.convert("RGB")
+    if MAX_IMAGE_LONG_SIDE and max(image.size) > MAX_IMAGE_LONG_SIDE:
+        image = image.copy()
+        image.thumbnail((MAX_IMAGE_LONG_SIDE, MAX_IMAGE_LONG_SIDE), Image.LANCZOS)
     buffer = BytesIO()
-    image.convert("RGB").save(buffer, format="JPEG")
+    image.save(buffer, format="JPEG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
