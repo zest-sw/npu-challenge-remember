@@ -35,6 +35,7 @@ from memory.text_memory import TextMemory
 from memory.video_memory import VideoMemory, ImageMemoryItem
 
 from tools.tools import format_docs
+from remembr.utils import trace
 
 
 def parse_json(string):
@@ -145,7 +146,9 @@ def answer_squad_question(model, question, qa_instance, search_events=None):
     if search_events is None:
         search_events = []
 
-    print(f'Question: {question}')
+    if not trace.ENABLED:
+        if not trace.ENABLED:
+            print(f'Question: {question}')
 
     parsed = None
     out_error = None
@@ -186,8 +189,14 @@ def answer_squad_question(model, question, qa_instance, search_events=None):
             attempt_record['status'] = 'ok'
             attempt_record['unanswered'] = bool(out_error.get('unanswered'))
 
-            print("Attempt elapsed", last_attempt_elapsed)
-            print("Query elapsed total", elapsed + last_attempt_elapsed)
+            if trace.ENABLED:
+                mark = "미답변" if out_error.get("unanswered") else " ".join(
+                    f"{k}={v:.1f}" if isinstance(v, float) else f"{k}={v}"
+                    for k, v in out_error.items())
+                trace.step("채점", f"{mark}  attempts={attempts}  {last_attempt_elapsed:.1f}s", arrow=" ")
+            else:
+                print("Attempt elapsed", last_attempt_elapsed)
+                print("Query elapsed total", elapsed + last_attempt_elapsed)
 
         except Exception as e:
             last_attempt_elapsed = time.perf_counter() - attempt_start
@@ -368,11 +377,9 @@ def main(args):
     num_duration = 0
     
     responses = []
-    for i in tqdm.tqdm(range(0, len(data)), total=len(data)):
+    for i in tqdm.tqdm(range(0, len(data)), total=len(data), disable=trace.ENABLED):
 
         eval_latency_start = time.perf_counter()
-
-        print(f"Evaluating {i} out of {len(data)}")
 
         qa_instance = data[i]
         question = qa_instance['question']
@@ -380,6 +387,10 @@ def main(args):
         start_time = qa_instance['start_time']
         answers = qa_instance['answers']
         id = qa_instance['id']
+        asked = [line.strip() for line in question.strip().splitlines() if line.strip()]
+        trace.question(i + 1, len(data), qa_instance['type'], asked[-1] if asked else question)
+        if not trace.ENABLED:
+            print(f"Evaluating {i} out of {len(data)}")
 
         if (qa_instance['type'] == 'text'):
             print("Skipping text questions for now")
@@ -398,7 +409,7 @@ def main(args):
             print("Length of Instance Captions is 0. It should not be")
             import pdb; pdb.set_trace()
 
-        print("HISTORY LENGTH", len(instance_captions))
+        trace.note(f"캡션 {len(instance_captions)}개 적재") if trace.ENABLED else print("HISTORY LENGTH", len(instance_captions))
 
         search_events = []
         instrument_memory_search(memory, search_events)
@@ -435,13 +446,16 @@ def main(args):
             if 'duration_error' in error_dict:
                 running_duration_error += error_dict['duration_error']
 
-        print("Question:", question)
+        if not trace.ENABLED:
+            print("Question:", question)
         if 'response' in out_dict:
-            print("Response:", out_dict['response'])
-        print("Running Binary QA accuracy", running_successes/(num_binary+1))
-        print("Running Spatial Error", running_pos_error/(num_position+1))
-        print("Running Temporal Error", running_time_error/(num_time+1))
-        print("Running Duration Error", running_duration_error/(num_duration+1))
+            if not trace.ENABLED:
+                print("Response:", out_dict['response'])
+        if not trace.ENABLED:
+            print("Running Binary QA accuracy", running_successes/(num_binary+1))
+            print("Running Spatial Error", running_pos_error/(num_position+1))
+            print("Running Temporal Error", running_time_error/(num_time+1))
+            print("Running Duration Error", running_duration_error/(num_duration+1))
 
         print()
 

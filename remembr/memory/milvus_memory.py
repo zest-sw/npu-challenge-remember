@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 import numpy as np
 
 from remembr.memory.memory import Memory, MemoryItem
+from remembr.utils import trace
 
 from langchain_community.vectorstores import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -16,6 +17,22 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
 
+
+
+
+def _caption_gist(caption: str, width: int = 64) -> str:
+    """A readable slice of a caption, for the trace only.
+
+    Captions from this VLM open with a fixed assistant preamble ending in a colon
+    ("Certainly! Let's break down the image description step by step:", see #50), so
+    every line would look identical without skipping it. Display heuristic, not a fix
+    -- the underlying captions still carry the preamble.
+    """
+    flat = " ".join(str(caption).split())
+    head, _, rest = flat[:120].partition(":")
+    if rest and len(head) < 100:
+        flat = (rest + flat[120:]).strip()
+    return flat[:width]
 
 
 class MilvusWrapper:
@@ -139,7 +156,8 @@ class MilvusMemory(Memory):
     def reset(self, drop_collection=True):
 
         if drop_collection:
-            print("Resetting memory. We are dropping the current collection")
+            if not trace.ENABLED:
+                print("Resetting memory. We are dropping the current collection")
 
         self.milv_wrapper = MilvusWrapper(self.db_collection_name, self.db_ip, self.db_port, drop_collection=drop_collection)
 
@@ -170,9 +188,30 @@ class MilvusMemory(Memory):
         )
 
 
+
+    def _trace_hits(self, kind, query, docs):
+        """Show what came back, not just how many.
+
+        Which memories were retrieved is the difference between "search missed it" and
+        "search found it and the model picked another one" -- the open question in #43.
+        Position is on every line because that is what a position answer must match.
+        """
+        if not trace.ENABLED:
+            return
+        trace.step("검색", f"{kind}({query!r})  {len(docs)}개", arrow="←")
+        for number, doc in enumerate(docs, 1):
+            stamp = doc.metadata['time']
+            stamp = stamp[0] if hasattr(stamp, '__len__') and len(stamp) == 2 else stamp
+            if self.time_offset:
+                stamp += self.time_offset
+            shown = strftime('%H:%M:%S', localtime(stamp))
+            where = np.array(doc.metadata['position']).round(1).tolist()
+            trace.note(f"{number}  {shown}  {str(where):28s} {_caption_gist(doc.page_content)}")
+
     def search_by_position(self, query: tuple) -> str:
         # docs = pos_db.similarity_search_by_vector(np.array(query))
         docs = similarity_search_with_score_by_vector(self.position_vector_db, np.array(query).astype(float))
+        self._trace_hits("position", query, docs)
 
         self.working_memory += docs 
 
@@ -205,6 +244,7 @@ class MilvusMemory(Memory):
 
 
         docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([query, 0]))
+        self._trace_hits("time", hms_time, docs)
 
         self.working_memory += docs
 
@@ -218,7 +258,8 @@ class MilvusMemory(Memory):
     def search_by_text(self, query: str) -> str:
 
         docs = self.text_retriever.invoke(query)
-        
+        self._trace_hits("text", query, docs)
+
         self.working_memory += docs
 
         docs = self.memory_to_string(docs)
