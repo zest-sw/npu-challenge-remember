@@ -26,6 +26,7 @@ sys.path.append(sys.path[0] + '/..')
 
 from agents.remembr_agent import ReMEmbRAgent
 from agents.non_agent import NonAgent
+from agents.retrieve_agent import RetrieveAgent
 from agents.vlm_non_agent import VLMNonAgent
 
 from memory.memory import MemoryItem
@@ -326,6 +327,15 @@ def main(args):
     if 'remembr' in args.model:
         base_llm = args.model.split('+')[-1]
         agent = ReMEmbRAgent(llm_type=base_llm, num_ctx=args.num_ctx, temperature=args.temperature)
+        use_milvus = True
+
+    elif 'retrieve' in args.model:
+        # Real Milvus retrieval like remembr+, but without the tool-calling loop
+        # the planner cannot drive on this board: one plain query, one search,
+        # then NonAgent's answer stage. Directly comparable to optimal+, which
+        # shares that answer stage and differs only in getting oracle context.
+        base_llm = args.model.split('+')[-1]
+        agent = RetrieveAgent(llm_type=base_llm, num_ctx=args.num_ctx, temperature=args.temperature)
         use_milvus = True
 
     elif 'optimal' in args.model:
