@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 import numpy as np
 
 from remembr.memory.memory import Memory, MemoryItem
+from remembr.utils import trace
 
 from langchain_community.vectorstores import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -139,7 +140,8 @@ class MilvusMemory(Memory):
     def reset(self, drop_collection=True):
 
         if drop_collection:
-            print("Resetting memory. We are dropping the current collection")
+            if not trace.ENABLED:
+                print("Resetting memory. We are dropping the current collection")
 
         self.milv_wrapper = MilvusWrapper(self.db_collection_name, self.db_ip, self.db_port, drop_collection=drop_collection)
 

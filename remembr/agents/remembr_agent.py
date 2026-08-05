@@ -37,6 +37,7 @@ from remembr.tools.functions_wrapper import FunctionsWrapper
 from remembr.memory.memory import Memory
 
 from remembr.agents.agent import ANSWER_SCHEMA, Agent, AgentOutput
+from remembr.utils import trace
 
 
 
@@ -413,11 +414,17 @@ class ReMEmbRAgent(Agent):
 
         response = model.invoke({"question": question, "chat_history": messages[:]})
 
+        turn = self.agent_call_count + 1
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call['name'] != "__conversational_response":
                     args = re.sub("\{.*?\}", "", str(tool_call['args'])) # remove curly braces
                     self.previous_tool_requests += f"I previously used the {tool_call['name']} tool with the arguments: {args}.\n"
+                    trace.step(f"턴{turn}", f"{tool_call['name']}({tool_call['args']})")
+        else:
+            # No tool call means should_continue routes straight to generate. Worth
+            # seeing: this is what a planner that gave up looks like.
+            trace.step(f"턴{turn}", f"tool 호출 없음 — {str(response.content)[:80]!r}")
 
         self.agent_call_count += 1
 
@@ -499,9 +506,14 @@ class ReMEmbRAgent(Agent):
             if (parsed['position'] is not None) and len(parsed['position']) != 3:
                 raise ValueError(f"Shape of position was incorrect. {parsed['position']}. Retrying...")
 
-        except:
+        except Exception as error:
+            trace.warn(f"답변 파싱 실패: {error}")
+            trace.note(f"원본: {response[:160]}")
             raise ValueError("Generate call failed. Retrying...")
 
+        trace.step("답변", "  ".join(f"{k}={parsed[k]!r}" for k in
+                                    ('type', 'position', 'time', 'duration', 'binary')
+                                    if parsed.get(k) is not None))
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
         return {"messages": [json.dumps(parsed)]}

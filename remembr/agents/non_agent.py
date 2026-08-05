@@ -11,6 +11,7 @@ from remembr.tools.tools import format_docs
 from remembr.utils.util import file_to_string
 
 from remembr.agents.agent import ANSWER_SCHEMA, Agent, AgentOutput
+from remembr.utils import trace
 from remembr.memory.memory import Memory
 
 
@@ -50,6 +51,14 @@ ANSWER_TYPE_SCHEMA = {
     'required': ['answer_type'],
     'additionalProperties': False,
 }
+
+
+
+def _answer_summary(output: AgentOutput) -> str:
+    """The filled fields only, so the trace line shows what the model committed to."""
+    filled = [(name, getattr(output, name, None))
+              for name in ('type', 'position', 'time', 'duration', 'binary')]
+    return "  ".join(f"{name}={value!r}" for name, value in filled if value is not None)
 
 
 class NonAgent(Agent):
@@ -118,7 +127,7 @@ class NonAgent(Agent):
             ).invoke(f"{self.answer_type_prompt}\n\nQuestion: {asked[-1] if asked else question}")
             answer_type = json.loads(reply.content).get('answer_type')
         except Exception as error:  # noqa: BLE001
-            print(f"NonAgent: could not settle the answer type ({error}); using the permissive schema")
+            trace.warn(f"답변 유형 확정 실패 ({error}) — permissive 스키마로 진행")
             return None
         return answer_type if answer_type in ANSWER_TYPES else None
 
@@ -171,7 +180,7 @@ class NonAgent(Agent):
                 'type': 'json_schema',
                 'json_schema': {'name': 'agent_output', 'schema': self.schema_for(answer_type)},
             })
-        print(f"NonAgent answer type: {answer_type}")
+        trace.step("유형", answer_type if answer_type else "확정 실패 — permissive 스키마")
 
         # Cap the retries. This loop was `while True`, which hangs outright when
         # the model cannot produce parseable output: at temperature=0 every retry
@@ -186,7 +195,7 @@ class NonAgent(Agent):
         MAX_PARSE_RETRIES = 5
         last_error = None
 
-        for _ in range(MAX_PARSE_RETRIES):
+        for parse_try in range(1, MAX_PARSE_RETRIES + 1):
 
             response = chain.invoke(inputs)
             response = ''.join(response.content.splitlines())
@@ -206,11 +215,11 @@ class NonAgent(Agent):
 
             except Exception as e:
                 last_error = e
-                print(response)
-                print(e)
-                print("Generate call failed. Retrying...")
+                trace.warn(f"파싱 실패 {parse_try}/{MAX_PARSE_RETRIES}: {e}")
+                trace.note(f"원본: {response[:160]}")
                 continue
 
+            trace.step("답변", _answer_summary(response))
             break
 
         else:
