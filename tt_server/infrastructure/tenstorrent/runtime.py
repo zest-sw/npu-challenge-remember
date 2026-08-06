@@ -277,8 +277,6 @@ class TenstorrentRuntime:
         vlm_model: str | None,
         llm_precision: str | None = None,
         error: str | None = None,
-        debug_decode=self.settings.debug_decode,
-        debug_sample=self.settings.debug_sample,
     ) -> RuntimeSnapshot:
         snapshot = RuntimeSnapshot(
             lifecycle=lifecycle,
@@ -287,6 +285,8 @@ class TenstorrentRuntime:
             vlm_model=vlm_model,
             llm_precision=llm_precision,
             error=error,
+            debug_decode=self.settings.debug_decode,
+            debug_sample=self.settings.debug_sample,
         )
         with self._state_lock:
             self._snapshot = snapshot
