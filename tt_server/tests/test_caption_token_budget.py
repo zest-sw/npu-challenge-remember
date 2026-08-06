@@ -180,6 +180,16 @@ def test_a_failed_warmup_does_not_stop_the_server():
     assert 'except Exception' in warm and 'serving anyway' in warm, warm
 
 
+def test_the_vlm_decode_does_not_use_device_tracing():
+    """tt-metal caches the decode trace on `hasattr(self, "trace_ids_text")` alone, so it
+    outlives the request that captured it, and later prefills allocate device buffers
+    beside it -- tt-metal warns those buffers may be corrupted. Same class as #21."""
+    source = read('tt_server/infrastructure/tenstorrent/qwen_vl_engine.py')
+    describe = source.split('def describe')[1]
+    assert 'enable_trace=False' in describe, describe[-900:]
+    assert 'enable_trace=True' not in describe, describe[-900:]
+
+
 if __name__ == '__main__':
     for name, test in sorted(globals().items()):
         if name.startswith('test_'):

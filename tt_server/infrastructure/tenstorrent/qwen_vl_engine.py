@@ -164,7 +164,26 @@ class QwenVLEngine:
                 decode_xmask,
                 decode_tmask,
                 self.xattn_caches,
-                enable_trace=True,
+                # No device tracing. tt-metal captures a decode trace once and caches it
+                # on `hasattr(self, "trace_ids_text")` alone (generator.py:386) -- the same
+                # key-on-nothing bug that poisoned the LLM path in #21. The trace then
+                # lives for the process, and every later request's prefill allocates
+                # device buffers beside it, which tt-metal itself warns about:
+                #
+                #   Allocating device buffers is unsafe due to the existence of an active
+                #   trace. These buffers may be corrupted once a trace is executed.
+                #
+                # That is why 224x224 looked fine and nothing else did. warmup_model runs
+                # prefill+decode at load with a hardcoded 224x224 dummy, so it captures
+                # the trace at that shape; while the HTTP layer squashed every frame to
+                # 224x224 the real requests allocated exactly the same buffers and left
+                # the traced ones alone. Send any other size and the allocations differ.
+                # Measured at 1224x1024: the vision encoder ran blocks 0-11 in 25 s and
+                # then stopped dead at block 11 (#62).
+                #
+                # The cost is a slower decode. #21 took the same trade in the LLM path
+                # and it was worth it there too: a wrong or wedged answer is not faster.
+                enable_trace=False,
             )
             next_tokens, _ = sampler(logits)
             tokens[torch.arange(1), position_id + 1] = next_tokens
