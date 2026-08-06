@@ -163,7 +163,7 @@ def _health_payload(snapshot):
         "debug": {
             "decode": snapshot.debug_decode,
             "sample": snapshot.debug_sample,
-        }
+        },
     }
 
 
