@@ -1,35 +1,29 @@
-"""Self-check: a caption request that would not fit the KV cache is refused, not run.
+"""Self-check: how big a caption frame may be, and what happens when it is too big.
 
-The board wedged partway through a caption pass. What it looked like:
+Two rules, both learned the hard way, both living in the domain layer so they can be
+tested without fastapi, torch, ttnn or a board.
 
-    Running Vision Blocks: 100%|...| 27/27
-    INFO: "POST /caption HTTP/1.1" 200 OK
-    Running Vision Blocks:   0%|   | 0/27          <- and there it stayed
+**cap_long_side** -- the HTTP layer used to do `.resize((224, 224))` on every incoming
+frame. Unconditional, square, no setting. The camera is 1224x1024, so the VLM saw 1/25
+of the area, and captions could not name what was no longer in the pixels: of 272
+captions, 33 named a building and 1 mentioned the police call pole the questions ask
+about. A prompt rule saying "copy any words visible on signs, exactly" produced quoted
+text in 0 of 8 samples -- no prompt fixes a missing pixel (#59). It hid itself too: a
+resolution sweep from 1224 down to 256 returned ten identical 21.6s responses.
 
-    thread A   Rl+  CPU climbing 1s per wall second, inside ttnn
-    main       Sl+  futex_wait_queue
+**check_generation_fits** -- `describe()` sized its token buffer as
+`prefill + max_gen_len` and never compared it to `max_seq_len`. Past the cache,
+`decode_forward` writes through a NoC that has no bounds concept, so it lands in
+whatever DRAM follows: usually harmless, occasionally a spinning core and a wedged
+board that only a reboot clears.
 
-Python runs signal handlers on the main thread only, and the main thread was blocked in a
-futex, so Ctrl-C was never processed and /health never answered. Killing the process was
-the only way out.
-
-The cause was not the disconnect that preceded it. `describe()` sized its token buffer as
-`prefill + max_gen_len` and never compared that to `max_seq_len`, and the frames were sent
-at the camera's full 1224x1024 -- about 1200 image tokens by themselves:
-
-    TT_VLM_MAX_SEQ_LEN   1024
-    paper prompt         prefill 1279 + 256 = 1535
-    terse prompt         prefill 1429 + 128 = 1557
-
-So every caption request in the 272-caption pass and both probes decoded past the cache.
-That is undefined rather than fatal, which is why it mostly worked: eight captions
-succeeded and the ninth spun.
-
-Two changes, and one test each:
-  - the engine refuses an over-budget request with InvalidRequest (-> HTTP 400)
-  - the captioner downscales frames so requests fit in the first place
-
-No board, no server, no ttnn:
+A caution about the second one. It was written believing prefill was 1279-1429 tokens
+and that the 272-caption pass had been running outside the cache the whole time. That
+was wrong -- it counted the image the *client* sends, while the server was squashing
+it to 224x224 first, making the real prefill 79-277. Nothing had exceeded the cache,
+and **what actually wedged the board is still unknown**. The guard is kept because
+removing the 224 squash makes prefill 1429, where the limit becomes real; the numbers
+below are what the budget arithmetic says, not a record of a diagnosed failure.
 
     python tt_server/tests/test_caption_token_budget.py
 """
@@ -39,7 +33,20 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tt_server.domain.errors import InvalidRequest  # noqa: E402
-from tt_server.domain.models import check_generation_fits  # noqa: E402
+from tt_server.domain.models import (  # noqa: E402
+    cap_long_side,
+    check_generation_fits,
+)
+
+
+def read(relative):
+    return open(os.path.join(os.path.dirname(__file__), '..', '..', relative)).read()
+
+
+def read_app():
+    return read('tt_server/presentation/http/app.py')
+
+
 
 
 class engine:
@@ -57,8 +64,8 @@ def test_a_request_that_fits_is_allowed():
     engine()._check_fits(1024 - 128, 128)   # exactly the limit
 
 
-def test_the_measured_full_resolution_request_is_refused():
-    """The one that wedged the board: 1224x1024 frame, terse prompt, max_gen_len 128."""
+def test_a_full_resolution_request_is_refused_when_the_cache_is_small():
+    """1224x1024 frame + terse prompt = 1429 prefill, which needs max_seq_len 2048."""
     try:
         engine()._check_fits(1429, 128)
     except InvalidRequest as error:
@@ -69,7 +76,7 @@ def test_the_measured_full_resolution_request_is_refused():
 
 
 def test_the_paper_prompt_at_full_resolution_is_refused_too():
-    """The 272 captions already on disk were produced this way."""
+    """Same arithmetic with the original prompt and the old max_gen_len of 256."""
     try:
         engine()._check_fits(1279, 256)
     except InvalidRequest:
@@ -109,34 +116,43 @@ def test_describe_checks_before_it_touches_the_device():
     )
 
 
-def test_the_captioner_downscales_frames():
-    """Enforcement alone would turn every caption into a 400. The frames have to shrink."""
+def test_the_server_no_longer_squashes_every_frame_to_224():
+    """The line that made resolution untestable, and captions unable to read a sign."""
+    import ast
+
+    source = read_app()
+    tree = ast.parse(source)
+    decode = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == '_decode_image')
+    body = ast.unparse(decode.body[1:])          # [0] is the docstring, which quotes it
+    assert 'resize' not in body, body
+    assert 'cap_long_side' in body, body
+
+
+def test_the_server_caps_the_long_side_and_keeps_the_aspect_ratio():
     from PIL import Image
 
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'remembr'))
-    from captioners import tenstorrent_captioner as captioner
-
-    assert captioner.MAX_IMAGE_LONG_SIDE <= 896, captioner.MAX_IMAGE_LONG_SIDE
-    encoded = captioner._encode_image(Image.new('RGB', (1224, 1024)))
-    import base64
-    from io import BytesIO
-    sent = Image.open(BytesIO(base64.b64decode(encoded)))
-    assert max(sent.size) == captioner.MAX_IMAGE_LONG_SIDE, sent.size
-    # thumbnail() rounds to whole pixels, so compare within a pixel's worth of ratio.
-    assert abs(sent.size[0] / sent.size[1] - 1224 / 1024) < 0.01, ('aspect ratio', sent.size)
+    sent = cap_long_side(Image.new('RGB', (1224, 1024)), 768)
+    assert max(sent.size) == 768, sent.size
+    assert abs(sent.size[0] / sent.size[1] - 1224 / 1024) < 0.01, sent.size
 
 
-def test_a_frame_already_small_enough_is_left_alone():
+def test_a_frame_already_within_the_cap_is_untouched():
     from PIL import Image
 
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'remembr'))
-    from captioners import tenstorrent_captioner as captioner
+    assert cap_long_side(Image.new('RGB', (320, 240)), 768).size == (320, 240)
 
-    import base64
-    from io import BytesIO
-    encoded = captioner._encode_image(Image.new('RGB', (320, 240)))
-    sent = Image.open(BytesIO(base64.b64decode(encoded)))
-    assert sent.size == (320, 240), sent.size
+
+def test_zero_disables_downscaling():
+    from PIL import Image
+
+    assert cap_long_side(Image.new('RGB', (1224, 1024)), 0).size == (1224, 1024)
+
+
+def test_the_captioner_does_not_resize_behind_the_server():
+    """Two places deciding resolution is how the 224 squash stayed invisible."""
+    captioner = read('remembr/captioners/tenstorrent_captioner.py')
+    assert 'thumbnail' not in captioner, captioner
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 import base64
 import io
+import os
 import time
 import uuid
 
@@ -8,6 +9,7 @@ from PIL import Image
 
 from tt_server.application.commands import CaptionCommand, ChatCommand
 from tt_server.application.service import InferenceService
+from tt_server.domain.models import cap_long_side
 from tt_server.domain.errors import (
     CapabilityUnavailable,
     InferenceError,
@@ -24,6 +26,10 @@ DEFAULT_VLM_PROMPT = (
     "<video> Describe in detail what you see: people, objects, environment, and "
     "activities. Be specific."
 )
+
+# Longest side a caption frame may reach the VLM at. See _decode_image for why this
+# exists and what it costs. 0 disables downscaling entirely.
+MAX_IMAGE_LONG_SIDE = int(os.environ.get("TT_VLM_IMAGE_LONG_SIDE", "768"))
 
 
 def create_app(service: InferenceService) -> FastAPI:
@@ -142,11 +148,38 @@ def _messages_to_prompt(messages) -> str:
 
 
 def _decode_image(encoded: str) -> Image.Image:
+    """Decode a frame, downscaling only if it is over the budget.
+
+    This used to be `.resize((224, 224))` -- unconditional, whatever the client sent,
+    with no setting to change it. The camera is 1224x1024, so every frame reached the
+    VLM at 1/25 of its area. That is why captions never read a sign or named a building
+    (#59): at 224x224 the text is not there to read. Of 272 captions, 33 named a
+    building and exactly 1 mentioned the police call pole the questions ask about; a
+    later prompt that said "copy any words visible on signs, exactly" produced quoted
+    text in 0 of 8 samples. No prompt can fix a missing pixel.
+
+    It also made resolution untestable: a sweep from 1224 down to 256 returned ten
+    identical 21.6s responses, because the server was answering the same request each
+    time.
+
+    Cap the long side instead, and keep the aspect ratio. Measured on Qwen3-VL-8B:
+
+        long side   image tokens   prefill (terse)   fits max_seq_len
+             1224           1216              1429   needs 2048
+              768            465               693   1024
+              224             49               277   1024
+
+    The default keeps a stock TT_VLM_MAX_SEQ_LEN=1024 server working. For full
+    resolution raise both together, since prefill has to fit the KV cache:
+
+        TT_VLM_IMAGE_LONG_SIDE=1224 TT_VLM_MAX_SEQ_LEN=2048
+    """
     try:
         raw = base64.b64decode(encoded)
-        return Image.open(io.BytesIO(raw)).convert("RGB").resize((224, 224))
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception as error:  # noqa: BLE001
         raise InvalidRequest(f"invalid base64 image: {error}") from error
+    return cap_long_side(image, MAX_IMAGE_LONG_SIDE)
 
 
 def _health_payload(snapshot):

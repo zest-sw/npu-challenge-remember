@@ -4,6 +4,28 @@ from enum import Enum
 from .errors import InvalidRequest
 
 
+def cap_long_side(image, long_side: int):
+    """Downscale a frame only if it is over `long_side`, keeping the aspect ratio.
+
+    The HTTP layer used to do `.resize((224, 224))` here -- unconditional, square, with
+    no setting to change it. The camera is 1224x1024, so every frame reached the VLM at
+    1/25 of its area, and captions could not read what was no longer in the pixels: of
+    272 captions, 33 named a building and 1 mentioned the police call pole the questions
+    ask about (#59). It also hid itself, since a resolution sweep from 1224 down to 256
+    returned ten identical responses.
+
+    `long_side` of 0 means leave the frame alone.
+
+    Lives here rather than in the HTTP layer so it is testable without fastapi, and next
+    to check_generation_fits because the two are one decision: how much image you may
+    send depends on the token budget it has to fit.
+    """
+    if long_side and max(image.size) > long_side:
+        image = image.copy()
+        image.thumbnail((long_side, long_side))
+    return image
+
+
 def check_generation_fits(prefill_len: int, max_gen_len: int, max_seq_len: int) -> None:
     """Refuse a request that would decode past the KV cache instead of hanging on it.
 
