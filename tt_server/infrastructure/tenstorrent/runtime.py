@@ -277,6 +277,8 @@ class TenstorrentRuntime:
         vlm_model: str | None,
         llm_precision: str | None = None,
         error: str | None = None,
+        debug_decode=self.settings.debug_decode,
+        debug_sample=self.settings.debug_sample,
     ) -> RuntimeSnapshot:
         snapshot = RuntimeSnapshot(
             lifecycle=lifecycle,

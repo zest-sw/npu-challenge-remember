@@ -160,6 +160,10 @@ def _health_payload(snapshot):
         "llm_precision": snapshot.llm_precision,
         "state": snapshot.lifecycle.value,
         "error": snapshot.error,
+        "debug": {
+            "decode": snapshot.debug_decode,
+            "sample": snapshot.debug_sample,
+        }
     }
 
 

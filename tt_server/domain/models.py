@@ -58,6 +58,9 @@ class RuntimeSnapshot:
     vlm_model: str | None
     llm_precision: str | None = None
     error: str | None = None
+    # debug modes
+    debug_decode: bool = False
+    debug_sample: bool = False
 
     @property
     def ready(self) -> bool:
