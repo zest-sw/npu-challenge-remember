@@ -70,7 +70,7 @@ class HttpContractTests(unittest.TestCase):
         self.assertTrue(body["llm"])
         self.assertTrue(body["vlm"])
         self.assertEqual(body["mode"], "3b+3b")
-        self.assertEqual(body["debug"], {"decode" False, "sample" False})
+        self.assertEqual(body["debug"], {"decode": False, "sample": False})
 
     def test_health_reports_debug_flags(self):
         self.runtime.current = RuntimeSnapshot(
@@ -83,7 +83,7 @@ class HttpContractTests(unittest.TestCase):
             debug_sample=True,
         )
         body = self.endpoint("/health", "GET")()
-        self.assertEqual(body["debug"], {"decode" False, "sample" False})
+        self.assertEqual(body["debug"], {"decode": True, "sample": True})
 
     def test_chat_preserves_openai_response_shape(self):
         body = self.endpoint("/v1/chat/completions", "POST")(

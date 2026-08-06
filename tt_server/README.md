@@ -106,7 +106,7 @@ device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
 // 200
 {
   "ready": true,
-  "mode": "default",
+  "mode": "3b+3b",
   "switching": false,
   "llm": true,
   "vlm": true,
@@ -115,7 +115,7 @@ device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
   "state": "ready",
   "error": null,
   "debug": {
-    "decode": true,
+    "decode": false,
     "sample": false
   }
 }
@@ -261,8 +261,8 @@ print(r.json()["caption"])
 | `TT_LLM_MAX_SEQ_LEN` / `TT_VLM_MAX_SEQ_LEN` | `1024` | raise for longer context (uses more DRAM) |
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
 | `TT_PORT` | `8100` | |
-| `TT_DEBUG_DECODE` | `0` |`1`이면 LLM 생성 token을 decode된 text로 stdout에 출력. `/health.debug.decode`에서 현재 시작 상태 확인 가능 |
-| `TT_DEBUG_SAMPLE` | `0` |`1`이면 constrained decoding의 sampling/masking diagnostics를 출력. 매우 verbose하므로 짧은 재현에만 사용. `/health.debug.sample`에서 확인 가능 |
+| `TT_DEBUG_DECODE` | `0` | `1`이면 LLM 생성 token을 decode된 text로 stdout에 출력. `/health.debug.decode`에서 현재 시작 상태 확인 가능 |
+| `TT_DEBUG_SAMPLE` | `0` | `1`이면 constrained decoding의 sampling/masking diagnostics를 출력. 매우 verbose하므로 짧은 재현에만 사용. `/health.debug.sample`에서 확인 가능 |
 
 remembr 쪽: `TT_LLM_BASE_URL`(default `http://localhost:8100/v1`),
 `TT_VLM_URL`(default `http://localhost:8100/caption`),
