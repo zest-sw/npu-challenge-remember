@@ -104,11 +104,25 @@ schema에는 `{"type": "object"}`만 표시됩니다 — request/response 필드
 device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
 ```jsonc
 // 200
-{"ready": true, "mode": "3b+3b", "switching": false, "llm": true, "vlm": true,
- "llm_model": "meta-llama/Llama-3.2-3B-Instruct", "llm_precision": "performance"}
+{
+  "ready": true,
+  "mode": "default",
+  "switching": false,
+  "llm": true,
+  "vlm": true,
+  "llm_model": "meta-llama/Llama-3.2-3B-Instruct",
+  "llm_precision": "performance",
+  "state": "ready",
+  "error": null,
+  "debug": {
+    "decode": true,
+    "sample": false
+  }
+}
 ```
-`ready`는 현재 모드의 모델이 전부 device에 로드된 후에만 true로 바뀝니다. `switching`이
-true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
+`ready`는 현재 모드의 모델이 전부 device에 로드된 후에만 true로 바뀝니다. 
+`switching`이 true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
+`debug`는 서버 시작 시점에 읽은 `TT_DEBUG_DECODE`/`TT_DEBUG_SAMPLE` 상태를 보고합니다. (런타임 토글은 제공하지 않습니다)
 
 ### 모드 — 동시에 로드되는 모델 조합
 보드 DRAM이 ~12GB라 조합 하나만 상주 가능합니다. **모드**는 그 조합에 이름을 붙인 것:
@@ -247,6 +261,8 @@ print(r.json()["caption"])
 | `TT_LLM_MAX_SEQ_LEN` / `TT_VLM_MAX_SEQ_LEN` | `1024` | raise for longer context (uses more DRAM) |
 | `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
 | `TT_PORT` | `8100` | |
+| `TT_DEBUG_DECODE` | `0` |`1`이면 LLM 생성 token을 decode된 text로 stdout에 출력. `/health.debug.decode`에서 현재 시작 상태 확인 가능 |
+| `TT_DEBUG_SAMPLE` | `0` |`1`이면 constrained decoding의 sampling/masking diagnostics를 출력. 매우 verbose하므로 짧은 재현에만 사용. `/health.debug.sample`에서 확인 가능 |
 
 remembr 쪽: `TT_LLM_BASE_URL`(default `http://localhost:8100/v1`),
 `TT_VLM_URL`(default `http://localhost:8100/caption`),
