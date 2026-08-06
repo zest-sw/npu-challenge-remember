@@ -155,6 +155,31 @@ def test_the_captioner_does_not_resize_behind_the_server():
     assert 'thumbnail' not in captioner, captioner
 
 
+def test_the_engine_can_warm_the_real_frame_shape():
+    """tt-metal warms 224x224 only. Any other shape compiles on its first request, which
+    looks identical to a hang -- minutes of silence, no /health, no Ctrl-C (#62). The
+    engine must be able to pay that at load instead."""
+    source = read('tt_server/infrastructure/tenstorrent/qwen_vl_engine.py')
+    assert 'TT_VLM_WARMUP_SIZE' in source, source[:400]
+    load = source.split('def load')[1].split('\n    def ')[0]
+    assert '_warm_real_shape' in load, load
+
+
+def test_the_warmup_runs_after_the_backend_warmup_not_before():
+    """It calls describe(), which needs generator, processor and caches in place."""
+    source = read('tt_server/infrastructure/tenstorrent/qwen_vl_engine.py')
+    load = source.split('def load')[1].split('\n    def ')[0]
+    assert load.index('warmup_model') < load.index('_warm_real_shape'), load
+
+
+def test_a_failed_warmup_does_not_stop_the_server():
+    """The shape may simply not fit; the request-time guard says so clearly. Refusing to
+    serve over a failed warmup would turn a bad setting into an outage."""
+    source = read('tt_server/infrastructure/tenstorrent/qwen_vl_engine.py')
+    warm = source.split('def _warm_real_shape')[1]
+    assert 'except Exception' in warm and 'serving anyway' in warm, warm
+
+
 if __name__ == '__main__':
     for name, test in sorted(globals().items()):
         if name.startswith('test_'):

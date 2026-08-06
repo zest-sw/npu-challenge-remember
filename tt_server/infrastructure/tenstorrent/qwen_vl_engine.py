@@ -1,6 +1,10 @@
+import os
+import time
+
 import torch
 import ttnn
 from loguru import logger
+from PIL import Image
 from transformers import AutoProcessor
 
 from llama_models.llama3.api.datatypes import ImageMedia, UserMessage
@@ -54,7 +58,58 @@ class QwenVLEngine:
             HF_MODEL=True,
             processor=self.processor,
         )
+        self._warm_real_shape()
         logger.info("[VLM] ready.")
+
+    def _warm_real_shape(self) -> None:
+        """Compile for the frame shape this server will actually be sent.
+
+        tt-metal's own warmup uses a hardcoded 224x224 dummy:
+
+            dummy_img = PIL_Image.new("RGB", (224, 224), color=(128, 128, 128))
+
+        While the HTTP layer squashed every frame to 224x224 that happened to match, and
+        captions came back in 21.6 s. Once frames arrived at their real size the first
+        request had to compile a shape nothing had compiled before, and it looked exactly
+        like a hang: minutes with no reply, `/health` silent because the worker holds the
+        GIL, `Ctrl-C` ignored because signal handlers only run on the main thread. Two
+        different wrong causes were argued from that appearance before py-spy showed the
+        vision block loop was advancing the whole time (#62).
+
+        Paying it here instead means the compile happens before the server reports ready,
+        where a slow startup is expected and no client is waiting on a socket.
+
+        Set TT_VLM_WARMUP_SIZE to the shape the engine will receive -- that is *after*
+        the HTTP layer's TT_VLM_IMAGE_LONG_SIDE cap, not the client's original frame:
+
+            TT_VLM_IMAGE_LONG_SIDE=1224 TT_VLM_WARMUP_SIZE=1224x1024
+
+        Unset skips it, which keeps the old behaviour: the first real caption pays.
+        """
+        size = os.environ.get("TT_VLM_WARMUP_SIZE")
+        if not size:
+            logger.info(
+                "[VLM] TT_VLM_WARMUP_SIZE unset -- tt-metal warmed 224x224 only, so the "
+                "first caption at any other size pays its compile (can be minutes)"
+            )
+            return
+        try:
+            width, height = (int(part) for part in size.lower().split("x"))
+        except ValueError:
+            logger.warning(f"[VLM] TT_VLM_WARMUP_SIZE={size!r} is not WIDTHxHEIGHT; skipping")
+            return
+        logger.info(f"[VLM] warming the real frame shape {width}x{height} "
+                    f"-- first compile of a new shape can take minutes")
+        started = time.perf_counter()
+        try:
+            self.describe([Image.new("RGB", (width, height), (128, 128, 128))],
+                          "Describe what you see.", max_gen_len=8)
+        except Exception as error:  # noqa: BLE001
+            # A failed warmup is worth reporting but not worth refusing to serve over:
+            # the shape may simply not fit, and the request-time guard says so clearly.
+            logger.warning(f"[VLM] warmup at {width}x{height} failed ({error}); serving anyway")
+            return
+        logger.info(f"[VLM] warm at {width}x{height} in {time.perf_counter() - started:.0f}s")
 
     def describe(self, images, prompt: str, max_gen_len: int = 128) -> str:
         sampler = self._get_batch_sampler(0, 0.9, self.model_args[0].tokenizer)
