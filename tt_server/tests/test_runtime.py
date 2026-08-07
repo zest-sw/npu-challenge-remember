@@ -1,4 +1,5 @@
 import threading
+import time
 import unittest
 
 from tt_server.application.commands import CaptionCommand, ChatCommand
@@ -68,6 +69,15 @@ class FakeVLM:
 
     def describe(self, images, prompt, max_gen_len):
         return f"vlm:{prompt}:{len(images)}"
+
+class BlockingVLM(FakeVLM):
+    started = threading.Event()
+    release = threading.Event()
+
+    def describe(self, images, prompt, max_gen_len):
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().describe(images, prompt, max_gen_len)
 
 
 class FailingQwen3VLM(FakeVLM):
@@ -145,6 +155,58 @@ class RuntimeTests(unittest.TestCase):
             ["open", "sync", "close", "open", "close", "open", "close"],
         )
 
+
+    def test_snapshot_reports_active_worker_job(self):
+        BlockingVLM.started.clear()
+        BlockingVLM.release.clear()
+        runtime, _ = self.make_runtime(vlm_factory=BlockingVLM)
+        runtime.start()
+
+        result = {}
+        thread = threading.Thread(
+            target=lambda : result.setdefault(
+                "caption", runtime.caption(CaptionCommand((object(),), "scene"))
+            )
+        )
+        thread.start()
+        self.assertTrue(BlockingVLM.started.wait(timeout=1))
+
+        second_result = {}
+        second = threading.Thread(
+            target=lambda: second_result.setdefault(
+                "caption", runtime.caption(CaptionCommand((object(),), "queued"))
+            )
+        )
+        second.start()
+        queued = None
+        for _ in range(100):
+            queued = runtime.snapshot()
+            if queued.worker_queue_size == 1:
+                break
+            time.sleep(0.01)
+        self.assertEqual(queued.worker_queue_size, 1)
+
+        snapshot = runtime.snapshot()
+        self.assertTrue(snapshot.worker_busy)
+        self.assertEqual(snapshot.worker_active_job, "caption")
+        self.assertEqual(snapshot.worker_queue_size, 1)
+        self.assertIsNotNone(snapshot.worker_active_elapsed_s)
+        self.assertGreaterEqual(snapshot.worker_active_elapsed_s, 0)
+        
+        time.sleep(0.01)
+        later = runtime.snapshot()
+        self.assertGreaterEqual(later.worker_active_elapsed_s, snapshot.worker_active_elapsed_s)
+
+        BlockingVLM.release.set()
+        thread.join(timeout=1)
+        second.join(timeout=1)
+        self.assertEqual(result["caption"], "vlm:scene:1")
+        self.assertEqual(second_result["caption"], "vlm:queued:1")
+        idle = runtime.snapshot()
+        self.assertFalse(idle.worker_busy)
+        self.assertIsNone(idle.worker_active_job)
+        self.assertIsNone(idle.worker_active_elapsed_s)
+        runtime.close()
 
 if __name__ == "__main__":
     unittest.main()
