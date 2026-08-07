@@ -71,6 +71,15 @@ class HttpContractTests(unittest.TestCase):
         self.assertTrue(body["vlm"])
         self.assertEqual(body["mode"], "3b+3b")
         self.assertEqual(body["debug"], {"decode": False, "sample": False})
+        self.assertEqual(
+            body["worker"],
+            {
+                "busy": False,
+                "queue_size": 0,
+                "active_job": None,
+                "active_elapsed_s": None,
+            },
+        )
 
     def test_health_reports_debug_flags(self):
         self.runtime.current = RuntimeSnapshot(

@@ -164,6 +164,12 @@ def _health_payload(snapshot):
             "decode": snapshot.debug_decode,
             "sample": snapshot.debug_sample,
         },
+        "worker": {
+            "busy": snapshot.worker_busy,
+            "queue_size": snapshot.worker_queue_size,
+            "active_job": snapshot.worker_active_job,
+            "active_elapsed_s": snapshot.worker_active_elapsed_s,
+        },
     }
 
 
