@@ -44,7 +44,6 @@ class QwenVLEngine:
         self.processor = AutoProcessor.from_pretrained(model_args[0].CKPT_DIR)
         self.tokenizer = self.processor.tokenizer
         self.generator = backend["Generator"](model, model_args, self.mesh_device)
-        self.xattn_caches = [None for _ in self.generator.model]
         warmup_xattn_caches = [None for _ in self.generator.model]
         backend["warmup_model"](
             self.generator,
