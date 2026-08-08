@@ -145,11 +145,9 @@ def _messages_to_prompt(messages) -> str:
 def _decode_image(encoded: str) -> Image.Image:
     try:
         raw = base64.b64decode(encoded)
-        image = Image.open(io.BytesIO(raw)).convert("RGB")
         # 224 by default
         long_side = int(os.environ.get("TT_VLM_IMAGE_LONG_SIDE", "224"))
-        image.thumbnail((long_side, long_side))
-        return image
+        return Image.open(io.BytesIO(raw)).convert("RGB").resize((long_side, long_side))
 
     except Exception as error:  # noqa: BLE001
         raise InvalidRequest(f"invalid base64 image: {error}") from error
