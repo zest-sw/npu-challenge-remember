@@ -118,7 +118,7 @@ true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
 | `3b+3b` (기본) | Llama-3.2-3B | Qwen2.5-VL-3B |
 | `caption-3b` | — | Qwen2.5-VL-3B |
 | `llm-8b` | Llama-3.1-8B | — |
-| `caption-8b` | — | Qwen3-VL-8B (transformers 4.57 venv 필요, `TT_PYTHON_ENV=tf457`) |
+| `caption-8b` | — | Qwen3-VL-8B |
 
 **시작 시 선택**: `TT_MODE=caption-8b bash run_server.sh` — 잘못된 이름이면 device를 건드리기
 전에 바로 실패합니다(조용히 멈추지 않음). 안 주면 `TT_ENABLE_LLM`/`TT_ENABLE_VLM` +
@@ -238,7 +238,7 @@ print(r.json()["caption"])
 | `TT_LLM_MODEL` | `meta-llama/Llama-3.2-3B-Instruct` | LLM (agent reasoning), `TT_MODE` 미지정 시만 |
 | `TT_VLM_MODEL` | `Qwen/Qwen2.5-VL-3B-Instruct` | VLM (captioning), `TT_MODE` 미지정 시만 |
 | `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | `TT_MODE` 미지정 시만, 하나만 켜서 fallback 구성 |
-| `TT_PYTHON_ENV` | (unset) | `tf457`로 주면 `python_env_tf457`(transformers 4.57.1) 사용 — `caption-8b`에 필요 |
+| `REMEMBR_VENV` | `<repo>/.venv` | 서버가 쓸 파이썬 환경. 네 모드 전부 이 하나로 돈다 |
 | `TT_SHUTDOWN_TIMEOUT` | `5` | Ctrl-C 시 uvicorn이 진행 중 요청을 기다리는 최대 초. 진행 중이던 실제 device 작업은 이 값과 무관하게 끝까지 실행된 뒤 안전하게 정리됨 |
 | `TT_WORKER_SHUTDOWN_TIMEOUT` | `180` | main thread가 device worker의 안전 종료를 기다리는 시간. worker는 non-daemon이라 이 시간이 지나도 interpreter가 강제로 버리지 않음 |
 | `TT_SERVER_LOCK_FILE` | `/tmp/remembr-tt-npu-server.lock` | launcher 간 NPU startup 전역 lock. 서버 process가 종료될 때까지 FD를 상속해 유지 |

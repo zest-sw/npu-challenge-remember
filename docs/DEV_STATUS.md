@@ -330,7 +330,7 @@ sync `def`라 스레드풀에서 돌고, `_submit()`의 `fut.result()`엔 타임
   동작 변경)를 덮어쓰기 조건으로 오인** → 잘못된 AutoModel 분기. **load-bearing tt-metal 수정 1줄**:
   `if "_name_or_path" in config:` → `if config.get("_name_or_path"):` (하위호환, 4.53 불변). 이후
   4.57.1에서 3B 로드+LLM/VLM 추론+모드 전환 전부 정상, downstream 크래시 break 없음. 통일 venv =
-  `python_env_tf457`(`TT_PYTHON_ENV=tf457`로 선택).
+  레포의 통합 venv `.venv` 하나로 네 모드를 모두 돌린다.
   - 미완: caption-8b(qwen3) 백엔드 배선 + 8B 가중치 다운로드; 출력 품질 4.53↔4.57 A/B.
 
 ### 2026-07-15

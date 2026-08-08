@@ -24,11 +24,25 @@ export TT_METAL_HOME="${TT_METAL_HOME:-/home/user/tt-metal}"
 # descriptor lookup then fails ("$TT_METAL_HOME/tt_metal/soc_descriptors/... does
 # not exist"). cd there first so the server works regardless of where it's launched.
 cd "$TT_METAL_HOME"
-# Pick the tt-metal venv: env_set.sh <suffix> activates python_env_<suffix>.
-# TT_PYTHON_ENV=tf457 -> python_env_tf457 (transformers 4.57.1, needed for the
-# qwen3_vl caption-8b backend); unset -> default python_env (4.53).
+# env_set.sh for the environment variables (ARCH_NAME, PYTHONPATH, ...), then this
+# repo's own venv for the interpreter. It activates one of tt-metal's venvs on the way
+# through; the activation below replaces that.
+#
+# One venv now serves every mode. It used to be a choice -- TT_PYTHON_ENV=tf457 picked a
+# venv with transformers 4.57 for qwen3_vl, unset picked 4.53 for everything else -- and
+# each mode switch meant remembering which. 4.57 runs all four modes, so there is nothing
+# left to choose. That venv also lived under tt-metal, which is not ours to write to.
 # shellcheck disable=SC1091
-source "$TT_METAL_HOME/env_set.sh" ${TT_PYTHON_ENV:+"$TT_PYTHON_ENV"}   # activates venv, sets PYTHONPATH
+source "$TT_METAL_HOME/env_set.sh"
+
+REMEMBR_VENV="${REMEMBR_VENV:-$(cd "$SCRIPT_DIR/.." && pwd)/.venv}"
+if [ ! -x "$REMEMBR_VENV/bin/python" ]; then
+    echo "No venv at $REMEMBR_VENV. Create it:" >&2
+    echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  (see requirements.txt)" >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$REMEMBR_VENV/bin/activate"
 
 # Non-interactive shells skip ~/.bashrc, so pull the HF token from it explicitly
 # (needed for gated meta-llama weights). HF_HOME is left at its default so the
@@ -42,8 +56,7 @@ export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
 #   TT_MODE=3b+3b      Llama-3.2-3B + Qwen2.5-VL-3B  (default combination)
 #   TT_MODE=caption-3b Qwen2.5-VL-3B only (captioning, no LLM)
 #   TT_MODE=llm-8b     Llama-3.1-8B only (no VLM)
-#   TT_MODE=caption-8b Qwen3-VL-8B only -- needs TT_PYTHON_ENV=tf457 and the
-#                      weights downloaded (not wired for the default 4.53 venv)
+#   TT_MODE=caption-8b Qwen3-VL-8B only (captioning, no LLM)
 # An unknown TT_MODE fails immediately with a clear error, before the device is
 # touched -- it does not hang or wedge the board.
 # Leave TT_MODE unset to keep the old behavior: TT_ENABLE_LLM/VLM + TT_LLM_MODEL/

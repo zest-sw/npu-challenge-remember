@@ -6,7 +6,7 @@ timestamp + 4x4 world pose. The bag has no GPS/odometry, so this IS the position
 source. Poses are relative to the first scan (0,0,0), which is what the ReMEmbR
 eval scores against.
 
-Needs rosbags + kiss-icp, which are NOT in remembr_venv. Use the dedicated venv:
+Needs rosbags + kiss-icp, which are NOT in the repo venv. Use the dedicated venv:
     /home/user/ycc/samsung_dataset/.venv/bin/python
 
 Usage:

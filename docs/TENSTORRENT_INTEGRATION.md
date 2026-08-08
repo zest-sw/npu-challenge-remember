@@ -247,7 +247,7 @@ NPU 모델을 remembr 프로세스에 직접 로드하는 대신, **HTTP 서버�
 # 1) Start the NPU inference server (separate terminal, tt-metal environment)
 python remembr/tt_server/tt_infer_server.py      # port 8100, waits until LLM+VLM are loaded
 
-# 2) end-to-end smoke test (remembr_venv)
+# 2) end-to-end smoke test (.venv)
 cd ~/remembr
 PYTHONPATH=$(pwd) python examples/tt_smoke_test.py \
   /home/user/tt-metal/models/bos_model/qwen25_vl/demo/images/*.jpg
