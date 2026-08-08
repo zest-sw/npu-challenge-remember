@@ -124,4 +124,5 @@ class QwenVLEngine:
         answer = full_text.replace(prompt_text, "", 1)
         for token in stop_tokens:
             answer = answer.replace(token, "")
+        ttnn.synchronize_device(self.mesh_device)
         return answer.strip()
