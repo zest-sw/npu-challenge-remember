@@ -150,30 +150,9 @@ def _messages_to_prompt(messages) -> str:
 def _decode_image(encoded: str) -> Image.Image:
     """Decode a frame, downscaling only if it is over the budget.
 
-    This used to be `.resize((224, 224))` -- unconditional, whatever the client sent,
-    with no setting to change it. The camera is 1224x1024, so every frame reached the
-    VLM at 1/25 of its area. That is why captions never read a sign or named a building
-    (#59): at 224x224 the text is not there to read. Of 272 captions, 33 named a
-    building and exactly 1 mentioned the police call pole the questions ask about; a
-    later prompt that said "copy any words visible on signs, exactly" produced quoted
-    text in 0 of 8 samples. No prompt can fix a missing pixel.
-
-    It also made resolution untestable: a sweep from 1224 down to 256 returned ten
-    identical 21.6s responses, because the server was answering the same request each
-    time.
-
-    Cap the long side instead, and keep the aspect ratio. Measured on Qwen3-VL-8B:
-
-        long side   image tokens   prefill (terse)   fits max_seq_len
-             1224           1216              1429   needs 2048
-              768            465               693   1024
-              224             49               277   1024
-
-    The default keeps a stock TT_VLM_MAX_SEQ_LEN=1024 server working. For full
-    resolution raise both together, since prefill has to fit the KV cache:
-
-        TT_VLM_IMAGE_LONG_SIDE=1224 TT_VLM_MAX_SEQ_LEN=2048
-    """
+    This was `.resize((224, 224))` -- unconditional, whatever the client sent. Raise
+    TT_VLM_IMAGE_LONG_SIDE and TT_VLM_MAX_SEQ_LEN together; prefill has to fit the
+    KV cache (1224px is 1216 image tokens, 1429 with the terse prompt)."""
     try:
         raw = base64.b64decode(encoded)
         image = Image.open(io.BytesIO(raw)).convert("RGB")

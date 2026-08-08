@@ -1,29 +1,14 @@
 """Self-check: how big a caption frame may be, and what happens when it is too big.
 
-Two rules, both learned the hard way, both living in the domain layer so they can be
-tested without fastapi, torch, ttnn or a board.
+Two rules in the domain layer so they test without fastapi, torch, ttnn or a board:
+`cap_long_side` (the HTTP layer used to squash every frame to 224x224, #59) and
+`check_generation_fits` (decoding past the KV cache writes into whatever DRAM follows).
 
-**cap_long_side** -- the HTTP layer used to do `.resize((224, 224))` on every incoming
-frame. Unconditional, square, no setting. The camera is 1224x1024, so the VLM saw 1/25
-of the area, and captions could not name what was no longer in the pixels: of 272
-captions, 33 named a building and 1 mentioned the police call pole the questions ask
-about. A prompt rule saying "copy any words visible on signs, exactly" produced quoted
-text in 0 of 8 samples -- no prompt fixes a missing pixel (#59). It hid itself too: a
-resolution sweep from 1224 down to 256 returned ten identical 21.6s responses.
-
-**check_generation_fits** -- `describe()` sized its token buffer as
-`prefill + max_gen_len` and never compared it to `max_seq_len`. Past the cache,
-`decode_forward` writes through a NoC that has no bounds concept, so it lands in
-whatever DRAM follows: usually harmless, occasionally a spinning core and a wedged
-board that only a reboot clears.
-
-A caution about the second one. It was written believing prefill was 1279-1429 tokens
-and that the 272-caption pass had been running outside the cache the whole time. That
-was wrong -- it counted the image the *client* sends, while the server was squashing
-it to 224x224 first, making the real prefill 79-277. Nothing had exceeded the cache,
-and **what actually wedged the board is still unknown**. The guard is kept because
-removing the 224 squash makes prefill 1429, where the limit becomes real; the numbers
-below are what the budget arithmetic says, not a record of a diagnosed failure.
+The second was written believing prefill was 1279-1429 tokens; it was 79-277, because
+the server squashed the image first. Nothing had exceeded the cache, and what wedged
+the board is still unknown. It is kept because lifting the squash makes prefill 1429,
+where the limit becomes real -- the numbers below are budget arithmetic, not a
+diagnosed failure.
 
     python tt_server/tests/test_caption_token_budget.py
 """

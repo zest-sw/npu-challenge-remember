@@ -64,28 +64,15 @@ class QwenVLEngine:
     def _warm_real_shape(self) -> None:
         """Compile for the frame shape this server will actually be sent.
 
-        tt-metal's own warmup uses a hardcoded 224x224 dummy:
-
-            dummy_img = PIL_Image.new("RGB", (224, 224), color=(128, 128, 128))
-
-        While the HTTP layer squashed every frame to 224x224 that happened to match, and
-        captions came back in 21.6 s. Once frames arrived at their real size the first
-        request had to compile a shape nothing had compiled before, and it looked exactly
-        like a hang: minutes with no reply, `/health` silent because the worker holds the
-        GIL, `Ctrl-C` ignored because signal handlers only run on the main thread. Two
-        different wrong causes were argued from that appearance before py-spy showed the
-        vision block loop was advancing the whole time (#62).
-
-        Paying it here instead means the compile happens before the server reports ready,
-        where a slow startup is expected and no client is waiting on a socket.
-
-        Set TT_VLM_WARMUP_SIZE to the shape the engine will receive -- that is *after*
-        the HTTP layer's TT_VLM_IMAGE_LONG_SIDE cap, not the client's original frame:
+        tt-metal's warmup uses a hardcoded 224x224 dummy, so the first request at any
+        other size compiles then -- minutes of silence that reads as a hang, since the
+        worker holds the GIL (#62). Paying it at load puts it before /health reports
+        ready, with no client on a socket.
 
             TT_VLM_IMAGE_LONG_SIDE=1224 TT_VLM_WARMUP_SIZE=1224x1024
 
-        Unset skips it, which keeps the old behaviour: the first real caption pays.
-        """
+        The size is what the engine receives, i.e. after the HTTP layer's cap. Unset
+        skips it."""
         size = os.environ.get("TT_VLM_WARMUP_SIZE")
         if not size:
             logger.info(
@@ -164,25 +151,11 @@ class QwenVLEngine:
                 decode_xmask,
                 decode_tmask,
                 self.xattn_caches,
-                # No device tracing. tt-metal captures a decode trace once and caches it
-                # on `hasattr(self, "trace_ids_text")` alone (generator.py:386) -- the same
-                # key-on-nothing bug that poisoned the LLM path in #21. The trace then
-                # lives for the process, and every later request's prefill allocates
-                # device buffers beside it, which tt-metal itself warns about:
-                #
-                #   Allocating device buffers is unsafe due to the existence of an active
-                #   trace. These buffers may be corrupted once a trace is executed.
-                #
-                # That is why 224x224 looked fine and nothing else did. warmup_model runs
-                # prefill+decode at load with a hardcoded 224x224 dummy, so it captures
-                # the trace at that shape; while the HTTP layer squashed every frame to
-                # 224x224 the real requests allocated exactly the same buffers and left
-                # the traced ones alone. Send any other size and the allocations differ.
-                # Measured at 1224x1024: the vision encoder ran blocks 0-11 in 25 s and
-                # then stopped dead at block 11 (#62).
-                #
-                # The cost is a slower decode. #21 took the same trade in the LLM path
-                # and it was worth it there too: a wrong or wedged answer is not faster.
+                # No device tracing. tt-metal caches the decode trace on
+                # `hasattr(self, "trace_ids_text")` alone, so it outlives the request
+                # that captured it and later prefills allocate buffers beside it --
+                # tt-metal warns those may be corrupted. Same bug as #21. Costs a
+                # slower decode; a wedged board is not faster.
                 enable_trace=False,
             )
             next_tokens, _ = sampler(logits)

@@ -6,20 +6,12 @@ from .errors import InvalidRequest
 
 def cap_long_side(image, long_side: int):
     """Downscale a frame only if it is over `long_side`, keeping the aspect ratio.
+    0 leaves it alone.
 
-    The HTTP layer used to do `.resize((224, 224))` here -- unconditional, square, with
-    no setting to change it. The camera is 1224x1024, so every frame reached the VLM at
-    1/25 of its area, and captions could not read what was no longer in the pixels: of
-    272 captions, 33 named a building and 1 mentioned the police call pole the questions
-    ask about (#59). It also hid itself, since a resolution sweep from 1224 down to 256
-    returned ten identical responses.
-
-    `long_side` of 0 means leave the frame alone.
-
-    Lives here rather than in the HTTP layer so it is testable without fastapi, and next
-    to check_generation_fits because the two are one decision: how much image you may
-    send depends on the token budget it has to fit.
-    """
+    The HTTP layer used to force every frame to 224x224, so captions could not read
+    signs that were no longer in the pixels (#59). Lives here, not in the HTTP layer,
+    because how much image you may send is the same decision as the token budget it
+    has to fit -- and so it is testable without fastapi."""
     if long_side and max(image.size) > long_side:
         image = image.copy()
         image.thumbnail((long_side, long_side))
@@ -29,29 +21,10 @@ def cap_long_side(image, long_side: int):
 def check_generation_fits(prefill_len: int, max_gen_len: int, max_seq_len: int) -> None:
     """Refuse a request that would decode past the KV cache instead of hanging on it.
 
-    The VLM engine sized its token buffer as `prefill + max_gen_len` and never compared
-    that to `max_seq_len`. Past the cache, `decode_forward` is undefined: it raises
-    nothing and returns nothing, one thread spins at 100% inside ttnn, and the board stays
-    held. The main thread sits in a futex at that point, and Python runs signal handlers
-    only on the main thread -- so Ctrl-C is never processed and /health never answers.
-    Killing the process is the only way out.
-
-    Measured on the CODa frames, every caption request had been over the limit the whole
-    time. The camera is 1224x1024, which is ~1200 image tokens on its own:
-
-        TT_VLM_MAX_SEQ_LEN   1024
-        paper prompt         prefill 1279 + 256 = 1535
-        terse prompt         prefill 1429 + 128 = 1557
-
-    So the 272-caption pass and both probes ran outside the cache and mostly got away with
-    it. Eight captions succeeded and the ninth wedged the board.
-
-    A client cannot check this for itself: it has neither the tokenizer nor `max_seq_len`,
-    and the image token count depends on resolution. A comment in the captioner asked it
-    to ("Must satisfy prefill+max_gen_len <= TT_VLM_MAX_SEQ_LEN") and nothing enforced it.
-
-    Lives in the domain layer so the rule is testable without torch, ttnn or a board.
-    """
+    Past the cache `decode_forward` writes through a NoC that has no bounds concept, so
+    it lands in whatever DRAM follows: usually harmless, occasionally a spinning core and
+    a board only a reboot clears. A client cannot check this itself -- it has neither the
+    tokenizer nor `max_seq_len`, and image tokens depend on resolution."""
     if prefill_len + max_gen_len <= max_seq_len:
         return
     raise InvalidRequest(
