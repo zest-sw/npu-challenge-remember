@@ -57,6 +57,11 @@ requests
 scipy
 opencv-python-headless
 
+# Reads another process's Python stacks without stopping it. The only way to tell a
+# slow board from a wedged one: when a ttnn call spins it holds the GIL, so /health stops
+# answering and Ctrl-C stops working, and the two look identical from outside (#62).
+py-spy
+
 # --- what ttnn needs, since we do not install it as a package ---
 # ttnn is reached through tt-metal.pth, so pip never reads its Requires-Dist. numpy,
 # loguru and networkx arrive via tt-metal's own files; graphviz does not.
