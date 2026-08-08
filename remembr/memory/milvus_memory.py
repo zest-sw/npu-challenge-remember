@@ -20,19 +20,18 @@ FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1
 
 
 
-def _caption_gist(caption: str, width: int = 64) -> str:
-    """A readable slice of a caption, for the trace only.
+def _one_line(text: str, width: int = 64) -> str:
+    """A caption on one line, for the trace.
 
-    Captions from this VLM open with a fixed assistant preamble ending in a colon
-    ("Certainly! Let's break down the image description step by step:", see #50), so
-    every line would look identical without skipping it. Display heuristic, not a fix
-    -- the underlying captions still carry the preamble.
+    Deliberately shows the caption as it is. An earlier version skipped a leading
+    "...:" preamble so trace lines would not all start alike -- 271 of 272 captions
+    open with "Certainly! Let's break down the image description step by step:" (#50).
+    That hid the problem in the one place it was visible, using two tuned constants to
+    guess where the preamble ended. The preamble belongs in the caption prompt's
+    output, and that is where it is being removed (--caption_style terse); until then,
+    identical trace lines are the honest reading.
     """
-    flat = " ".join(str(caption).split())
-    head, _, rest = flat[:120].partition(":")
-    if rest and len(head) < 100:
-        flat = (rest + flat[120:]).strip()
-    return flat[:width]
+    return " ".join(str(text).split())[:width]
 
 
 class MilvusWrapper:
@@ -206,7 +205,7 @@ class MilvusMemory(Memory):
                 stamp += self.time_offset
             shown = strftime('%H:%M:%S', localtime(stamp))
             where = np.array(doc.metadata['position']).round(1).tolist()
-            trace.note(f"{number}  {shown}  {str(where):28s} {_caption_gist(doc.page_content)}")
+            trace.note(f"{number}  {shown}  {str(where):28s} {_one_line(doc.page_content)}")
 
     def search_by_position(self, query: tuple) -> str:
         # docs = pos_db.similarity_search_by_vector(np.array(query))
