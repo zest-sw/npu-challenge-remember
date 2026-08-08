@@ -18,8 +18,6 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
 
 
-
-
 class MilvusWrapper:
 
     def __init__(self, collection_name='test', ip_address='127.0.0.1', port=19530, drop_collection=False):
@@ -102,8 +100,6 @@ class MilvusWrapper:
         return res
 
 
-
-
 class MilvusMemory(Memory):
 
 
@@ -141,8 +137,7 @@ class MilvusMemory(Memory):
     def reset(self, drop_collection=True):
 
         if drop_collection:
-            if not trace.ENABLED:
-                print("Resetting memory. We are dropping the current collection")
+            trace.plain("Resetting memory. We are dropping the current collection")
 
         self.milv_wrapper = MilvusWrapper(self.db_collection_name, self.db_ip, self.db_port, drop_collection=drop_collection)
 
@@ -173,6 +168,19 @@ class MilvusMemory(Memory):
         )
 
 
+    def _doc_epoch(self, doc, ref_time=None):
+        """A document's timestamp as an epoch on the recording's clock.
+
+        Milvus hands `time` back as either a scalar or a [start, end] pair depending on
+        which index answered, and it is stored relative to `time_offset`. Both readers of
+        that field -- the string the model sees and the trace line a human reads -- need
+        the same normalisation, and they each had their own copy of it.
+        """
+        stamp = doc.metadata['time']
+        if hasattr(stamp, '__len__') and len(stamp) == 2:
+            stamp = stamp[0]
+        ref_time = self.time_offset if ref_time is None else ref_time
+        return stamp + ref_time if ref_time else stamp
 
     def _trace_hits(self, kind, query, docs):
         """Show what came back, not just how many.
@@ -185,11 +193,7 @@ class MilvusMemory(Memory):
             return
         trace.step("검색", f"{kind}({query!r})  {len(docs)}개", arrow="←")
         for number, doc in enumerate(docs, 1):
-            stamp = doc.metadata['time']
-            stamp = stamp[0] if hasattr(stamp, '__len__') and len(stamp) == 2 else stamp
-            if self.time_offset:
-                stamp += self.time_offset
-            shown = strftime('%H:%M:%S', localtime(stamp))
+            shown = strftime('%H:%M:%S', localtime(self._doc_epoch(doc)))
             where = np.array(doc.metadata['position']).round(1).tolist()
             trace.note(f"{number}  {shown}  {str(where):28s} {trace.clip(doc.page_content, 64)}")
 
@@ -239,7 +243,6 @@ class MilvusMemory(Memory):
         return docs
 
 
-
     def search_by_text(self, query: str) -> str:
 
         docs = self.text_retriever.invoke(query)
@@ -260,15 +263,7 @@ class MilvusMemory(Memory):
 
         out_string = ""
         for doc in memory_list:
-            if len(doc.metadata['time']) == 2:
-                t = doc.metadata['time'][0]
-            else:
-                t = doc.metadata['time']
-            
-            if ref_time:
-                t += ref_time
-            t = localtime(t)
-            t = strftime('%Y-%m-%d %H:%M:%S', t)
+            t = strftime('%Y-%m-%d %H:%M:%S', localtime(self._doc_epoch(doc, ref_time)))
 
             s = f"At time={t}, the robot was at an average position of {np.array(doc.metadata['position']).round(3).tolist()}."
             s += f"The robot saw the following: {doc.page_content}\n\n"

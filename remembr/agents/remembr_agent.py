@@ -40,7 +40,6 @@ from remembr.agents.agent import ANSWER_SCHEMA, Agent, AgentOutput
 from remembr.utils import trace
 
 
-
 GENERATE_SCHEMA_PROMPT = """You are a robot that can answer specific kinds of questions relating to your memory.
 Use the retrieved conversation context to answer the user's question.
 Respond with exactly one JSON object and nothing else.
@@ -53,7 +52,6 @@ Use null for any field that does not apply.
 - orientation: the yaw in radians as a number when position is provided, otherwise null
 - time: a number or string for minutes-ago answers, otherwise null
 - duration: a number or string for duration answers, otherwise null"""
-
 
 
 ### Print out state of the system
@@ -197,7 +195,6 @@ class ReMEmbRAgent(Agent):
         self.memory = memory
         self.create_tools(memory)
         self.build_graph()
-
 
 
     def create_tools(self, memory):
@@ -517,7 +514,6 @@ class ReMEmbRAgent(Agent):
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
         return {"messages": [json.dumps(parsed)]}
-
 
 
     def build_graph(self):

@@ -127,6 +127,40 @@ def test_nobody_slices_for_display_any_more():
             assert banned not in source, (relative, banned)
 
 
+def test_plain_prints_only_when_the_trace_is_off(capsys=None):
+    """The two outputs say the same things, so one of them has to yield."""
+    import io
+    from contextlib import redirect_stdout
+
+    from remembr.utils import trace
+
+    was = trace.ENABLED
+    try:
+        trace.ENABLED = False
+        out = io.StringIO()
+        with redirect_stdout(out):
+            trace.plain("Question:", "where is the bin")
+        assert out.getvalue().strip() == "Question: where is the bin"
+
+        trace.ENABLED = True
+        out = io.StringIO()
+        with redirect_stdout(out):
+            trace.plain("Question:", "where is the bin")
+        assert out.getvalue() == ""
+    finally:
+        trace.ENABLED = was
+
+
+def test_nobody_writes_the_inverted_flag_check_by_hand():
+    """Eight call sites carried `if not trace.ENABLED: print(...)`, two of them nested."""
+    import os
+
+    root = os.path.join(os.path.dirname(__file__), '..', '..')
+    for relative in ('remembr/scripts/eval.py',):
+        source = open(os.path.join(root, relative)).read()
+        assert 'if not trace.ENABLED' not in source, relative
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

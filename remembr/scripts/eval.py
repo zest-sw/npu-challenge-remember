@@ -146,9 +146,7 @@ def answer_squad_question(model, question, qa_instance, search_events=None):
     if search_events is None:
         search_events = []
 
-    if not trace.ENABLED:
-        if not trace.ENABLED:
-            print(f'Question: {question}')
+    trace.plain(f'Question: {question}')
 
     parsed = None
     out_error = None
@@ -389,8 +387,7 @@ def main(args):
         id = qa_instance['id']
         asked = [line.strip() for line in question.strip().splitlines() if line.strip()]
         trace.question(i + 1, len(data), qa_instance['type'], asked[-1] if asked else question)
-        if not trace.ENABLED:
-            print(f"Evaluating {i} out of {len(data)}")
+        trace.plain(f"Evaluating {i} out of {len(data)}")
 
         if (qa_instance['type'] == 'text'):
             print("Skipping text questions for now")
@@ -446,16 +443,13 @@ def main(args):
             if 'duration_error' in error_dict:
                 running_duration_error += error_dict['duration_error']
 
-        if not trace.ENABLED:
-            print("Question:", question)
+        trace.plain("Question:", question)
         if 'response' in out_dict:
-            if not trace.ENABLED:
-                print("Response:", out_dict['response'])
-        if not trace.ENABLED:
-            print("Running Binary QA accuracy", running_successes/(num_binary+1))
-            print("Running Spatial Error", running_pos_error/(num_position+1))
-            print("Running Temporal Error", running_time_error/(num_time+1))
-            print("Running Duration Error", running_duration_error/(num_duration+1))
+            trace.plain("Response:", out_dict['response'])
+        trace.plain("Running Binary QA accuracy", running_successes/(num_binary+1))
+        trace.plain("Running Spatial Error", running_pos_error/(num_position+1))
+        trace.plain("Running Temporal Error", running_time_error/(num_time+1))
+        trace.plain("Running Duration Error", running_duration_error/(num_duration+1))
 
         print()
 

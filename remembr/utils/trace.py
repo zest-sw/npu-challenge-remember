@@ -72,6 +72,23 @@ def note(text):
     print(f"  {'':<{_LABEL_WIDTH}}   {clip(text)}", flush=True)
 
 
+def plain(*parts):
+    """The pre-trace per-question output, printed only when the trace is off.
+
+    Takes print's arguments so the call sites it replaced did not have to be rewritten.
+
+    Exists so that suppressing it is one decision in one place. It used to be
+    `if not trace.ENABLED: print(...)` written out at eight call sites across eval.py
+    and milvus_memory.py -- unrelated files each carrying an inverted flag check, and
+    two of them had drifted into `if not trace.ENABLED: if not trace.ENABLED:`.
+
+    Both outputs say the same things, so showing both is noise; the trace says them in
+    a layout that survives a long run, so it wins when it is on.
+    """
+    if not ENABLED:
+        print(*parts, flush=True)
+
+
 def warn(text):
     """Something went wrong. Printed even when tracing is off -- these are the lines
     worth seeing in a normal run too, and they used to be bare prints scattered

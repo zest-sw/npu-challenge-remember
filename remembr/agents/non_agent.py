@@ -53,7 +53,6 @@ ANSWER_TYPE_SCHEMA = {
 }
 
 
-
 def _answer_summary(output: AgentOutput) -> str:
     """The filled fields only, so the trace line shows what the model committed to."""
     filled = [(name, getattr(output, name, None))
@@ -147,7 +146,6 @@ class NonAgent(Agent):
 
 
     def query(self, question: str) -> AgentOutput:
-
 
 
         response_example = """{"reasoning", "-input your reasoning in here for the type of question, then the answer-", 
