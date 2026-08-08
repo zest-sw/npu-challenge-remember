@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 import numpy as np
 
 from remembr.memory.memory import Memory, MemoryItem
+from remembr.utils import trace
 
 from langchain_community.vectorstores import Milvus
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -15,7 +16,6 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 
 
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
-
 
 
 class MilvusWrapper:
@@ -100,8 +100,6 @@ class MilvusWrapper:
         return res
 
 
-
-
 class MilvusMemory(Memory):
 
 
@@ -139,7 +137,7 @@ class MilvusMemory(Memory):
     def reset(self, drop_collection=True):
 
         if drop_collection:
-            print("Resetting memory. We are dropping the current collection")
+            trace.plain("Resetting memory. We are dropping the current collection")
 
         self.milv_wrapper = MilvusWrapper(self.db_collection_name, self.db_ip, self.db_port, drop_collection=drop_collection)
 
@@ -170,9 +168,39 @@ class MilvusMemory(Memory):
         )
 
 
+    def _doc_epoch(self, doc, ref_time=None):
+        """A document's timestamp as an epoch on the recording's clock.
+
+        Milvus hands `time` back as either a scalar or a [start, end] pair depending on
+        which index answered, and it is stored relative to `time_offset`. Both readers of
+        that field -- the string the model sees and the trace line a human reads -- need
+        the same normalisation, and they each had their own copy of it.
+        """
+        stamp = doc.metadata['time']
+        if hasattr(stamp, '__len__') and len(stamp) == 2:
+            stamp = stamp[0]
+        ref_time = self.time_offset if ref_time is None else ref_time
+        return stamp + ref_time if ref_time else stamp
+
+    def _trace_hits(self, kind, query, docs):
+        """Show what came back, not just how many.
+
+        Which memories were retrieved is the difference between "search missed it" and
+        "search found it and the model picked another one" -- the open question in #43.
+        Position is on every line because that is what a position answer must match.
+        """
+        if not trace.ENABLED:
+            return
+        trace.step("검색", f"{kind}({query!r})  {len(docs)}개", arrow="←")
+        for number, doc in enumerate(docs, 1):
+            shown = strftime('%H:%M:%S', localtime(self._doc_epoch(doc)))
+            where = np.array(doc.metadata['position']).round(1).tolist()
+            trace.note(f"{number}  {shown}  {str(where):28s} {trace.clip(doc.page_content, 64)}")
+
     def search_by_position(self, query: tuple) -> str:
         # docs = pos_db.similarity_search_by_vector(np.array(query))
         docs = similarity_search_with_score_by_vector(self.position_vector_db, np.array(query).astype(float))
+        self._trace_hits("position", query, docs)
 
         self.working_memory += docs 
 
@@ -205,6 +233,7 @@ class MilvusMemory(Memory):
 
 
         docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([query, 0]))
+        self._trace_hits("time", hms_time, docs)
 
         self.working_memory += docs
 
@@ -214,11 +243,11 @@ class MilvusMemory(Memory):
         return docs
 
 
-
     def search_by_text(self, query: str) -> str:
 
         docs = self.text_retriever.invoke(query)
-        
+        self._trace_hits("text", query, docs)
+
         self.working_memory += docs
 
         docs = self.memory_to_string(docs)
@@ -234,15 +263,7 @@ class MilvusMemory(Memory):
 
         out_string = ""
         for doc in memory_list:
-            if len(doc.metadata['time']) == 2:
-                t = doc.metadata['time'][0]
-            else:
-                t = doc.metadata['time']
-            
-            if ref_time:
-                t += ref_time
-            t = localtime(t)
-            t = strftime('%Y-%m-%d %H:%M:%S', t)
+            t = strftime('%Y-%m-%d %H:%M:%S', localtime(self._doc_epoch(doc, ref_time)))
 
             s = f"At time={t}, the robot was at an average position of {np.array(doc.metadata['position']).round(3).tolist()}."
             s += f"The robot saw the following: {doc.page_content}\n\n"

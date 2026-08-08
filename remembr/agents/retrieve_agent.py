@@ -30,6 +30,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from remembr.agents.agent import AgentOutput
 from remembr.agents.non_agent import NonAgent
+from remembr.utils import trace
 from remembr.utils.util import file_to_string
 
 # The phrase is at most 6 words, so this is generous. Capped because the server
@@ -83,14 +84,15 @@ class RetrieveAgent(NonAgent):
 
     def query(self, question: str) -> AgentOutput:
         search_query = self.search_query_for(question)
+        trace.step("검색어", repr(search_query))
         if search_query:
             # Fills memory.working_memory, which NonAgent.query then answers from.
             # ponytail: one text search, no time/position search and no second
             # round. Enough for the position questions the probe measured; if
             # "how long were you in X" needs both the entering and the leaving
             # memory, add a second query here rather than restoring the agent loop.
+            # The memory traces what came back, so nothing to add here.
             self.memory.search_by_text(search_query)
         else:
-            print("RetrieveAgent: model returned an empty search query; answering from nothing")
-        print(f"RetrieveAgent search query: {search_query!r}")
+            trace.warn("빈 검색어 — 컨텍스트 없이 답변한다")
         return super().query(question)
