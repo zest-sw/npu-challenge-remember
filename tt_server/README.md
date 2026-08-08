@@ -129,7 +129,7 @@ device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
 `ready`는 현재 모드의 모델이 전부 device에 로드된 후에만 true로 바뀝니다. 
 `switching`이 true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
 `debug`는 서버 시작 시점에 읽은 `TT_DEBUG_DECODE`/`TT_DEBUG_SAMPLE` 상태를 보고합니다. (런타임 토글은 제공하지 않습니다)
-`worker`는 device worker의 현재 작업 상태입니다.
+`worker`는 device worker의 현재 작업 상태입니다. `busy=true`이고 `active_elapsed_s`가 계속 증가하면 서바가 죽은 것이 아니라 NPU 작업 하나를 아직 처리 중이라는 뜻입니다. `queue_size`는 대기 중인 작업 수입니다.
 
 ### 모드 — 동시에 로드되는 모델 조합
 보드 DRAM이 ~12GB라 조합 하나만 상주 가능합니다. **모드**는 그 조합에 이름을 붙인 것:
