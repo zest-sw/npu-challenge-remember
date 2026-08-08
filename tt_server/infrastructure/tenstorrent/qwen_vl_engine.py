@@ -45,16 +45,18 @@ class QwenVLEngine:
         self.tokenizer = self.processor.tokenizer
         self.generator = backend["Generator"](model, model_args, self.mesh_device)
         self.xattn_caches = [None for _ in self.generator.model]
+        warmup_xattn_caches = [None for _ in self.generator.model]
         backend["warmup_model"](
             self.generator,
             model_args,
-            self.xattn_caches,
+            warmup_xattn_caches,
             HF_MODEL=True,
             processor=self.processor,
         )
         logger.info("[VLM] ready.")
 
     def describe(self, images, prompt: str, max_gen_len: int = 128) -> str:
+        xattn_caches = [None for _ in self.generator.model]
         sampler = self._get_batch_sampler(0, 0.9, self.model_args[0].tokenizer)
         content = [ImageMedia(image=image) for image in images] + [prompt]
         model_input = self._encode([UserMessage(content=content)], self.processor)
@@ -77,7 +79,7 @@ class QwenVLEngine:
                 vision_images,
                 vision_mask,
                 tokens,
-                self.xattn_caches,
+                xattn_caches,
                 total_lens,
                 prefill_lens,
                 image_grid_thw=image_grid_thw,
@@ -105,7 +107,7 @@ class QwenVLEngine:
                 prefill_tmask,
                 decode_xmask,
                 decode_tmask,
-                self.xattn_caches,
+                xattn_caches,
                 enable_trace=True,
             )
             next_tokens, _ = sampler(logits)
