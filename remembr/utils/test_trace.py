@@ -86,6 +86,47 @@ def test_enabled_follows_the_env_var():
             importlib.reload(trace)
 
 
+def test_clip_puts_everything_on_one_line():
+    from remembr.utils import trace
+
+    assert trace.clip("여러   공백과\n줄바꿈") == "여러 공백과 줄바꿈"
+
+
+def test_clip_marks_where_it_cut():
+    """A silently cut line reads as a short value rather than a long one."""
+    from remembr.utils import trace
+
+    got = trace.clip("x" * 200, 20)
+    assert len(got) == 20 and got.endswith("…"), got
+
+
+def test_clip_leaves_a_short_line_alone():
+    from remembr.utils import trace
+
+    assert trace.clip("짧다", 20) == "짧다"
+
+
+def test_step_and_note_clip_so_callers_do_not_have_to():
+    """The point of moving it here: 160, 80 and 64 were all in use at call sites."""
+    import inspect
+
+    from remembr.utils import trace
+
+    for function in (trace.step, trace.note):
+        assert "clip(" in inspect.getsource(function), function.__name__
+
+
+def test_nobody_slices_for_display_any_more():
+    import os
+
+    root = os.path.join(os.path.dirname(__file__), '..', '..')
+    for relative in ('remembr/agents/remembr_agent.py', 'remembr/agents/non_agent.py',
+                     'remembr/memory/milvus_memory.py'):
+        source = open(os.path.join(root, relative)).read()
+        for banned in ('[:160]', '[:80]', '_one_line'):
+            assert banned not in source, (relative, banned)
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

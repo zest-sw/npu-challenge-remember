@@ -20,20 +20,6 @@ FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1
 
 
 
-def _one_line(text: str, width: int = 64) -> str:
-    """A caption on one line, for the trace.
-
-    Deliberately shows the caption as it is. An earlier version skipped a leading
-    "...:" preamble so trace lines would not all start alike -- 271 of 272 captions
-    open with "Certainly! Let's break down the image description step by step:" (#50).
-    That hid the problem in the one place it was visible, using two tuned constants to
-    guess where the preamble ended. The preamble belongs in the caption prompt's
-    output, and that is where it is being removed (--caption_style terse); until then,
-    identical trace lines are the honest reading.
-    """
-    return " ".join(str(text).split())[:width]
-
-
 class MilvusWrapper:
 
     def __init__(self, collection_name='test', ip_address='127.0.0.1', port=19530, drop_collection=False):
@@ -205,7 +191,7 @@ class MilvusMemory(Memory):
                 stamp += self.time_offset
             shown = strftime('%H:%M:%S', localtime(stamp))
             where = np.array(doc.metadata['position']).round(1).tolist()
-            trace.note(f"{number}  {shown}  {str(where):28s} {_one_line(doc.page_content)}")
+            trace.note(f"{number}  {shown}  {str(where):28s} {trace.clip(doc.page_content, 64)}")
 
     def search_by_position(self, query: tuple) -> str:
         # docs = pos_db.similarity_search_by_vector(np.array(query))

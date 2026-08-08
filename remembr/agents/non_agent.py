@@ -216,7 +216,7 @@ class NonAgent(Agent):
             except Exception as e:
                 last_error = e
                 trace.warn(f"파싱 실패 {parse_try}/{MAX_PARSE_RETRIES}: {e}")
-                trace.note(f"원본: {response[:160]}")
+                trace.note(f"원본: {response}")
                 continue
 
             trace.step("답변", _answer_summary(response))

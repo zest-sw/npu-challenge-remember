@@ -424,7 +424,7 @@ class ReMEmbRAgent(Agent):
         else:
             # No tool call means should_continue routes straight to generate. Worth
             # seeing: this is what a planner that gave up looks like.
-            trace.step(f"턴{turn}", f"tool 호출 없음 — {str(response.content)[:80]!r}")
+            trace.step(f"턴{turn}", f"tool 호출 없음 — {str(response.content)!r}")
 
         self.agent_call_count += 1
 
@@ -508,7 +508,7 @@ class ReMEmbRAgent(Agent):
 
         except Exception as error:
             trace.warn(f"답변 파싱 실패: {error}")
-            trace.note(f"원본: {response[:160]}")
+            trace.note(f"원본: {response}")
             raise ValueError("Generate call failed. Retrying...")
 
         trace.step("답변", "  ".join(f"{k}={parsed[k]!r}" for k in

@@ -31,6 +31,21 @@ ENABLED = os.environ.get("REMEMBR_TRACE", "0") == "1"
 
 _LABEL_WIDTH = 10
 
+# One line means one line. Callers pass whatever they have -- a caption, a raw model
+# reply, a tool argument -- and this decides how much of it fits, so the decision lives
+# in one place instead of as a different `[:N]` at every call site (160, 80 and 64 were
+# all in use). Whitespace is collapsed for the same reason: a value with a newline in it
+# would otherwise break the one-line-per-step layout that makes this readable.
+_TEXT_WIDTH = 96
+
+
+def clip(text, width=None):
+    """`text` on one line, cut to width. Public because callers building a multi-line
+    block (search hits) need the same treatment per row before joining."""
+    flat = " ".join(str(text).split())
+    width = _TEXT_WIDTH if width is None else width
+    return flat if len(flat) <= width else flat[: width - 1] + "…"
+
 
 def question(index, total, qtype, asked):
     """Header for one question. `index` is 1-based."""
@@ -47,14 +62,14 @@ def step(label, text, arrow="→"):
     """
     if not ENABLED:
         return
-    print(f"  {label:<{_LABEL_WIDTH}} {arrow} {text}", flush=True)
+    print(f"  {label:<{_LABEL_WIDTH}} {arrow} {clip(text)}", flush=True)
 
 
 def note(text):
     """An unlabelled line, for things that are neither input nor output."""
     if not ENABLED:
         return
-    print(f"  {'':<{_LABEL_WIDTH}}   {text}", flush=True)
+    print(f"  {'':<{_LABEL_WIDTH}}   {clip(text)}", flush=True)
 
 
 def warn(text):
