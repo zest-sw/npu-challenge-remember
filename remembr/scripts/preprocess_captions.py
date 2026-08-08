@@ -13,7 +13,7 @@ import time
 # load this directory
 sys.path.append(sys.path[0] + '/..')
 # NOTE: VILACaptioner is imported lazily inside build_captioner() so this script
-# also runs in the (VILA-free) remembr_venv when using the Tenstorrent NPU
+# also runs without the VILA stack when using the Tenstorrent NPU
 # captioner. Importing VILA at module load would hard-fail without the VILA stack.
 from utils.util import get_frames
 import pickle as pkl

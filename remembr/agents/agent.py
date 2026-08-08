@@ -20,6 +20,10 @@ class AgentOutput:
 
 
 
+# Naming them in the grammar makes anything else ungenerable. Unnamed, the model
+# invented "image" and "yes/no".
+ANSWER_TYPES = ('position', 'time', 'duration', 'binary', 'text')
+
 # The grammar the server enforces for an answer, in one place because it is the same
 # contract as AgentOutput above -- two spellings of one thing, so they live together.
 # They drifted twice while spelled separately in each agent: `position` was a loose
@@ -38,7 +42,7 @@ class AgentOutput:
 ANSWER_SCHEMA = {
     'type': 'object',
     'properties': {
-        'type': {'type': 'string', 'maxLength': 20},
+        'type': {'enum': list(ANSWER_TYPES)},
         'text': {'type': 'string', 'maxLength': 300},
         # eval compares this case-insensitively against "yes"/"no", so an enum makes
         # anything else ungenerable rather than merely short.
@@ -58,14 +62,10 @@ ANSWER_SCHEMA = {
         # orientation of {theta} radians". Saying "number" removes the runaway rather
         # than capping it -- number grammar is finite, so no maxLength is needed.
         'orientation': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
-        # A number is what eval wants; the string branch stays because upstream tolerates
-        # "5.3" and eval()s it, but it is bounded now.
-        'time': {
-            'anyOf': [{'type': 'number'}, {'type': 'string', 'maxLength': 24}, {'type': 'null'}]
-        },
-        'duration': {
-            'anyOf': [{'type': 'number'}, {'type': 'string', 'maxLength': 24}, {'type': 'null'}]
-        },
+        # Numbers only. The string branch upstream tolerates invited prose --
+        # `"time": "11 minutes ago"` scored as unanswered because eval() cannot parse it.
+        'time': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
+        'duration': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
     },
     # AgentOutput takes no defaults, so every key must be present or from_dict() raises
     # and the caller retries.

@@ -37,7 +37,7 @@ from remembr.tools.functions_wrapper import FunctionsWrapper
 from remembr.memory.memory import Memory
 
 from remembr.agents.agent import ANSWER_SCHEMA, Agent, AgentOutput
-
+from remembr.utils import trace
 
 
 GENERATE_SCHEMA_PROMPT = """You are a robot that can answer specific kinds of questions relating to your memory.
@@ -45,14 +45,13 @@ Use the retrieved conversation context to answer the user's question.
 Respond with exactly one JSON object and nothing else.
 The JSON object must contain all of these keys: type, text, binary, position, orientation, time, duration.
 Use null for any field that does not apply.
-- type: the answer category
+- type: exactly one of position, time, duration, binary, text -- nothing else
 - text: a short answer to the user
 - binary: yes/no for binary questions, otherwise null
 - position: an array like [x, y, z] for where questions, otherwise null
 - orientation: the yaw in radians as a number when position is provided, otherwise null
-- time: a number or string for minutes-ago answers, otherwise null
-- duration: a number or string for duration answers, otherwise null"""
-
+- time: minutes ago as a number, not words. 11, not "11 minutes ago". Otherwise null
+- duration: minutes as a number, not words. Otherwise null"""
 
 
 ### Print out state of the system
@@ -196,7 +195,6 @@ class ReMEmbRAgent(Agent):
         self.memory = memory
         self.create_tools(memory)
         self.build_graph()
-
 
 
     def create_tools(self, memory):
@@ -413,11 +411,19 @@ class ReMEmbRAgent(Agent):
 
         response = model.invoke({"question": question, "chat_history": messages[:]})
 
+        turn = self.agent_call_count + 1
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call['name'] != "__conversational_response":
-                    args = re.sub("\{.*?\}", "", str(tool_call['args'])) # remove curly braces
+                    # ChatPromptTemplate reads `{...}` as a variable, so the braces
+                    # go. Only the braces: a regex over them took the dict with it.
+                    args = str(tool_call['args']).replace('{', '').replace('}', '')
                     self.previous_tool_requests += f"I previously used the {tool_call['name']} tool with the arguments: {args}.\n"
+                    trace.step(f"턴{turn}", f"{tool_call['name']}({tool_call['args']})")
+        else:
+            # No tool call means should_continue routes straight to generate. Worth
+            # seeing: this is what a planner that gave up looks like.
+            trace.step(f"턴{turn}", f"tool 호출 없음 — {str(response.content)!r}")
 
         self.agent_call_count += 1
 
@@ -499,13 +505,17 @@ class ReMEmbRAgent(Agent):
             if (parsed['position'] is not None) and len(parsed['position']) != 3:
                 raise ValueError(f"Shape of position was incorrect. {parsed['position']}. Retrying...")
 
-        except:
+        except Exception as error:
+            trace.warn(f"답변 파싱 실패: {error}")
+            trace.note(f"원본: {response}")
             raise ValueError("Generate call failed. Retrying...")
 
+        trace.step("답변", "  ".join(f"{k}={parsed[k]!r}" for k in
+                                    ('type', 'position', 'time', 'duration', 'binary')
+                                    if parsed.get(k) is not None))
         self.previous_tool_requests = "These are the tools I have previously used so far: \n"
         self.agent_call_count = 0
         return {"messages": [json.dumps(parsed)]}
-
 
 
     def build_graph(self):
