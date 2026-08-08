@@ -1,5 +1,6 @@
 import base64
 import io
+import os
 import time
 import uuid
 
@@ -8,6 +9,7 @@ from PIL import Image
 
 from tt_server.application.commands import CaptionCommand, ChatCommand
 from tt_server.application.service import InferenceService
+from tt_server.domain.models import cap_long_side
 from tt_server.domain.errors import (
     CapabilityUnavailable,
     InferenceError,
@@ -19,6 +21,9 @@ from tt_server.domain.errors import (
 
 from .schemas import CaptionRequest, ChatCompletionRequest, ModeRequest
 
+
+# Longest side a caption frame may reach the VLM at; 0 disables downscaling.
+MAX_IMAGE_LONG_SIDE = int(os.environ.get("TT_VLM_IMAGE_LONG_SIDE", "768"))
 
 DEFAULT_VLM_PROMPT = (
     "<video> Describe in detail what you see: people, objects, environment, and "
@@ -142,11 +147,19 @@ def _messages_to_prompt(messages) -> str:
 
 
 def _decode_image(encoded: str) -> Image.Image:
+    """Decode a frame, downscaling only if it is over TT_VLM_IMAGE_LONG_SIDE.
+
+    This was `.resize((224, 224))` -- unconditional, square, whatever the client sent.
+    The camera is 1224x1024, so the VLM saw 1/25 of the area and captions could not name
+    what was no longer in the pixels: of 272 captions, 33 named a building and 1 mentioned
+    the police call pole the questions ask about (#59).
+    """
     try:
         raw = base64.b64decode(encoded)
-        return Image.open(io.BytesIO(raw)).convert("RGB").resize((224, 224))
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception as error:  # noqa: BLE001
         raise InvalidRequest(f"invalid base64 image: {error}") from error
+    return cap_long_side(image, MAX_IMAGE_LONG_SIDE)
 
 
 def _health_payload(snapshot):
