@@ -2,6 +2,7 @@ import base64
 import io
 import time
 import uuid
+import os
 
 from fastapi import FastAPI
 from PIL import Image
@@ -144,7 +145,12 @@ def _messages_to_prompt(messages) -> str:
 def _decode_image(encoded: str) -> Image.Image:
     try:
         raw = base64.b64decode(encoded)
-        return Image.open(io.BytesIO(raw)).convert("RGB").resize((224, 224))
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+        # 224 by default
+        long_side = int(os.environ.get("TT_VLM_IMAGE_LONG_SIDE", "224"))
+        image.thumbnail((long_side, long_side))
+        return image
+
     except Exception as error:  # noqa: BLE001
         raise InvalidRequest(f"invalid base64 image: {error}") from error
 
