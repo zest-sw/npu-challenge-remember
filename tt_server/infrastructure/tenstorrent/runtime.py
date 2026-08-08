@@ -60,13 +60,15 @@ class TenstorrentRuntime:
             self._worker.start()
         self._started.wait()
         if self._startup_error is not None:
-            raise RuntimeError("failed to initialize the Tenstorrent runtime") from self._startup_error
+            raise RuntimeError(
+                "failed to initialize the Tenstorrent runtime"
+            ) from self._startup_error
         return self.snapshot()
 
     def snapshot(self) -> RuntimeSnapshot:
         with self._state_lock:
             snapshot = self._snapshot
-            return self._with_worker_state(snapshot)
+        return self._with_worker_state(snapshot)
 
     def chat(self, command: ChatCommand) -> str:
         future = self._admit("llm", "chat", self._run_chat, command)
@@ -144,7 +146,9 @@ class TenstorrentRuntime:
             self._load_spec(self.settings.initial_spec, self.settings.initial_mode)
         except BaseException as error:  # startup failure must always unblock start()
             self._startup_error = error
-            self._set_snapshot(LifecycleState.FAILED, None, None, None, error=str(error))
+            self._set_snapshot(
+                LifecycleState.FAILED, None, None, None, error=str(error)
+            )
             logger.exception("Tenstorrent runtime startup failed")
             self._release_device()
             self._started.set()
@@ -236,7 +240,9 @@ class TenstorrentRuntime:
             return self._load_spec(MODES[mode], mode)
         except BaseException as error:
             self._release_device()
-            self._set_snapshot(LifecycleState.FAILED, None, None, None, error=str(error))
+            self._set_snapshot(
+                LifecycleState.FAILED, None, None, None, error=str(error)
+            )
             raise
 
     def _run_chat(self, command: ChatCommand) -> str:
@@ -299,8 +305,8 @@ class TenstorrentRuntime:
         )
         with self._state_lock:
             self._snapshot = snapshot
-        return snapshot
-    
+        return self._with_worker_state(snapshot)
+
     def _set_active_job(self, job_name: str) -> None:
         with self._active_lock:
             self._active_job = job_name

@@ -70,13 +70,14 @@ class FakeVLM:
     def describe(self, images, prompt, max_gen_len):
         return f"vlm:{prompt}:{len(images)}"
 
+
 class BlockingVLM(FakeVLM):
     started = threading.Event()
     release = threading.Event()
 
     def describe(self, images, prompt, max_gen_len):
-        self.started.set()
-        self.release.wait(timeout=5)
+        type(self).started.set()
+        type(self).release.wait(timeout=5)
         return super().describe(images, prompt, max_gen_len)
 
 
@@ -155,16 +156,16 @@ class RuntimeTests(unittest.TestCase):
             ["open", "sync", "close", "open", "close", "open", "close"],
         )
 
-
     def test_snapshot_reports_active_worker_job(self):
         BlockingVLM.started.clear()
         BlockingVLM.release.clear()
+
         runtime, _ = self.make_runtime(vlm_factory=BlockingVLM)
         runtime.start()
 
         result = {}
         thread = threading.Thread(
-            target=lambda : result.setdefault(
+            target=lambda: result.setdefault(
                 "caption", runtime.caption(CaptionCommand((object(),), "scene"))
             )
         )
@@ -192,10 +193,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot.worker_queue_size, 1)
         self.assertIsNotNone(snapshot.worker_active_elapsed_s)
         self.assertGreaterEqual(snapshot.worker_active_elapsed_s, 0)
-        
+
         time.sleep(0.01)
         later = runtime.snapshot()
-        self.assertGreaterEqual(later.worker_active_elapsed_s, snapshot.worker_active_elapsed_s)
+        self.assertGreaterEqual(
+            later.worker_active_elapsed_s, snapshot.worker_active_elapsed_s
+        )
 
         BlockingVLM.release.set()
         thread.join(timeout=1)
@@ -207,6 +210,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(idle.worker_active_job)
         self.assertIsNone(idle.worker_active_elapsed_s)
         runtime.close()
+
 
 if __name__ == "__main__":
     unittest.main()
