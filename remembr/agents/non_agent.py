@@ -10,7 +10,7 @@ sys.path.append(sys.path[0] + '/..')
 from remembr.tools.tools import format_docs
 from remembr.utils.util import file_to_string
 
-from remembr.agents.agent import ANSWER_SCHEMA, Agent, AgentOutput
+from remembr.agents.agent import ANSWER_SCHEMA, ANSWER_TYPES, Agent, AgentOutput
 from remembr.utils import trace
 from remembr.memory.memory import Memory
 
@@ -20,8 +20,6 @@ def parse_json(string):
     parsed = json.loads(parsed)
     return parsed
 
-
-ANSWER_TYPES = ('position', 'time', 'duration', 'binary', 'text')
 
 # Which key the grammar must force to be non-null once the type is known. 'text' is
 # already required and non-nullable, so it needs no extra pinning.
