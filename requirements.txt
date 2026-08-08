@@ -1,11 +1,66 @@
-langchain-community
-langgraph
-langchain_openai
-langchain_nvidia_ai_endpoints
+# ReMEmbR on a Tenstorrent NPU -- what this repo actually imports.
+#
+# Install into one venv together with tt-metal's own requirements, which pin torch and
+# the model stack. tt-metal ships CPU torch (`torch==2.7.1+cpu`), so the PyTorch CPU
+# index is required:
+#
+#   python -m venv .venv
+#   .venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+#       -r /home/user/tt-metal/tt_metal/python_env/requirements-dev.txt \
+#       -r /home/user/tt-metal/models/requirements-model.txt \
+#       -r /home/user/tt-metal/models/bos_model/qwen3_vl/requirements.txt \
+#       -r requirements.txt
+#
+# ttnn itself is not installed -- it is an editable install in the tt-metal tree, reached
+# by putting that tree on sys.path (see .venv/lib/*/site-packages/tt-metal.pth).
+#
+# Versions are left open unless something forced a pin. tt-metal's files pin the shared
+# stack (torch, transformers, numpy); pinning the same packages here would only create a
+# second place for them to drift.
+#
+# This file used to describe the upstream CUDA project: it pinned pydantic==1.10.18,
+# gradio, deepspeed and accelerate, none of which were installed and the first of which
+# was the stated reason the client and server needed separate environments. VILA is gone
+# -- captioning goes to the NPU over HTTP -- so that reason is gone with it.
+
+# --- agent and memory (client side) ---
+# Pinned to the 0.2 line the agents were written against. Left open, pip takes langchain
+# 1.x, which is two majors up and moved `ChatOllama` out of `langchain_community` --
+# every agent module fails to import. Unifying the environment is not the place to do a
+# langchain upgrade; that is its own change with its own testing.
+langchain==0.2.16
+langchain-core==0.2.40
+langchain-community==0.2.16
+langchain-text-splitters==0.2.4
+langchain-experimental==0.0.65
+langchain-openai==0.1.25
+langchain-huggingface==0.0.3
+langchain-nvidia-ai-endpoints==0.2.2
+langgraph==0.2.40
 pymilvus
-gradio==3.50.2
-langchain_huggingface
+
+# Embeddings for caption and query vectors (mxbai-embed-large-v1). Pinned: the stored
+# `text_embedding` in the caption files was produced by this version, and a different
+# one can shift the vectors enough to reorder search hits (#64).
 sentence-transformers==3.1.0
-accelerate==0.33.0
-deepspeed==0.9.5
-pydantic==1.10.18
+
+# --- inference server ---
+fastapi
+uvicorn
+# Grammar-constrained decoding. This is what makes a small model emit JSON that parses;
+# without it the answer path retried until it gave up.
+lm-format-enforcer
+llama-models
+
+# --- shared ---
+requests
+scipy
+opencv-python-headless
+
+# --- what ttnn needs, since we do not install it as a package ---
+# ttnn is reached through tt-metal.pth, so pip never reads its Requires-Dist. numpy,
+# loguru and networkx arrive via tt-metal's own files; graphviz does not.
+graphviz>=0.20.3
+# tt-metal imports pkg_resources, which setuptools dropped in 81. The original
+# environment runs 59.6.0; anything below 81 works.
+setuptools<81

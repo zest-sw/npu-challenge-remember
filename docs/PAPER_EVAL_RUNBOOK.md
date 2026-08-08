@@ -98,7 +98,7 @@ unzip -q -o ${SEQ}.zip "2d_rect/cam0/${SEQ}/*" "poses/dense/${SEQ}.txt" -d seq${
 우리 extractor는 plain-text pose txt + cam0 PNG만 읽어서 동일한 `.pkl` 파일을 생성한다(ROS 불필요).
 ```bash
 cd /home/user/remembr
-source remembr_venv/bin/activate
+source .venv/bin/activate
 python remembr/scripts/preprocess_coda_rosfree.py \
   --seq_id ${SEQ} \
   --coda_root /home/user/coda_raw/seq${SEQ} \
@@ -124,11 +124,11 @@ venv는 스크립트가 알아서 켠다 — tt-metal로 미리 cd/activate할 �
 
 ---
 
-## 4. 테스트 실행 (terminal B, remembr_venv, **inner** 디렉터리)
+## 4. 테스트 실행 (terminal B, .venv, **inner** 디렉터리)
 
 ```bash
 cd /home/user/remembr
-source remembr_venv/bin/activate
+source .venv/bin/activate
 cd remembr                              # inner: scripts use ./data relative paths
 export OPENAI_API_KEY=local PYTHONPATH=/home/user/remembr
 export TT_VLM_TIMEOUT=3600               # headroom for the first compile

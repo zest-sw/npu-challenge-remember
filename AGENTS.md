@@ -47,7 +47,7 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
   `flock` + `/health` + 기존 process/device holder를 먼저 검사하므로 이미 서버가 있으면 새로
   띄우지 않고 상태 메시지만 출력한다. 이 guard를 우회해 Python entrypoint를 직접 실행하지 말 것.
 - **모드**: 보드 DRAM이 ~12GB라 한 번에 조합 하나만. `3b+3b`(기본) / `caption-3b` / `llm-8b` /
-  `caption-8b`(Qwen3-VL-8B, `TT_PYTHON_ENV=tf457` 필요). 전환은 `POST /mode` — **요청이 자동으로
+  `caption-8b`(Qwen3-VL-8B). 전환은 `POST /mode` — **요청이 자동으로
   모드를 안 바꾼다**, 안 맞으면 409. 전환은 device를 완전히 반환(`close_mesh_device`)했다가
   다시 여는 방식이라 자원 누수 없음(20+ 회 반복 검증됨).
 - **종료**: `Ctrl-C` 후 몇 초~수십 초 걸릴 수 있다(진행 중이던 실제 device 작업은 끝까지 실행

@@ -14,7 +14,7 @@
 ## 0. Architecture at a glance
 
 ```
- remembr (remembr/remembr_venv)              tt_infer_server.py (tt-metal python_env, owns the board)
+ remembr (repo .venv)                        tt_infer_server.py (same .venv, owns the board)
    NonAgent ── HTTP /v1/chat/completions ─────► Llama-3.2-3B  ┐  1 process, device opened once,
    Captioner ─ HTTP /caption ─────────────────► Qwen2.5-VL-3B ┘  both models co-resident,
                                                                  single worker + queue serializes all NPU execution
@@ -70,8 +70,8 @@ docker ps | grep milvus                                    # confirm it is up
 ### 1-3. remembr 전용 venv 생성
 ```bash
 cd /home/user/remembr
-python3 -m venv remembr_venv
-source remembr_venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install --upgrade pip          # ★ upgrade pip first (avoids the old pip resolver bug)
 
 pip install "langchain-core==0.2.40" "langchain-community==0.2.16" \
@@ -125,7 +125,7 @@ TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 ./run_server.sh
 - VLM에는 1024로 충분하다(이미지는 서버에서 224×224로 리사이즈된다).
 - **특정 모드로 바로 올리려면 `TT_MODE`를 지정한다** (기본은 `3b+3b`와 동일 구성):
   ```bash
-  TT_MODE=caption-8b TT_PYTHON_ENV=tf457 ./run_server.sh   # Qwen3-VL-8B만, 4.57 venv
+  TT_MODE=caption-8b ./run_server.sh                       # Qwen3-VL-8B만
   TT_MODE=llm-8b ./run_server.sh                           # Llama-3.1-8B만
   ```
   오타 등 알 수 없는 모드는 device를 건드리기 전에 즉시 실패한다. 다른 사람이 이미 쓰고
@@ -158,11 +158,11 @@ curl -s http://localhost:8100/v1/chat/completions \
 
 ---
 
-## 3. Running the smoke test (remembr_venv)
+## 3. Running the smoke test (.venv)
 
 ```bash
 cd /home/user/remembr
-source remembr_venv/bin/activate
+source .venv/bin/activate
 export OPENAI_API_KEY=local
 PYTHONPATH=$(pwd) python examples/tt_smoke_test.py <image_path_1> <image_path_2> ...
 ```
