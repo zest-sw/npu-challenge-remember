@@ -46,6 +46,11 @@ def create_app(service: InferenceService) -> FastAPI:
     def health():
         return _health_payload(service.health())
 
+    @app.get("/memory")
+    def memory():
+        """Device allocator state. For watching whether requests give back what they take."""
+        return service.device_memory()
+
     @app.get("/mode")
     def get_mode():
         snapshot = service.health()
@@ -142,15 +147,44 @@ def _messages_to_prompt(messages) -> str:
     return "\n\n".join(parts)
 
 
+def _fit_image(image: Image.Image, long_side: int, how: str) -> Image.Image:
+    """Bring a frame to `long_side` one of three ways.
+
+    `stretch` forces a square by distorting -- a 1224x1024 frame comes out 1.2x taller
+    than it is, which is the wrong direction for reading a sign. `contain` keeps the
+    shape and is the cheapest (576 -> 576x480, 1080 patches against 1296), but nothing
+    on this stack has ever run non-square: every tt-metal demo, the warmup dummy and
+    every caption produced here went in square. `letterbox` is the middle: square shape,
+    true proportions, black bars for the difference.
+    """
+    if how == "contain":
+        fitted = image.copy()
+        fitted.thumbnail((long_side, long_side))
+        return fitted
+    if how == "letterbox":
+        fitted = image.copy()
+        fitted.thumbnail((long_side, long_side))
+        canvas = Image.new("RGB", (long_side, long_side), (0, 0, 0))
+        canvas.paste(fitted, ((long_side - fitted.width) // 2,
+                              (long_side - fitted.height) // 2))
+        return canvas
+    return image.resize((long_side, long_side))
+
+
 def _decode_image(encoded: str) -> Image.Image:
+    """Resize a caption frame to TT_VLM_IMAGE_LONG_SIDE (224 by default).
+
+    TT_VLM_IMAGE_FIT picks how: stretch (default, what shipped), contain, or letterbox.
+    """
     try:
         raw = base64.b64decode(encoded)
-        # 224 by default
-        long_side = int(os.environ.get("TT_VLM_IMAGE_LONG_SIDE", "224"))
-        return Image.open(io.BytesIO(raw)).convert("RGB").resize((long_side, long_side))
-
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception as error:  # noqa: BLE001
         raise InvalidRequest(f"invalid base64 image: {error}") from error
+
+    return _fit_image(image,
+                      int(os.environ.get("TT_VLM_IMAGE_LONG_SIDE", "224")),
+                      os.environ.get("TT_VLM_IMAGE_FIT", "stretch"))
 
 
 def _health_payload(snapshot):

@@ -66,6 +66,33 @@ class TenstorrentRuntime:
         future = self._admit("llm", self._run_chat, command)
         return future.result()
 
+    def device_memory(self) -> dict:
+        """Bytes the device allocator is holding, per buffer type.
+
+        Read-only, and cheap enough to call between requests. Answers the question the
+        logs cannot: whether a request gives back everything it took. Growth across
+        identical requests is a leak; a falling `largest_free` while `allocated` holds
+        steady is fragmentation, which is what eventually refuses an allocation even
+        with bytes to spare.
+        """
+        import ttnn
+
+        if self._device is None:
+            return {}
+        out = {}
+        for name, kind in (("dram", ttnn.BufferType.DRAM), ("l1", ttnn.BufferType.L1)):
+            try:
+                view = ttnn.get_memory_view(self._device, kind)
+                out[name] = {
+                    "allocated": view.total_bytes_allocated_per_bank,
+                    "free": view.total_bytes_free_per_bank,
+                    "largest_free": view.largest_contiguous_bytes_free_per_bank,
+                    "banks": view.num_banks,
+                }
+            except Exception as error:  # noqa: BLE001
+                out[name] = {"error": str(error)[:80]}
+        return out
+
     def caption(self, command: CaptionCommand) -> str:
         future = self._admit("vlm", self._run_caption, command)
         return future.result()
