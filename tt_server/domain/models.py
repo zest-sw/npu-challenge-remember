@@ -19,6 +19,13 @@ class RuntimeSnapshot:
     vlm_model: str | None
     llm_precision: str | None = None
     error: str | None = None
+    # debug modes
+    debug_decode: bool = False
+    debug_sample: bool = False
+    worker_busy: bool = False
+    worker_queue_size: int = 0
+    worker_active_job: str | None = None
+    worker_active_elapsed_s: float | None = None
 
     @property
     def ready(self) -> bool:

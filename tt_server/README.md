@@ -101,24 +101,52 @@ schema에는 `{"type": "object"}`만 표시됩니다 — request/response 필드
 작업은 worker queue로 직렬화되므로 요청은 그저 자기 차례를 기다립니다.
 
 ### `GET /health`
+
 device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
+
 ```jsonc
 // 200
-{"ready": true, "mode": "3b+3b", "switching": false, "llm": true, "vlm": true,
- "llm_model": "meta-llama/Llama-3.2-3B-Instruct", "llm_precision": "performance"}
+{
+  "ready": true,
+  "mode": "3b+3b",
+  "switching": false,
+  "llm": true,
+  "vlm": true,
+  "llm_model": "meta-llama/Llama-3.2-3B-Instruct",
+  "llm_precision": "performance",
+  "state": "ready",
+  "error": null,
+  "debug": {
+    "decode": false,
+    "sample": false,
+  },
+  "worker": {
+    "busy": false,
+    "queue_size": 0,
+    "active_job": null,
+    "active_elapsed_s": null,
+  },
+}
 ```
-`ready`는 현재 모드의 모델이 전부 device에 로드된 후에만 true로 바뀝니다. `switching`이
-true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
+
+`ready`는 현재 모드의 모델이 전부 device에 로드된 후에만 true로 바뀝니다.
+`switching`이 true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
+`debug`는 서버 시작 시점에 읽은 `TT_DEBUG_DECODE`/`TT_DEBUG_SAMPLE` 상태를 보고합니다. (런타임 토글은 제공하지 않습니다)
+`worker`는 device worker의 현재 작업 상태입니다. `busy=true`이고 `active_elapsed_s`가 계속 증가하면 서바가 죽은 것이 아니라 NPU 작업 하나를 아직 처리 중이라는 뜻입니다. `queue_size`는 대기 중인 작업 수입니다.
+`/health.worker`는 Python server가 응답 가능한 상태에서만 관측되는 best-effort 상태다.
+TTNN/native 호출이 GIL을 잡고 장시간 블록되면 `/health` 자체가 응답하지 않을 수 있다.
+이 경우 조용한 `/health`를 곧바로 서버 종료로 해석하지 말고, `py-spy dump --nonblocking` 등으로 worker thread가 `active+gil` 상태인지 확인한다. `queue_size`는 `Queue.qsize()` 기반 근사값이며 제어 로직에는 사용하지 않는다.
 
 ### 모드 — 동시에 로드되는 모델 조합
+
 보드 DRAM이 ~12GB라 조합 하나만 상주 가능합니다. **모드**는 그 조합에 이름을 붙인 것:
 
-| 모드 | LLM | VLM |
-|---|---|---|
-| `3b+3b` (기본) | Llama-3.2-3B | Qwen2.5-VL-3B |
-| `caption-3b` | — | Qwen2.5-VL-3B |
-| `llm-8b` | Llama-3.1-8B | — |
-| `caption-8b` | — | Qwen3-VL-8B |
+| 모드           | LLM          | VLM                                                              |
+| -------------- | ------------ | ---------------------------------------------------------------- |
+| `3b+3b` (기본) | Llama-3.2-3B | Qwen2.5-VL-3B                                                    |
+| `caption-3b`   | —            | Qwen2.5-VL-3B                                                    |
+| `llm-8b`       | Llama-3.1-8B | —                                                                |
+| `caption-8b`   | —            | Qwen3-VL-8B (transformers 4.57 venv 필요, `TT_PYTHON_ENV=tf457`) |
 
 **시작 시 선택**: `TT_MODE=caption-8b bash run_server.sh` — 잘못된 이름이면 device를 건드리기
 전에 바로 실패합니다(조용히 멈추지 않음). 안 주면 `TT_ENABLE_LLM`/`TT_ENABLE_VLM` +
@@ -138,10 +166,12 @@ true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
 {"mode": "caption-8b", "switched": true, ...}
 // 400 unknown mode   503 already switching
 ```
+
 현재 모드에 없는 엔드포인트를 호출하면 **409**(예: `caption-3b`에서 `/v1/chat/completions`) —
 "모드를 바꾸라"는 안내 메시지와 함께. 조용히 블록하는 대신 즉시 명확한 에러를 냅니다.
 
 ### `POST /caption` — VLM (Qwen2.5-VL)
+
 ```jsonc
 // request
 {
@@ -162,8 +192,10 @@ true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
 ```
 
 ### `POST /v1/chat/completions` — LLM (Llama-3.2-3B), OpenAI 호환
+
 이 서버가 구현한 OpenAI schema의 subset을 받으므로 `ChatOpenAI`
 (`base_url=http://localhost:8100/v1`)가 수정 없이 동작합니다.
+
 ```jsonc
 // request
 {
@@ -189,6 +221,7 @@ true인 동안은 `/caption`·`/v1/chat/completions`가 503을 반환합니다.
 }
 // 409 현재 모드에 LLM 없음(모드 전환 필요)   503 전환 중
 ```
+
 지원하지 않는 OpenAI 필드(`stream`, `top_p`, `n`, `stop`, …)는 무시되며, usage/token
 count는 보고되지 않습니다.
 
@@ -222,6 +255,7 @@ curl -s localhost:8100/caption -H 'Content-Type: application/json' -d @/tmp/cap.
 ```
 
 Python에서는 그냥 직접 post하면 됩니다 — `TenstorrentCaptioner`가 하는 방식입니다:
+
 ```python
 import base64, requests
 b64 = base64.b64encode(open("frame.png","rb").read()).decode()
@@ -232,21 +266,23 @@ print(r.json()["caption"])
 
 ## Env vars (server)
 
-| var | default | note |
-|-----|---------|------|
-| `TT_MODE` | (unset) | 시작 시 로드할 모드 이름(`3b+3b`/`caption-3b`/`llm-8b`/`caption-8b`). 미지정 모드면 device 건드리기 전에 즉시 실패. 비우면 아래 개별 변수로 결정 |
-| `TT_LLM_MODEL` | `meta-llama/Llama-3.2-3B-Instruct` | LLM (agent reasoning), `TT_MODE` 미지정 시만 |
-| `TT_VLM_MODEL` | `Qwen/Qwen2.5-VL-3B-Instruct` | VLM (captioning), `TT_MODE` 미지정 시만 |
-| `TT_ENABLE_LLM` / `TT_ENABLE_VLM` | `1` / `1` | `TT_MODE` 미지정 시만, 하나만 켜서 fallback 구성 |
-| `REMEMBR_VENV` | `<repo>/.venv` | 서버가 쓸 파이썬 환경. 네 모드 전부 이 하나로 돈다 |
-| `TT_SHUTDOWN_TIMEOUT` | `5` | Ctrl-C 시 uvicorn이 진행 중 요청을 기다리는 최대 초. 진행 중이던 실제 device 작업은 이 값과 무관하게 끝까지 실행된 뒤 안전하게 정리됨 |
-| `TT_WORKER_SHUTDOWN_TIMEOUT` | `180` | main thread가 device worker의 안전 종료를 기다리는 시간. worker는 non-daemon이라 이 시간이 지나도 interpreter가 강제로 버리지 않음 |
-| `TT_SERVER_LOCK_FILE` | `/tmp/remembr-tt-npu-server.lock` | launcher 간 NPU startup 전역 lock. 서버 process가 종료될 때까지 FD를 상속해 유지 |
-| `TT_HEALTH_HOST` / `TT_HEALTH_TIMEOUT` | `127.0.0.1` / `2` | startup preflight의 health 확인 host / timeout(초) |
-| `TT_MAX_CAPTION_FRAMES` | `5` | 한 `/caption` 요청에서 허용할 최대 frame 수. 6장 이상은 검증되지 않은 vision attention deadlock을 막기 위해 거부 |
-| `TT_LLM_MAX_SEQ_LEN` / `TT_VLM_MAX_SEQ_LEN` | `1024` | raise for longer context (uses more DRAM) |
-| `TT_TRACE_REGION_SIZE` | `15000000` | per-model trace buffer |
-| `TT_PORT` | `8100` | |
+| var                                         | default                            | note                                                                                                                                             |
+| ------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TT_MODE`                                   | (unset)                            | 시작 시 로드할 모드 이름(`3b+3b`/`caption-3b`/`llm-8b`/`caption-8b`). 미지정 모드면 device 건드리기 전에 즉시 실패. 비우면 아래 개별 변수로 결정 |
+| `TT_LLM_MODEL`                              | `meta-llama/Llama-3.2-3B-Instruct` | LLM (agent reasoning), `TT_MODE` 미지정 시만                                                                                                     |
+| `TT_VLM_MODEL`                              | `Qwen/Qwen2.5-VL-3B-Instruct`      | VLM (captioning), `TT_MODE` 미지정 시만                                                                                                          |
+| `TT_ENABLE_LLM` / `TT_ENABLE_VLM`           | `1` / `1`                          | `TT_MODE` 미지정 시만, 하나만 켜서 fallback 구성                                                                                                 |
+| `TT_PYTHON_ENV`                             | (unset)                            | `tf457`로 주면 `python_env_tf457`(transformers 4.57.1) 사용 — `caption-8b`에 필요                                                                |
+| `TT_SHUTDOWN_TIMEOUT`                       | `5`                                | Ctrl-C 시 uvicorn이 진행 중 요청을 기다리는 최대 초. 진행 중이던 실제 device 작업은 이 값과 무관하게 끝까지 실행된 뒤 안전하게 정리됨            |
+| `TT_WORKER_SHUTDOWN_TIMEOUT`                | `180`                              | main thread가 device worker의 안전 종료를 기다리는 시간. worker는 non-daemon이라 이 시간이 지나도 interpreter가 강제로 버리지 않음               |
+| `TT_SERVER_LOCK_FILE`                       | `/tmp/remembr-tt-npu-server.lock`  | launcher 간 NPU startup 전역 lock. 서버 process가 종료될 때까지 FD를 상속해 유지                                                                 |
+| `TT_HEALTH_HOST` / `TT_HEALTH_TIMEOUT`      | `127.0.0.1` / `2`                  | startup preflight의 health 확인 host / timeout(초)                                                                                               |
+| `TT_MAX_CAPTION_FRAMES`                     | `5`                                | 한 `/caption` 요청에서 허용할 최대 frame 수. 6장 이상은 검증되지 않은 vision attention deadlock을 막기 위해 거부                                 |
+| `TT_LLM_MAX_SEQ_LEN` / `TT_VLM_MAX_SEQ_LEN` | `1024`                             | raise for longer context (uses more DRAM)                                                                                                        |
+| `TT_TRACE_REGION_SIZE`                      | `15000000`                         | per-model trace buffer                                                                                                                           |
+| `TT_PORT`                                   | `8100`                             |                                                                                                                                                  |
+| `TT_DEBUG_DECODE`                           | `0`                                | `1`이면 LLM 생성 token을 decode된 text로 stdout에 출력. `/health.debug.decode`에서 현재 시작 상태 확인 가능                                      |
+| `TT_DEBUG_SAMPLE`                           | `0`                                | `1`이면 constrained decoding의 sampling/masking diagnostics를 출력. 매우 verbose하므로 짧은 재현에만 사용. `/health.debug.sample`에서 확인 가능  |
 
 remembr 쪽: `TT_LLM_BASE_URL`(default `http://localhost:8100/v1`),
 `TT_VLM_URL`(default `http://localhost:8100/caption`),
