@@ -98,6 +98,20 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-07 - `/health`에 device worker queue 상태 노출
+
+- 8B VLM captioning이 몇 처리 후 오래 멈춘 것처럼 보일 때, 서버가 죽은 것인지 device worker가 긴 `/caption`  요청을 처리 중인지 구분하기 어려웠다.
+- `RuntimeSnapshot`에 worker 상태를 포함하고, `/health.worker`로 `busy`, `queue_size`, `active_job`, `active_elapsed_s`를 노출했다.
+- 이 값들은 Python worker/queue 상태만 읽는 가벼운 관측 정보이며, NPU device에 추가 query를 보내지 않는다. 
+- 기존 `caption`, `/v1/chat/completions`, `/mode` 응답 shape와 NPU lifecycle은 변경하지 않았다.
+
+### 2026-08-06 — `/health`에 LLM debug flag 노출
+
+- `TT_DEBUG_DECODE`/`TT_DEBUG_SAMPLE`은 서버 시작 시 env에서 읽히지만, 정식 문서와 `/health`에 노출되지 않아 실행 중인 서버가 어떤 debug 출력 모드인지 확인하기 어려웠다.
+- `RuntimeSnapshot`에 debug flag를 포함하고 `/health` 응답에 `"debug": {"decode": ..., "sample": ...}`를 추가했다.
+- README/RUNBOOK의 env var 표에 두 debug env의 용도와 주의점을 추가했다. 
+- 런타임 토글, decode 경로, NPU lifecycle은 변경하지 않았다.
+
 ### 2026-08-05 (2) — 답변 스키마가 실제로 제약하지 않던 문제 + 유형 고정 (PR #37, #40)
 
 **① `maxLength`가 적혀 있는데 안 먹혔다 (PR #37).** 보드에서 `orientation`이 폭주했다 —

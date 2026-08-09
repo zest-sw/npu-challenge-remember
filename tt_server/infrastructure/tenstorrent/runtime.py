@@ -4,7 +4,9 @@ import logging
 import os
 import queue
 import threading
+import time
 
+from dataclasses import replace
 from tt_server.application.commands import CaptionCommand, ChatCommand
 from tt_server.config.modes import MODES, ModeSpec
 from tt_server.config.settings import ServerSettings
@@ -41,6 +43,9 @@ class TenstorrentRuntime:
         self._startup_error = None
         self._state_lock = threading.Lock()
         self._admission_lock = threading.Lock()
+        self._active_lock = threading.Lock()
+        self._active_job = None
+        self._active_started_at = None
         self._snapshot = RuntimeSnapshot(LifecycleState.STARTING, None, None, None)
         self._worker = threading.Thread(
             target=self._worker_main,
@@ -55,15 +60,18 @@ class TenstorrentRuntime:
             self._worker.start()
         self._started.wait()
         if self._startup_error is not None:
-            raise RuntimeError("failed to initialize the Tenstorrent runtime") from self._startup_error
+            raise RuntimeError(
+                "failed to initialize the Tenstorrent runtime"
+            ) from self._startup_error
         return self.snapshot()
 
     def snapshot(self) -> RuntimeSnapshot:
         with self._state_lock:
-            return self._snapshot
+            snapshot = self._snapshot
+        return self._with_worker_state(snapshot)
 
     def chat(self, command: ChatCommand) -> str:
-        future = self._admit("llm", self._run_chat, command)
+        future = self._admit("llm", "chat", self._run_chat, command)
         return future.result()
 
     def device_memory(self) -> dict:
@@ -94,7 +102,7 @@ class TenstorrentRuntime:
         return out
 
     def caption(self, command: CaptionCommand) -> str:
-        future = self._admit("vlm", self._run_caption, command)
+        future = self._admit("vlm", "caption", self._run_caption, command)
         return future.result()
 
     def switch_mode(self, mode: str) -> RuntimeSnapshot:
@@ -116,7 +124,7 @@ class TenstorrentRuntime:
                 current.vlm_model,
                 current.llm_precision,
             )
-            future = self._enqueue(self._apply_mode, mode)
+            future = self._enqueue("mode", self._apply_mode, mode)
         return future.result()
 
     def close(self, timeout: float | None = None) -> bool:
@@ -136,7 +144,7 @@ class TenstorrentRuntime:
         self._worker.join(timeout=timeout)
         return not self._worker.is_alive()
 
-    def _admit(self, capability: str, function, *args):
+    def _admit(self, capability: str, job_name: str, function, *args):
         with self._admission_lock:
             current = self.snapshot()
             if current.lifecycle == LifecycleState.SWITCHING:
@@ -151,11 +159,11 @@ class TenstorrentRuntime:
                 raise CapabilityUnavailable(
                     f"caption unavailable in mode {current.mode!r} (no VLM loaded); switch modes first"
                 )
-            return self._enqueue(function, *args)
+            return self._enqueue(job_name, function, *args)
 
-    def _enqueue(self, function, *args):
+    def _enqueue(self, job_name: str, function, *args):
         future = concurrent.futures.Future()
-        self._jobs.put((function, args, future))
+        self._jobs.put((job_name, function, args, future))
         return future
 
     def _worker_main(self) -> None:
@@ -165,7 +173,9 @@ class TenstorrentRuntime:
             self._load_spec(self.settings.initial_spec, self.settings.initial_mode)
         except BaseException as error:  # startup failure must always unblock start()
             self._startup_error = error
-            self._set_snapshot(LifecycleState.FAILED, None, None, None, error=str(error))
+            self._set_snapshot(
+                LifecycleState.FAILED, None, None, None, error=str(error)
+            )
             logger.exception("Tenstorrent runtime startup failed")
             self._release_device()
             self._started.set()
@@ -178,13 +188,16 @@ class TenstorrentRuntime:
                 item = self._jobs.get()
                 if item is None:
                     break
-                function, args, future = item
+                job_name, function, args, future = item
                 if not future.set_running_or_notify_cancel():
                     continue
                 try:
+                    self._set_active_job(job_name)
                     future.set_result(function(*args))
                 except BaseException as error:
                     future.set_exception(error)
+                finally:
+                    self._clear_active_job()
         finally:
             self._release_device()
             current = self.snapshot()
@@ -254,7 +267,9 @@ class TenstorrentRuntime:
             return self._load_spec(MODES[mode], mode)
         except BaseException as error:
             self._release_device()
-            self._set_snapshot(LifecycleState.FAILED, None, None, None, error=str(error))
+            self._set_snapshot(
+                LifecycleState.FAILED, None, None, None, error=str(error)
+            )
             raise
 
     def _run_chat(self, command: ChatCommand) -> str:
@@ -312,7 +327,34 @@ class TenstorrentRuntime:
             vlm_model=vlm_model,
             llm_precision=llm_precision,
             error=error,
+            debug_decode=self.settings.debug_decode,
+            debug_sample=self.settings.debug_sample,
         )
         with self._state_lock:
             self._snapshot = snapshot
-        return snapshot
+        return self._with_worker_state(snapshot)
+
+    def _set_active_job(self, job_name: str) -> None:
+        with self._active_lock:
+            self._active_job = job_name
+            self._active_started_at = time.perf_counter()
+
+    def _clear_active_job(self) -> None:
+        with self._active_lock:
+            self._active_job = None
+            self._active_started_at = None
+
+    def _with_worker_state(self, snapshot: RuntimeSnapshot) -> RuntimeSnapshot:
+        with self._active_lock:
+            active_job = self._active_job
+            started_at = self._active_started_at
+        elapsed = None
+        if active_job is not None and started_at is not None:
+            elapsed = time.perf_counter() - started_at
+        return replace(
+            snapshot,
+            worker_busy=active_job is not None,
+            worker_queue_size=self._jobs.qsize(),
+            worker_active_job=active_job,
+            worker_active_elapsed_s=elapsed,
+        )

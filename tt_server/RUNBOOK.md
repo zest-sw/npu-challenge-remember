@@ -139,9 +139,10 @@ TT_LLM_MAX_SEQ_LEN=2048 TT_VLM_MAX_SEQ_LEN=1024 ./run_server.sh
 
 ### 준비 여부 확인 (다른 터미널에서)
 ```bash
-curl -s http://localhost:8100/health
-# -> {"ready":true,"llm":true,"vlm":true}
+curl -s http://localhost:8100/health | python -m json.tool
+# -> {"ready": true, "mode": "default", "switching": false, "llm": true, ... }
 ```
+`debug.decode`/`debug.sample`은 서버 시작 시 env에서 읽힌 상태만 보여준다. 실행 중 토글은 없다.
 
 ### 단독 sanity check (선택)
 ```bash
@@ -249,6 +250,8 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 | `TT_SERVER_LOCK_FILE` | `/tmp/remembr-tt-npu-server.lock` | server lifetime 동안 유지되는 전역 NPU startup lock |
 | `TT_HEALTH_HOST` / `TT_HEALTH_TIMEOUT` | `127.0.0.1` / `2` | preflight health host / timeout(초) |
 | `TT_PORT` | `8100` | |
+| `TT_DEBUG_DECODE` | `0` | LLM token stream을 stdout에 출력. 생성 내용/JSON 깨짐 확인용 |
+| `TT_DEBUG_SAMPLE` | `0` | token masking/sampling 내부 상태 출력. schema/debug 용도, 로그가 매우 큼 |
 
 **remembr side**
 
