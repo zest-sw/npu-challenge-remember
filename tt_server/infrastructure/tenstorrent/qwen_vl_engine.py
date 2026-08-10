@@ -1,12 +1,20 @@
+import logging
+import os
+
 import torch
 import ttnn
-from loguru import logger
 from transformers import AutoProcessor
 
 from llama_models.llama3.api.datatypes import ImageMedia, UserMessage
 
 from .model_env import select_hf_model
 from .vlm_backends import load_vlm_backend
+
+# stdlib logging, not loguru: in this process every loguru record after the ttnn import
+# vanished -- the server log holds exactly one python-loguru line (ttnn's own, at import)
+# and none of ours, while runtime.py's stdlib records came through fine. Reason unknown;
+# this uses the logger that demonstrably reaches the log.
+logger = logging.getLogger(__name__)
 
 
 class QwenVLEngine:
@@ -45,6 +53,15 @@ class QwenVLEngine:
         self.tokenizer = self.processor.tokenizer
         self.generator = backend["Generator"](model, model_args, self.mesh_device)
         warmup_xattn_caches = [None for _ in self.generator.model]
+        # Our shape first, tt-metal's second. tt-metal's warmup ends with
+        # decode_forward(), whose enable_trace defaults to True, so it leaves a 224x224
+        # decode trace live -- which is what the "allocating buffers is unsafe due to an
+        # active trace" warning is about. Going first means the request shape is prefilled
+        # with no trace resident, which separates "the size is too big" from "the trace
+        # was in the way". Set TT_VLM_WARMUP_LAST=1 to go back to the original order.
+        warmup_last = os.environ.get("TT_VLM_WARMUP_LAST") == "1"
+        if not warmup_last:
+            self._warm_request_shape()
         backend["warmup_model"](
             self.generator,
             model_args,
@@ -52,7 +69,8 @@ class QwenVLEngine:
             HF_MODEL=True,
             processor=self.processor,
         )
-        self._warm_request_shape()
+        if warmup_last:
+            self._warm_request_shape()
         logger.info("[VLM] ready.")
 
     def _warm_request_shape(self) -> None:
@@ -71,7 +89,6 @@ class QwenVLEngine:
         the server cannot know it -- set TT_VLM_WARMUP_SHAPE=WxH for that case (CODa
         frames are all 1224x1024, so at long_side 576 they arrive as 576x480).
         """
-        import os
         import time
 
         from PIL import Image
@@ -89,15 +106,15 @@ class QwenVLEngine:
             self.describe([Image.new("RGB", (width, height), (128, 128, 128))],
                           "Describe what you see.", max_gen_len=8)
         except Exception as error:  # noqa: BLE001
-            logger.warning(f"[VLM] warmup at {width}x{height} failed ({error}); serving anyway")
+            # The traceback is the point of the run when TT_METAL_OPERATION_TIMEOUT_SECONDS
+            # fires: it names the vision block and the ttnn op the device died on (#70).
+            logger.exception(f"[VLM] warmup at {width}x{height} failed ({error}); serving anyway")
             return
         logger.info(f"[VLM] warm at {width}x{height} in {time.perf_counter() - started:.0f}s")
 
     @staticmethod
     def _request_shape():
         """(width, height) every caption will arrive as, or None if it varies."""
-        import os
-
         told = os.environ.get("TT_VLM_WARMUP_SHAPE")
         if told:
             try:

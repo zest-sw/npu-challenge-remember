@@ -1,5 +1,7 @@
 import logging
+import os
 import signal
+import threading
 
 from tt_server.application.service import InferenceService
 from tt_server.config.settings import ServerSettings
@@ -22,7 +24,16 @@ def main() -> None:
     service = InferenceService(runtime, max_caption_frames=settings.max_caption_frames)
     app = create_app(service)
     logger.info("Loading models on the NPU (this can take several minutes on first run)...")
-    runtime.start()
+    # Serve during the load, so /health can say "starting" instead of not answering at
+    # all. Blocking here made a slow warmup indistinguishable from a wedged board.
+    def load() -> None:
+        try:
+            runtime.start()
+        except Exception:
+            logger.exception("NPU load failed; shutting down")
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=load, name="tt-load", daemon=True).start()
     try:
         uvicorn.run(
             app,

@@ -35,6 +35,7 @@ import pickle
 import re
 import statistics
 import sys
+import threading
 import time
 
 import requests
@@ -73,6 +74,21 @@ def encoded(path):
     return base64.b64encode(buffer.getvalue()).decode()
 
 
+def worker():
+    """What the device worker is doing right now, from #60's /health fields.
+
+    Cheaper and more direct than sampling stacks: `active_job` says which request is on
+    the board and `active_elapsed_s` how long it has been there. It does not replace
+    py-spy for the wedged case -- when a ttnn call spins it holds the GIL and /health
+    stops answering at all -- but that silence is itself the signal.
+    """
+    try:
+        got = requests.get(f"{BASE}/health", timeout=8).json().get("worker") or {}
+        return got
+    except Exception:  # noqa: BLE001
+        return {"unreachable": True}
+
+
 def memory():
     """Device allocator state, or {} if the server is too old to report it."""
     try:
@@ -108,9 +124,26 @@ def main(label, count, gen):
         print(f"요청 전 DRAM 할당 {megabytes(start_mem,'allocated'):.0f}MB"
               f"  최대연속여유 {megabytes(start_mem,'largest_free'):.0f}MB\n", flush=True)
 
+    stop = threading.Event()
+
+    def watch(stop_event):
+        """Print what the board is on while a caption is outstanding."""
+        while not stop_event.wait(30):
+            state = worker()
+            if state.get("unreachable"):
+                print("      /health 무응답 — 워커가 GIL 을 쥐고 도는 상태로 의심된다",
+                      flush=True)
+            elif state.get("busy"):
+                print(f"      {state.get('active_job')} 진행 "
+                      f"{state.get('active_elapsed_s', 0):.0f}s"
+                      f"   대기 {state.get('queue_size', 0)}", flush=True)
+
     rows = []
     for index, path in enumerate(frames(count), 1):
+        watcher = threading.Thread(target=watch, args=(stop,), daemon=True)
+        watcher.start()
         text, took, error = caption(encoded(path), gen)
+        stop.set(); stop.clear()
         if error:
             print(f"{index}  실패 {took:5.1f}s  {error}", flush=True)
             rows.append({"ok": False, "seconds": took, "error": error})

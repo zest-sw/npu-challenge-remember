@@ -3,6 +3,7 @@ import gc
 import logging
 import os
 import queue
+import signal
 import threading
 import time
 
@@ -195,7 +196,22 @@ class TenstorrentRuntime:
                     self._set_active_job(job_name)
                     future.set_result(function(*args))
                 except BaseException as error:
+                    # Also log it: the future only reaches the caller, so a device
+                    # failure left no trace on the server at all (#70).
+                    logger.exception(f"[{job_name}] failed on the device: {error}")
                     future.set_exception(error)
+
+                    # Set its snapshot as FAILED 
+                    current = self.snapshot()
+                    self._set_snapshot(
+                        LifecycleState.FAILED,
+                        current.mode,
+                        current.llm_model,
+                        current.vlm_model,
+                        current.llm_precision,
+                        error=str(error),
+                    )
+                    break
                 finally:
                     self._clear_active_job()
         finally:
@@ -301,10 +317,23 @@ class TenstorrentRuntime:
         self._drop_engines()
         device = self._device
         self._device = None
+        # close_mesh_device() polls the device. Once the device is dead -- which is what a
+        # TT_METAL_OPERATION_TIMEOUT throw means -- that poll never ends, and it spins
+        # holding the GIL, so no Python-level timeout can interrupt it and no other thread
+        # can reach os._exit(). SIGALRM can: we install no handler for it, so its default
+        # disposition terminates the process in the kernel, with no GIL required.
+        deadline = max(30, self.settings.worker_shutdown_timeout)
+        try:
+            signal.alarm(deadline)
+        except (ValueError, AttributeError):  # not the main thread, or no SIGALRM
+            deadline = None
         try:
             self._device_factory.close(device)
         except BaseException:  # preserve the original failure during cleanup
             logger.exception("Failed to close the Tenstorrent device")
+        finally:
+            if deadline is not None:
+                signal.alarm(0)
 
     def _drop_engines(self) -> None:
         self._llm = None
