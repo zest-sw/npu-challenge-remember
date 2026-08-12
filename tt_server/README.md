@@ -137,6 +137,33 @@ device worker와 각 engine의 준비 상태. 가볍고 NPU 작업 없음.
 TTNN/native 호출이 GIL을 잡고 장시간 블록되면 `/health` 자체가 응답하지 않을 수 있다.
 이 경우 조용한 `/health`를 곧바로 서버 종료로 해석하지 말고, `py-spy dump --nonblocking` 등으로 worker thread가 `active+gil` 상태인지 확인한다. `queue_size`는 `Queue.qsize()` 기반 근사값이며 제어 로직에는 사용하지 않는다.
 
+### `GET /memory`
+
+device allocator 상태를 읽는 디버그 엔드포인트. NPU 작업을 새로 enqueue하지 않고,
+반복 caption 요청이 메모리를 돌려주는지 확인할 때 쓴다.
+
+```jsonc
+// 200
+{
+  "dram": {
+    "allocated": 123456,
+    "free": 123456789,
+    "largest_free": 123456789,
+    "banks": 3
+  },
+  "l1": {
+    "allocated": 1234,
+    "free": 123456,
+    "largest_free": 123456,
+    "banks": 20
+  }
+}
+```
+
+같은 요청을 반복했는데 `allocated`가 계속 늘면 request-local buffer가 반환되지 않는 것이다.
+`allocated`는 비슷한데 `largest_free`만 줄면 조각화로 봐야 한다. device가 아직 열리지 않은
+상태에서는 `{}`를 반환할 수 있다.
+
 ### 모드 — 동시에 로드되는 모델 조합
 
 보드 DRAM이 ~12GB라 조합 하나만 상주 가능합니다. **모드**는 그 조합에 이름을 붙인 것:
@@ -176,7 +203,8 @@ TTNN/native 호출이 GIL을 잡고 장시간 블록되면 `/health` 자체가 �
 // request
 {
   "images": ["<base64 image>", "..."],  // 필수, 1~5장. PIL이 읽을 수 있는 형식
-                                        // (JPEG/PNG). 서버가 decode -> RGB -> 224x224 resize.
+                                        // (JPEG/PNG). 서버가 decode -> RGB 후
+                                        // TT_VLM_IMAGE_LONG_SIDE/TT_VLM_IMAGE_FIT로 맞춤.
                                         // 여러 장은 한 장면의 프레임들로 취급.
   "prompt": "string",                   // 선택, 기본값은 서버의 DEFAULT_VLM_PROMPT.
                                         // 리터럴 "<video>" 토큰은 넣지 말 것: Qwen2.5-VL은
@@ -281,6 +309,11 @@ print(r.json()["caption"])
 | `TT_LLM_MAX_SEQ_LEN` / `TT_VLM_MAX_SEQ_LEN` | `1024`                             | raise for longer context (uses more DRAM)                                                                                                        |
 | `TT_TRACE_REGION_SIZE`                      | `15000000`                         | per-model trace buffer                                                                                                                           |
 | `TT_PORT`                                   | `8100`                             |                                                                                                                                                  |
+| `TT_VLM_IMAGE_LONG_SIDE`                    | `224`                              | `/caption` 입력 image의 긴 변 길이. 224가 기존 동작이며, 576 등은 실제 보드 검증 후 사용할 것                                                    |
+| `TT_VLM_IMAGE_FIT`                          | `stretch`                          | `/caption` image 맞춤 방식. `stretch`=정사각형 강제(기존), `letterbox`=비율 유지+padding, `contain`=비율 유지 비정사각형                          |
+| `TT_VLM_WARMUP_SHAPE`                       | (unset)                            | 실제 요청 shape를 미리 compile할 때 쓰는 `WIDTHxHEIGHT`. `contain`처럼 서버가 shape를 알 수 없을 때 지정                                         |
+| `TT_VLM_WARMUP_LAST`                        | `0`                                | `1`이면 tt-metal 기본 224x224 warmup을 먼저 하고 요청 shape warmup을 나중에 실행                                                                  |
+| `TT_METAL_OPERATION_TIMEOUT_SECONDS`        | `300`                              | device polling이 무한 spin하는 상황을 TT timeout 예외로 바꾸기 위한 tt-metal timeout                                                              |
 | `TT_DEBUG_DECODE`                           | `0`                                | `1`이면 LLM 생성 token을 decode된 text로 stdout에 출력. `/health.debug.decode`에서 현재 시작 상태 확인 가능                                      |
 | `TT_DEBUG_SAMPLE`                           | `0`                                | `1`이면 constrained decoding의 sampling/masking diagnostics를 출력. 매우 verbose하므로 짧은 재현에만 사용. `/health.debug.sample`에서 확인 가능  |
 
