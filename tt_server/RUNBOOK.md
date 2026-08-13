@@ -250,6 +250,11 @@ fuser -v /dev/bos/0                  # no output means the device is fully relea
 | `TT_SERVER_LOCK_FILE` | `/tmp/remembr-tt-npu-server.lock` | server lifetime 동안 유지되는 전역 NPU startup lock |
 | `TT_HEALTH_HOST` / `TT_HEALTH_TIMEOUT` | `127.0.0.1` / `2` | preflight health host / timeout(초) |
 | `TT_PORT` | `8100` | |
+| `TT_VLM_IMAGE_LONG_SIDE` | `224` | `/caption` 입력 image의 긴 변. 기존 호환 기본값은 224 |
+| `TT_VLM_IMAGE_FIT` | `stretch` | `stretch` / `letterbox` / `contain`. aspect-ratio/해상도 실험용 |
+| `TT_VLM_WARMUP_SHAPE` | (unset) | 요청 shape warmup용 `WIDTHxHEIGHT`. `contain`처럼 shape가 고정일 때 명시 |
+| `TT_VLM_WARMUP_LAST` | `0` | `1`이면 tt-metal 기본 224x224 warmup 뒤에 요청 shape warmup 실행 |
+| `TT_METAL_OPERATION_TIMEOUT_SECONDS` | `300` | device poll 무한 spin을 catch 가능한 timeout으로 바꿈 |
 | `TT_DEBUG_DECODE` | `0` | LLM token stream을 stdout에 출력. 생성 내용/JSON 깨짐 확인용 |
 | `TT_DEBUG_SAMPLE` | `0` | token masking/sampling 내부 상태 출력. schema/debug 용도, 로그가 매우 큼 |
 

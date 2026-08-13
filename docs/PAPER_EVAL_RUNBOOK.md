@@ -140,6 +140,7 @@ python scripts/preprocess_captions.py \
   --captioner tenstorrent \
   --seq_id 0 --seconds_per_caption 3 \
   --num-video-frames 1 \
+  --caption_style paper \
   --captioner_name tt-qwen25-vl-3b \
   --data_path /home/user/coda_raw/coda_data \
   --out_path data/captions/0/captions
@@ -150,8 +151,13 @@ python scripts/preprocess_captions.py \
   **Qwen multi-image shape의 첫 trace compile을 15분 이상** 걸리게 만들어, client 타임아웃과 보드 먹통을
   유발했다(실제로 일어났다). 재현성과 안정성을 위해 1 frame을 쓰지만, **논문 수준의 충실도가 필요하면**
   frame 수를 올리고(예: 3–6) 첫 compile(수십 분)을 끝까지 기다려라 — **절대 도중에 죽이지 마라**.
-- caption 프롬프트는 논문 원문을 그대로 사용하며, VILA video 문구만 중립화한다(`<video>` 제거,
+- `--num-video-frames`는 segment 안에서 `np.linspace`로 균등하게 뽑는다. 특히 `1`이면
+  3초 segment마다 정확히 한 frame만 caption 요청에 들어간다. 예전 stride 기반 샘플링은
+  segment 길이에 따라 의도보다 많은 frame을 넣을 수 있었다.
+- `--caption_style paper`의 caption 프롬프트는 논문 원문을 그대로 사용하며, VILA video 문구만 중립화한다(`<video>` 제거,
   "the few seconds of the video" → "the image"). 나머지("Think step by step", focus list)는 논문과 정확히 동일하다.
+- `--caption_style terse`는 검색 index용 짧은 2~3문장 prompt다. 논문 재현용 caption에는 쓰지 말고,
+  caption 품질/검색 recall 실험을 따로 할 때만 파일명을 분리해서 사용한다.
 - **문장 잘림 방지**: captioner는 `max_gen_len=256`을 보낸다(기본값, `TT_VLM_MAX_GEN_LEN`으로 조정 가능).
   서버 기본값인 128이면 장황한 caption이 중간에 잘린다.
 - **Checkpoint/resume**: 모든 caption 하나하나가 즉시

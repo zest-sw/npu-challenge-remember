@@ -98,6 +98,27 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-12 — VLM caption 해상도 실험과 프레임 샘플링 버그 수정
+
+- `/caption`이 모든 frame을 무조건 224x224로 찌그러뜨리던 경로에 `TT_VLM_IMAGE_LONG_SIDE`와
+  `TT_VLM_IMAGE_FIT`(`stretch`/`letterbox`/`contain`)를 추가했다. 기본값은 기존과 같은
+  `224 + stretch`라 기존 호출 shape는 바뀌지 않는다.
+- tt-metal 기본 warmup은 224x224 dummy라서, 224가 아닌 요청 실패가 "크기 문제"인지
+  "warmup shape mismatch 문제"인지 분리되지 않았다. 실제 요청 shape를 먼저 warmup하고,
+  `TT_VLM_WARMUP_SHAPE=WIDTHxHEIGHT`, `TT_VLM_WARMUP_LAST=1`로 실험 순서를 조정할 수 있게 했다.
+- `/memory`를 추가해 DRAM/L1 allocator의 `allocated`, `free`, `largest_free`를 읽는다.
+  반복 caption 중 누수와 조각화를 구분하기 위한 read-only 관측 endpoint다.
+- device 작업 실패가 HTTP caller에게만 전달되고 서버 로그/snapshot에는 남지 않던 문제를 줄이기 위해
+  worker exception을 로그에 남기고 runtime state를 `FAILED`로 전환한다. `run_server.sh`는
+  `TT_METAL_OPERATION_TIMEOUT_SECONDS=300`을 기본으로 설정해 device poll 무한 spin을 timeout으로 바꾼다.
+- `preprocess_captions.py`의 frame sampling을 stride(`images[::30//n]`)에서 `np.linspace` 기반
+  균등 샘플링으로 바꿨다. 이제 `--num-video-frames 1`이면 segment마다 정확히 한 frame만 들어간다.
+- 검색 index용 짧은 caption prompt를 `--caption_style terse`로 추가했다. 논문 재현 기본값은
+  `paper` 그대로다.
+- 보드 관측 스크립트 `tt_server/tests/board/caption_sample.py`,
+  `tt_server/tests/board/probe_aspect_ratio.py`를 추가했다. 둘 다 서버 lifecycle은 건드리지 않고
+  `/health`, `/caption`, `/memory`만 읽거나 호출한다.
+
 ### 2026-08-07 - `/health`에 device worker queue 상태 노출
 
 - 8B VLM captioning이 몇 처리 후 오래 멈춘 것처럼 보일 때, 서버가 죽은 것인지 device worker가 긴 `/caption`  요청을 처리 중인지 구분하기 어려웠다.

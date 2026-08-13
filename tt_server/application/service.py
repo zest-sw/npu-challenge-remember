@@ -13,6 +13,9 @@ class InferenceService:
     def health(self):
         return self.runtime.snapshot()
 
+    def device_memory(self):
+        return self.runtime.device_memory()
+
     def available_modes(self):
         return tuple(MODES)
 

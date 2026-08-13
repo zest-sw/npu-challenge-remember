@@ -9,13 +9,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/server_preflight.sh"
 if tt_server_preflight; then
-    : # no existing server/device holder; keep FD 9 locked through exec below
+  : # no existing server/device holder; keep FD 9 locked through exec below
 else
-    preflight_status=$?
-    if [[ "$preflight_status" -eq 10 ]]; then
-        exit 0 # an existing server/launcher is healthy or already starting
-    fi
-    exit "$preflight_status"
+  preflight_status=$?
+  if [[ "$preflight_status" -eq 10 ]]; then
+    exit 0 # an existing server/launcher is healthy or already starting
+  fi
+  exit "$preflight_status"
 fi
 
 export TT_METAL_HOME="${TT_METAL_HOME:-/home/user/tt-metal}"
@@ -37,9 +37,9 @@ source "$TT_METAL_HOME/env_set.sh"
 
 REMEMBR_VENV="${REMEMBR_VENV:-$(cd "$SCRIPT_DIR/.." && pwd)/.venv}"
 if [ ! -x "$REMEMBR_VENV/bin/python" ]; then
-    echo "No venv at $REMEMBR_VENV. Create it:" >&2
-    echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  (see requirements.txt)" >&2
-    exit 1
+  echo "No venv at $REMEMBR_VENV. Create it:" >&2
+  echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  (see requirements.txt)" >&2
+  exit 1
 fi
 # shellcheck disable=SC1091
 source "$REMEMBR_VENV/bin/activate"
@@ -82,5 +82,15 @@ export TT_ENABLE_VLM="${TT_ENABLE_VLM:-1}"
 # tt-metal's own switches (no tt-metal source changes).
 export TT_METAL_INSPECTOR="${TT_METAL_INSPECTOR:-0}"
 export TT_METAL_INSPECTOR_RPC="${TT_METAL_INSPECTOR_RPC:-0}"
+
+# tt-metal waits for the device by polling. With no timeout set (rtoptions.cpp:290
+# defaults to 0) it takes the branch in system_memory_manager.cpp:69 that has no yield
+# and no exit: `do { read_core(...); } while (ptr unchanged);`. Confirmed by gdb as
+# where this board wedges -- in fetch_queue_reserve_back (:393), i.e. the host cannot
+# even enqueue because the device's prefetcher stopped consuming. It burns 100% of a
+# core forever holding the GIL, so /health goes silent and Ctrl-C is ignored, with no
+# error ever printed. Setting this turns that into a catchable
+# TT_THROW("TIMEOUT: device timeout, potential hang detected"). See #70.
+export TT_METAL_OPERATION_TIMEOUT_SECONDS="${TT_METAL_OPERATION_TIMEOUT_SECONDS:-300}"
 
 exec python "$SCRIPT_DIR/tt_infer_server.py"
