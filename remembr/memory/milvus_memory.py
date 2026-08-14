@@ -130,11 +130,32 @@ class MilvusMemory(Memory):
         memory_dict['text_embedding'] = text_embedding
 
         self.milv_wrapper.insert([memory_dict])
+        self._unflushed_inserts = True
+
+    def _flush_if_needed(self):
+        """Make inserts visible to search.
+
+        Milvus buffers inserts; until they are flushed a search sees only part of them
+        and `num_entities` reads 0. eval drops the collection, inserts a question's whole
+        time window, then searches immediately -- so without this it searched a partially
+        visible memory, nondeterministically, degrading answers without ever failing.
+
+        Flushed on search rather than in `insert` so a bulk load costs one flush instead
+        of one per row. That cost lands in the first search after a load, which
+        `eval.instrument_memory_search` then records as db search latency.
+        """
+        if not self._unflushed_inserts:
+            return
+        self.milv_wrapper.collection.flush()
+        self._unflushed_inserts = False
 
     def get_working_memory(self) -> list[MemoryItem]:
         return self.working_memory
 
     def reset(self, drop_collection=True):
+
+        # New wrapper below, so nothing of ours is pending on the old collection.
+        self._unflushed_inserts = False
 
         if drop_collection:
             trace.plain("Resetting memory. We are dropping the current collection")
@@ -198,6 +219,7 @@ class MilvusMemory(Memory):
             trace.note(f"{number}  {shown}  {str(where):28s} {trace.clip(doc.page_content, 64)}")
 
     def search_by_position(self, query: tuple) -> str:
+        self._flush_if_needed()
         # docs = pos_db.similarity_search_by_vector(np.array(query))
         docs = similarity_search_with_score_by_vector(self.position_vector_db, np.array(query).astype(float))
         self._trace_hits("position", query, docs)
@@ -232,6 +254,7 @@ class MilvusMemory(Memory):
         # convert from hms_time to something searchable
 
 
+        self._flush_if_needed()
         docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([query, 0]))
         self._trace_hits("time", hms_time, docs)
 
@@ -245,6 +268,7 @@ class MilvusMemory(Memory):
 
     def search_by_text(self, query: str) -> str:
 
+        self._flush_if_needed()
         docs = self.text_retriever.invoke(query)
         self._trace_hits("text", query, docs)
 
