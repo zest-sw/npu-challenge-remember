@@ -28,6 +28,7 @@ sys.path.append(sys.path[0] + '/..')
 from agents.remembr_agent import ReMEmbRAgent
 from agents.non_agent import NonAgent
 from agents.retrieve_agent import RetrieveAgent
+from agents.direct_position_agent import DirectPositionAgent
 from agents.vlm_non_agent import VLMNonAgent
 
 from memory.memory import MemoryItem
@@ -363,6 +364,16 @@ def main(args):
         # shares that answer stage and differs only in getting oracle context.
         base_llm = args.model.split('+')[-1]
         agent = RetrieveAgent(llm_type=base_llm, num_ctx=args.num_ctx, temperature=args.temperature)
+        use_milvus = True
+
+    elif 'direct' in args.model:
+        # The question itself is the Milvus query and the answer grammar is a
+        # bare [x, y, z]: no query call, no answer-type call, no JSON-object
+        # tokens. Position-only probe -- non-position questions are knowingly
+        # wrong. See remembr/agents/direct_position_agent.py.
+        base_llm = args.model.split('+')[-1]
+        agent = DirectPositionAgent(llm_type=base_llm, num_ctx=args.num_ctx,
+                                    temperature=args.temperature)
         use_milvus = True
 
     elif 'optimal' in args.model:
