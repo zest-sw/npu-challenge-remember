@@ -2,7 +2,7 @@
 
 No NPU, no Milvus, no server:
 
-    python remembr/agents/test_direct_position_agent.py
+    python remembr/tests/test_direct_position_agent.py
 """
 import os
 import sys
