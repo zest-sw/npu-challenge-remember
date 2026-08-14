@@ -45,6 +45,98 @@ def test_wrong_shapes_are_rejected():
             raise AssertionError(f"expected ValueError for {bad!r}")
 
 
+from remembr.agents.direct_position_agent import DirectPositionAgent  # noqa: E402
+
+
+class FakeReply:
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeChain:
+    """Stands in for ChatOpenAI. Counts calls so the no-retry rule is testable."""
+
+    def __init__(self, content):
+        self.content = content
+        self.calls = 0
+
+    def invoke(self, _inputs):
+        self.calls += 1
+        return FakeReply(self.content)
+
+
+class FakeMemory:
+    """Records what was searched for, so the question-as-query rule is testable."""
+
+    def __init__(self):
+        self.searched = []
+
+    def search_by_text(self, query):
+        self.searched.append(query)
+        return []
+
+    def get_working_memory(self):
+        return []
+
+    def memory_to_string(self, _memory):
+        return "At time=2023-01-16 07:58:58, the robot was at [1.0, 2.0, 0.0]."
+
+
+def make_agent(reply):
+    """Build the agent without __init__ (which would build an LLM client)."""
+    agent = DirectPositionAgent.__new__(DirectPositionAgent)
+    agent.llm_type = "tt/fake"
+    agent.chain = FakeChain(reply)
+    agent.memory = FakeMemory()
+    return agent
+
+
+PREAMBLE_QUESTION = (
+    "The current time is 08:10:00 and you are at [0.0, 0.0, 0.0].\n"
+    "Where is the yellow police call pole?"
+)
+
+
+def test_query_searches_with_the_whole_question_and_calls_once():
+    agent = make_agent("[1.0, 2.0, 3.0]")
+    out = agent.query(PREAMBLE_QUESTION)
+    # The question itself, preamble included, is the search query -- no trimming.
+    assert agent.memory.searched == [PREAMBLE_QUESTION], agent.memory.searched
+    assert agent.chain.calls == 1, f"expected 1 call, made {agent.chain.calls}"
+    assert out.position == [1.0, 2.0, 3.0]
+
+
+def test_a_parse_failure_raises_immediately_no_retry():
+    agent = make_agent("[1.0, 2.0")  # truncated -- json.loads fails
+    try:
+        agent.query(PREAMBLE_QUESTION)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("expected a raise on unparseable output")
+    assert agent.chain.calls == 1, f"no retries allowed, made {agent.chain.calls}"
+
+
+def test_a_wrong_shape_also_raises_immediately():
+    agent = make_agent("null")  # valid JSON, wrong shape
+    try:
+        agent.query(PREAMBLE_QUESTION)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected a ValueError for a non-array answer")
+    assert agent.chain.calls == 1
+
+
+def test_non_tt_backend_is_refused():
+    try:
+        DirectPositionAgent(llm_type="llama3")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected a ValueError for a non-tt/ backend")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
