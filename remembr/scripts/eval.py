@@ -19,7 +19,8 @@ import glob
 
 from dataclasses import asdict
 import argparse
-import traceback 
+import traceback
+import warnings
 
 # load this directory
 sys.path.append(sys.path[0] + '/..')
@@ -36,6 +37,25 @@ from memory.video_memory import VideoMemory, ImageMemoryItem
 
 from tools.tools import format_docs
 from remembr.utils import trace
+
+# 17 deprecation lines per question, between pymilvus and LangChain, bury the
+# one-line-per-step view `remembr/utils/trace.py` exists to give.
+#
+# Placement below the imports is load-bearing: filters match front-to-back with the newest
+# first, so whoever installs last wins, and importing langchain_core reinstalls "default"
+# for its own categories (`langchain_core/__init__.py:24`).
+#
+# pymilvus is matched by message rather than category because it raises a FutureWarning,
+# which Python shows by default and which numpy also uses for real behaviour changes.
+#
+# A mute, not a fix: pymilvus drops the ORM-style API `milvus_memory.py` is built on in
+# 3.1, so the pin is what protects us until that moves to `MilvusClient`.
+warnings.filterwarnings('ignore', message=r'.*ORM-style PyMilvus API.*')
+try:
+    from langchain_core._api.deprecation import LangChainDeprecationWarning
+    warnings.filterwarnings('ignore', category=LangChainDeprecationWarning)
+except Exception:  # noqa: BLE001 -- silencing noise must never break a run
+    warnings.filterwarnings('ignore', message=r'.*deprecated in LangChain.*')
 
 
 def parse_json(string):
