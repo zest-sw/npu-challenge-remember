@@ -7,7 +7,7 @@ and position, and sending it pulled the model toward searching for those).
 
 No NPU, no Milvus, no server:
 
-    python remembr/agents/test_retrieve_agent.py
+    python remembr/tests/test_retrieve_agent.py
 """
 import os
 import sys

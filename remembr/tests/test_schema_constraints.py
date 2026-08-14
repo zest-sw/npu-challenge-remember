@@ -22,7 +22,7 @@ Two failures this guards, both of which already happened:
 Needs neither lm-format-enforcer nor a board: it asserts the *shape* of the schema,
 which is the property the enforcer depends on.
 
-    python remembr/agents/test_schema_constraints.py
+    python remembr/tests/test_schema_constraints.py
 """
 import os
 import sys

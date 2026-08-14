@@ -8,7 +8,7 @@ retries of the same truncated JSON, stalling a 30-question eval on question 10.
 The point of these tests is that they hang (not just fail) if the cap is removed,
 so run them with a timeout in CI. No NPU, no Milvus, no server:
 
-    python remembr/agents/test_non_agent_retry.py
+    python remembr/tests/test_non_agent_retry.py
 """
 import os
 import sys
