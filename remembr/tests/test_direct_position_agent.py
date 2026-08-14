@@ -1,4 +1,4 @@
-"""Self-check for the direct+ pipeline: question -> search -> a bare [x, y, z].
+"""Self-check for the direct+ pipeline: question -> search -> which memory answers it.
 
 No NPU, no Milvus, no server:
 
@@ -11,38 +11,59 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from remembr.agents.agent import AgentOutput  # noqa: E402
 from remembr.agents.direct_position_agent import (  # noqa: E402
-    POSITION_SCHEMA,
-    position_output,
+    memory_index_output,
+    memory_index_schema,
 )
 
 
-def test_schema_is_exactly_three_numbers():
-    """The grammar is the whole contract: three numbers, nothing else generable."""
-    assert POSITION_SCHEMA == {
-        "type": "array",
-        "items": {"type": "number"},
-        "minItems": 3,
-        "maxItems": 3,
-    }, POSITION_SCHEMA
+class FakeDoc:
+    """A retrieved memory, as far as this agent is concerned: a position in metadata."""
+
+    def __init__(self, position):
+        self.metadata = {"position": position}
 
 
-def test_a_bare_array_becomes_a_position_answer():
-    out = position_output([1, 2.5, -3])
+MEMORIES = [FakeDoc([1.0, 2.0, 3.0]), FakeDoc([-4.0, 5.5, -6.0]), FakeDoc([7, 8, 9])]
+
+
+def test_schema_offers_exactly_the_memories_on_hand():
+    """The grammar is the whole contract: one of these numbers, nothing else generable."""
+    assert memory_index_schema(3) == {"type": "integer", "enum": [1, 2, 3]}
+    assert memory_index_schema(1) == {"type": "integer", "enum": [1]}
+
+
+def test_a_memory_number_becomes_that_memory_s_position():
+    out = memory_index_output(2, MEMORIES)
     assert isinstance(out, AgentOutput)
     assert out.type == "position"
-    assert out.position == [1.0, 2.5, -3.0]
+    assert out.position == [-4.0, 5.5, -6.0]
     assert out.time is None and out.duration is None and out.binary is None
 
 
-def test_wrong_shapes_are_rejected():
-    # Shapes the old loose-string field let through and eval then mis-scored.
-    for bad in ([1, 2], [[1, 2, 3]], "at [1,2,3]", [1, 2, "a"], [True, 1, 2], None):
+def test_ints_are_coerced_to_floats():
+    # eval does numpy arithmetic on this, and MemoryItem declares a list of numbers.
+    assert memory_index_output(3, MEMORIES).position == [7.0, 8.0, 9.0]
+
+
+def test_answers_outside_the_offer_are_rejected():
+    # The grammar should prevent all of these, but it only binds while the tt server is
+    # enforcing it -- a bad number must fail loudly, not index some other memory.
+    for bad in (0, 4, -1, 2.0, "2", None, True, [2]):
         try:
-            position_output(bad)
+            memory_index_output(bad, MEMORIES)
         except ValueError:
             pass
         else:
             raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_a_memory_without_a_coordinate_is_rejected():
+    try:
+        memory_index_output(1, [FakeDoc([1.0, 2.0])])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for a 2-element position")
 
 
 from remembr.agents.direct_position_agent import (  # noqa: E402
@@ -57,12 +78,18 @@ class FakeReply:
 
 
 class FakeChain:
-    """Stands in for ChatOpenAI. Counts calls so the no-retry rule is testable."""
+    """Stands in for ChatOpenAI. Counts calls so the no-retry rule is testable, and keeps
+    the bound schema so the grammar can be asserted on."""
 
     def __init__(self, content):
         self.content = content
         self.calls = 0
         self.prompts = []
+        self.schemas = []
+
+    def bind(self, **kwargs):
+        self.schemas.append(kwargs["response_format"]["json_schema"]["schema"])
+        return self
 
     def invoke(self, inputs):
         self.calls += 1
@@ -71,28 +98,34 @@ class FakeChain:
 
 
 class FakeMemory:
-    """Records what was searched for, so the question-as-query rule is testable."""
+    """Records what was searched for, and hands back memories to choose between."""
 
-    def __init__(self):
+    def __init__(self, memories=MEMORIES):
         self.searched = []
+        self.memories = memories
 
     def search_by_text(self, query):
         self.searched.append(query)
         return []
 
     def get_working_memory(self):
-        return []
+        return self.memories
 
-    def memory_to_string(self, _memory):
-        return "At time=2023-01-16 07:58:58, the robot was at [1.0, 2.0, 0.0]."
+    def memory_to_string(self, memory_list):
+        # The real one formats a list and joins with blank lines; the agent passes one
+        # doc at a time so it can number them.
+        return "\n\n".join(
+            f"At time=2023-01-16 07:58:58, the robot was at an average position of "
+            f"{doc.metadata['position']}.The robot saw the following: a caption\n"
+            for doc in memory_list)
 
 
-def make_agent(reply):
+def make_agent(reply, memories=MEMORIES):
     """Build the agent without __init__ (which would build an LLM client)."""
     agent = DirectPositionAgent.__new__(DirectPositionAgent)
     agent.llm_type = "tt/fake"
     agent.chain = FakeChain(reply)
-    agent.memory = FakeMemory()
+    agent.memory = FakeMemory(memories)
     return agent
 
 
@@ -117,13 +150,30 @@ def test_split_question_handles_a_question_with_no_preamble():
 
 
 def test_query_searches_with_the_asked_line_only_and_calls_once():
-    agent = make_agent("[1.0, 2.0, 3.0]")
+    agent = make_agent("2")
     out = agent.query(PREAMBLE_QUESTION)
     # The preamble names the robot's own position and time. The retriever has no use
     # for either, and they only dilute the embedding, so they never reach it.
     assert agent.memory.searched == [ASKED], agent.memory.searched
     assert agent.chain.calls == 1, f"expected 1 call, made {agent.chain.calls}"
-    assert out.position == [1.0, 2.0, 3.0]
+    # Memory 2's coordinate, looked up here rather than typed by the model.
+    assert out.position == [-4.0, 5.5, -6.0]
+
+
+def test_the_grammar_offers_only_the_memories_that_came_back():
+    agent = make_agent("1", memories=MEMORIES[:2])
+    agent.query(PREAMBLE_QUESTION)
+    assert agent.chain.schemas == [{"type": "integer", "enum": [1, 2]}], agent.chain.schemas
+
+
+def test_memories_are_numbered_and_keep_their_coordinates():
+    """Numbered so the answer can name one; coordinates kept so "nearest" still works."""
+    agent = make_agent("1")
+    agent.query(PREAMBLE_QUESTION)
+    prompt = agent.chain.prompts[0]
+    for number in (1, 2, 3):
+        assert f"\n{number}. At time=" in f"\n{prompt}", prompt
+    assert "[-4.0, 5.5, -6.0]" in prompt, prompt
 
 
 def test_the_preamble_is_kept_but_out_of_the_question_sentence():
@@ -133,7 +183,7 @@ def test_the_preamble_is_kept_but_out_of_the_question_sentence():
     205 m out; with the preamble hoisted to its own labelled block it was exact. The
     preamble is not deleted, because "nearest X" and "how long ago" need it.
     """
-    agent = make_agent("[1.0, 2.0, 3.0]")
+    agent = make_agent("1")
     agent.query(PREAMBLE_QUESTION)
     prompt = agent.chain.prompts[0]
 
@@ -146,13 +196,13 @@ def test_the_preamble_is_kept_but_out_of_the_question_sentence():
 
 
 def test_a_question_with_no_preamble_gets_no_situation_block():
-    agent = make_agent("[1.0, 2.0, 3.0]")
+    agent = make_agent("1")
     agent.query(ASKED)
     assert "Your current situation:" not in agent.chain.prompts[0], agent.chain.prompts[0]
 
 
 def test_a_parse_failure_raises_immediately_no_retry():
-    agent = make_agent("[1.0, 2.0")  # truncated -- json.loads fails
+    agent = make_agent("2,")  # trailing comma -- json.loads fails
     try:
         agent.query(PREAMBLE_QUESTION)
     except Exception:
@@ -162,15 +212,27 @@ def test_a_parse_failure_raises_immediately_no_retry():
     assert agent.chain.calls == 1, f"no retries allowed, made {agent.chain.calls}"
 
 
-def test_a_wrong_shape_also_raises_immediately():
-    agent = make_agent("null")  # valid JSON, wrong shape
+def test_a_number_outside_the_offer_raises_immediately():
+    agent = make_agent("9")  # valid JSON, no such memory
     try:
         agent.query(PREAMBLE_QUESTION)
     except ValueError:
         pass
     else:
-        raise AssertionError("expected a ValueError for a non-array answer")
+        raise AssertionError("expected a ValueError for a memory that does not exist")
     assert agent.chain.calls == 1
+
+
+def test_no_memories_means_no_answer():
+    """An empty retrieval leaves nothing to name, so it must not reach the model."""
+    agent = make_agent("1", memories=[])
+    try:
+        agent.query(PREAMBLE_QUESTION)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected a ValueError when retrieval came back empty")
+    assert agent.chain.calls == 0, "no memories, so no LLM call should have been made"
 
 
 def test_non_tt_backend_is_refused():
