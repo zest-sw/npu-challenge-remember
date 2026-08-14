@@ -34,6 +34,36 @@ SYSTEM_PROMPT = (
 )
 
 
+def split_question(question: str):
+    """The question's preamble and the line actually asked, separately.
+
+    Every question arrives with a preamble stating when and where the robot is now
+    (`form_question_jsons.py`: "You started moving at ... The current time is ... and
+    you are located at [x, y, z]. \\n <asked>"). Same last-line rule as
+    `RetrieveAgent.asked_line`, spelled here because this needs both halves, not just
+    the asked one.
+
+    Both halves are load-bearing, in different places -- measured on the board, one
+    question, greedy, identical context:
+
+        preamble inside the question sentence   [0.097, -4.321, 0.003]   209.72 m off
+        + prompt saying it is not the answer    [0.0, 0.0, 0.0]          205.56 m off
+        preamble deleted entirely               [-60.197, 196.541, -1.097]  0.00 m
+        preamble hoisted to a labelled field    [-60.197, 196.541, -1.097]  0.00 m
+
+    Asked for a coordinate with a coordinate sitting in the question sentence, the
+    model answers with that one -- its own current position -- and saying "that is not
+    the answer" does not stop it. Deleting the preamble fixes the coordinate but throws
+    away what half the dataset needs: "Where is the *nearest* recycling bin?" cannot be
+    disambiguated without the current position, and "How long have you been outside?"
+    cannot be answered without the current time. So keep it, out of the sentence.
+    """
+    lines = [line.strip() for line in question.strip().splitlines() if line.strip()]
+    if not lines:
+        return "", question.strip()
+    return "\n".join(lines[:-1]), lines[-1]
+
+
 def position_output(parsed) -> AgentOutput:
     """A bare [x, y, z] as the AgentOutput eval scores.
 
@@ -78,15 +108,34 @@ class DirectPositionAgent(Agent):
     def set_memory(self, memory: Memory):
         self.memory = memory
 
+    def prompt_for(self, question: str, context: str) -> str:
+        """The one prompt this agent sends, with the preamble out of the question.
+
+        See `split_question` for the measurements behind the shape. The preamble keeps
+        its own labelled block so the current time and position stay available to
+        "nearest"/"how long ago" questions without sitting in the sentence that asks
+        for a coordinate.
+        """
+        preamble, asked = split_question(question)
+        situation = (
+            f"Your current situation: {preamble}\n"
+            "(This is where and when you are now. It is not the answer.)\n\n"
+            if preamble else ""
+        )
+        return f"{SYSTEM_PROMPT}\n\n{situation}{context}\n\nQuestion: {asked}"
+
     def query(self, question: str) -> AgentOutput:
-        # The question itself is the search query -- no trimming, no query call.
-        trace.step("검색어", repr(question))
-        self.memory.search_by_text(question)
+        # The asked line is the search query -- no query-generation call. The preamble
+        # is dropped here rather than hoisted: it names the robot's own position and
+        # time, which the retriever has no use for and which only dilute the embedding.
+        _, asked = split_question(question)
+        trace.step("검색어", repr(asked))
+        self.memory.search_by_text(asked)
         context = self.memory.memory_to_string(self.memory.get_working_memory())
 
         # Exactly one LLM call. No retry: greedy decoding would repeat the same
         # bytes, and eval.answer_squad_question already caps attempts at 5.
-        reply = self.chain.invoke(f"{SYSTEM_PROMPT}\n\n{context}\n\nQuestion: {question}")
+        reply = self.chain.invoke(self.prompt_for(question, context))
         output = position_output(json.loads(reply.content))
         trace.step("답변", f"position={output.position!r}")
         return output

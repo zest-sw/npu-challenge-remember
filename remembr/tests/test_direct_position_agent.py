@@ -45,7 +45,10 @@ def test_wrong_shapes_are_rejected():
             raise AssertionError(f"expected ValueError for {bad!r}")
 
 
-from remembr.agents.direct_position_agent import DirectPositionAgent  # noqa: E402
+from remembr.agents.direct_position_agent import (  # noqa: E402
+    DirectPositionAgent,
+    split_question,
+)
 
 
 class FakeReply:
@@ -59,9 +62,11 @@ class FakeChain:
     def __init__(self, content):
         self.content = content
         self.calls = 0
+        self.prompts = []
 
-    def invoke(self, _inputs):
+    def invoke(self, inputs):
         self.calls += 1
+        self.prompts.append(inputs)
         return FakeReply(self.content)
 
 
@@ -91,19 +96,59 @@ def make_agent(reply):
     return agent
 
 
-PREAMBLE_QUESTION = (
-    "The current time is 08:10:00 and you are at [0.0, 0.0, 0.0].\n"
-    "Where is the yellow police call pole?"
+# The shape form_question_jsons.py:214 actually produces: preamble sentences, a
+# newline, then the asked line.
+PREAMBLE = (
+    "You started moving at 07:58:58. The current time is 08:10:00 and you are "
+    "located at [0.0, 0.0, 0.0]."
 )
+ASKED = "Where is the yellow police call pole?"
+PREAMBLE_QUESTION = f"{PREAMBLE} \n {ASKED}"
 
 
-def test_query_searches_with_the_whole_question_and_calls_once():
+def test_split_question_separates_the_preamble_from_the_asked_line():
+    assert split_question(PREAMBLE_QUESTION) == (PREAMBLE, ASKED)
+
+
+def test_split_question_handles_a_question_with_no_preamble():
+    # Nothing to hoist; the whole thing is what was asked.
+    assert split_question(ASKED) == ("", ASKED)
+    assert split_question("  ") == ("", "")
+
+
+def test_query_searches_with_the_asked_line_only_and_calls_once():
     agent = make_agent("[1.0, 2.0, 3.0]")
     out = agent.query(PREAMBLE_QUESTION)
-    # The question itself, preamble included, is the search query -- no trimming.
-    assert agent.memory.searched == [PREAMBLE_QUESTION], agent.memory.searched
+    # The preamble names the robot's own position and time. The retriever has no use
+    # for either, and they only dilute the embedding, so they never reach it.
+    assert agent.memory.searched == [ASKED], agent.memory.searched
     assert agent.chain.calls == 1, f"expected 1 call, made {agent.chain.calls}"
     assert out.position == [1.0, 2.0, 3.0]
+
+
+def test_the_preamble_is_kept_but_out_of_the_question_sentence():
+    """Measured: a coordinate inside the question sentence becomes the answer.
+
+    Asked the whole question, the 8B answered with its own current position and was
+    205 m out; with the preamble hoisted to its own labelled block it was exact. The
+    preamble is not deleted, because "nearest X" and "how long ago" need it.
+    """
+    agent = make_agent("[1.0, 2.0, 3.0]")
+    agent.query(PREAMBLE_QUESTION)
+    prompt = agent.chain.prompts[0]
+
+    # Still available to the model...
+    assert PREAMBLE in prompt, prompt
+    assert "Your current situation:" in prompt, prompt
+    # ...but the question the model reads is only the asked line.
+    assert prompt.rstrip().endswith(f"Question: {ASKED}"), prompt
+    assert f"Question: {PREAMBLE}" not in prompt, prompt
+
+
+def test_a_question_with_no_preamble_gets_no_situation_block():
+    agent = make_agent("[1.0, 2.0, 3.0]")
+    agent.query(ASKED)
+    assert "Your current situation:" not in agent.chain.prompts[0], agent.chain.prompts[0]
 
 
 def test_a_parse_failure_raises_immediately_no_retry():
