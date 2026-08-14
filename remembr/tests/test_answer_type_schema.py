@@ -17,7 +17,7 @@ correctly is a board measurement, not a unit test.
 
 No NPU, no Milvus, no server:
 
-    python remembr/agents/test_answer_type_schema.py
+    python remembr/tests/test_answer_type_schema.py
 """
 import os
 import sys

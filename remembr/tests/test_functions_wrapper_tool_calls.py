@@ -8,7 +8,7 @@ not have enough information" from an empty memory.
 
 No NPU, no Milvus, no server:
 
-    python remembr/tools/test_functions_wrapper_tool_calls.py
+    python remembr/tests/test_functions_wrapper_tool_calls.py
 """
 import json
 import os

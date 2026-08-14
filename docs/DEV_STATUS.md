@@ -263,7 +263,7 @@ JSON이 문자열 중간에서 잘림 → `json.loads`가 `Unterminated string` 
 수정은 두 층: 스키마의 `position`/`orientation`에 `maxLength`(80/40) 부여 — **없는 길이
 제한이 폭주를 구조적으로 가능하게 한 원인** — 그리고 `while True` → `MAX_PARSE_RETRIES=5`
 후 raise(eval의 `MAX_ATTEMPTS`가 unanswered로 기록하고 다음 질문으로 진행).
-검증: `remembr/agents/test_non_agent_retry.py` 3개 통과, 그리고 **테스트를 옛 `while True`
+검증: `remembr/tests/test_non_agent_retry.py` 3개 통과, 그리고 **테스트를 옛 `while True`
 코드에 돌리면 timeout(exit 124)으로 무한루프를 재현**하는 것까지 확인.
 
 **② 서버가 요청받은 모델 이름을 그대로 되돌려줬다 ([acd6aa3], PR #17).** 보드는 한 번에

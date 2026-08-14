@@ -5,7 +5,7 @@ nobody has to remember to turn it back off. And `warn` must print even when off,
 because the lines it carries -- a parse failure, an empty search query -- are worth
 seeing in every run and used to be bare prints scattered through the agents.
 
-    python remembr/utils/test_trace.py
+    python remembr/tests/test_trace.py
 """
 import io
 import os

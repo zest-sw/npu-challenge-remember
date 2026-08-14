@@ -103,7 +103,7 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
   문자열 중간에서 잘려 `Unterminated string starting at: line 1 column 103`으로 죽었다.
   `time`/`duration`은 `maxLength`조차 없는 union이었다. `#31`에서 `position`을 `anyOf`로
   바꿨더니 폭주가 멈춘 게 우연이 아니었다 — **제약이 살아남는 형태였던 것**이다.
-  가드: `remembr/agents/test_schema_constraints.py`.
+  가드: `remembr/tests/test_schema_constraints.py`.
 - tt-metal 소스는 원칙적으로 무손상 유지 — 편집한 곳은 위 model_name 패치가 거의 유일하고,
   이유가 `docs/DEV_STATUS.md` changelog에 기록돼 있다.
 
@@ -124,6 +124,8 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 | 무엇 | 어디 | 비고 |
 |---|---|---|
 | 파이프라인/도구 스크립트 | `remembr/scripts/` (Samsung 계열은 `scripts/samsung/`) | git 추적 |
+| remembr 오프라인 테스트 | `remembr/tests/` | NPU·Milvus·서버 없이 도는 자가 테스트. 소스와 섞지 말 것 — `remembr/agents/`·`utils/`·`tools/`에 흩어져 있던 것을 모았다 |
+| 서버 오프라인 테스트 | `tt_server/tests/` | device 없이 도는 것 |
 | 보드·서버 스트레스 테스트 | `tt_server/tests/board/` | 실제 device 필요, 일반 테스트와 분리 |
 | 생성 산출물(HTML 뷰어·비교 결과·로그) | `out/` | **gitignored.** `/tmp`에 두지 말 것 — 재부팅 시 소멸 |
 | 데이터셋 | `remembr/data/` (레포 안, gitignored) | Samsung CODa: `remembr/data/samsung_dataset/0/` |

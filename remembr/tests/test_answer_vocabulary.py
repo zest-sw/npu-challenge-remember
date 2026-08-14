@@ -3,7 +3,7 @@ already searched for. Both failures came from our prompt and a regex, not the mo
 it invented `"image"` for an unnamed `type`, wrote `"11 minutes ago"` into a string
 `time`, and was handed "with the arguments: ." after a regex ate the dict.
 
-    python remembr/agents/test_answer_vocabulary.py
+    python remembr/tests/test_answer_vocabulary.py
 """
 import os
 import sys
