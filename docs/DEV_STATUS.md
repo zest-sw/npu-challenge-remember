@@ -98,6 +98,20 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-14 — try0_plane 벡터 메모리 적재 및 대화식 RetrieveAgent CLI
+
+`remembr/data/try0_plane_preprocessed_5/0/`의 PKL과 기존 Qwen3-VL terse 캡션/1024차원 임베딩
+29개를 검증한 뒤 전용 Milvus 컬렉션에 적재하고, `RetrieveAgent`로 단일 또는 반복 질의를 보내는
+`remembr/scripts/interactive_retrieve.py`를 추가했다. 기본 `auto` 적재는 비어 있는 컬렉션만
+채우며, 기존 항목 수가 캡션 수와 다르면 데이터 혼합을 막기 위해 중단한다. 대화식 질의마다
+working memory를 초기화해 이전 검색 결과가 다음 답변 컨텍스트에 남지 않는다.
+
+검증: host-only 데이터 경계 테스트와 CLI help 통과. PKL 559개에 대한 캡션 JSON의 58개
+시작/끝 참조와 임베딩 차원 확인 완료. 로컬 Milvus에 전용 컬렉션을 생성해 29개 적재 및 flush 후
+entity count 29와 재실행 시 중복 없는 재사용을 확인했다. `llm-8b` 실제 질의 "Where is the
+white plastic box?"에서 검색어 `White plastic storage container`를 생성했고, 정답 캡션/좌표가
+Milvus top-1로 검색되어 최종 position `[-0.708, -0.059, 1.215]`까지 end-to-end 응답했다.
+
 ### 2026-08-12 — VLM caption 해상도 실험과 프레임 샘플링 버그 수정
 
 - `/caption`이 모든 frame을 무조건 224x224로 찌그러뜨리던 경로에 `TT_VLM_IMAGE_LONG_SIDE`와

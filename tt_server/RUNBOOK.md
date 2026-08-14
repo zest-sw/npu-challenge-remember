@@ -157,6 +157,32 @@ curl -s http://localhost:8100/v1/chat/completions \
 - **request/response 필드와 예시는 [README의 HTTP API 섹션](README.md#http-api)을 참고하라**
   (`/health`, `/caption`, `/v1/chat/completions` 모두 거기에 문서화되어 있다).
 
+### try0_plane 메모리 적재 및 실시간 질의
+
+`remembr/data/try0_plane_preprocessed_5/0/`의 PKL과 이미 생성된 terse 캡션/임베딩을 전용
+Milvus 컬렉션에 적재한 뒤 `RetrieveAgent`에 질문을 반복해서 보낼 수 있다. NPU 서버는 LLM이
+있는 모드(`3b+3b` 또는 `llm-8b`)로 사용자가 tmux에서 직접 기동하고, Milvus도 먼저 실행한다.
+
+```bash
+cd /home/user/remembr
+
+# 적재만 수행. 기존 컬렉션의 항목 수가 정확히 29개면 그대로 재사용한다.
+.venv/bin/python remembr/scripts/interactive_retrieve.py --load-only
+
+# 대화식 질의. 매 질문마다 검색 working memory를 비워 앞 질문의 hit가 섞이지 않는다.
+.venv/bin/python remembr/scripts/interactive_retrieve.py
+
+# 단일 질의
+.venv/bin/python remembr/scripts/interactive_retrieve.py \
+  --question "Where is the white plastic box?"
+```
+
+기본 컬렉션은 `try0_plane_preprocessed_5_retrieve`, 기본 캡션은
+`captions_tt-try0-qwen3-vl-8b-terse-512-1f_3_secs.json`이다. 일부만 적재된 컬렉션이나 다른
+데이터가 같은 이름에 있으면 자동으로 섞지 않고 중단한다. 대상을 확인한 뒤 의도적으로 다시
+만들 때만 `--load-mode rebuild`를 사용한다. 답변 형식은 현재 `RetrieveAgent`가 상속하는
+`NonAgent`의 스키마를 그대로 따른다.
+
 ---
 
 ## 3. Running the smoke test (.venv)
