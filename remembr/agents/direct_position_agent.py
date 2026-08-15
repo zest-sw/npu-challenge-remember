@@ -97,7 +97,12 @@ def current_position(preamble: str):
     found = re.search(r"located at \[([-\d.,\s]+)\]", preamble)
     if not found:
         return None
-    values = [float(v) for v in found.group(1).split(",")]
+    try:
+        values = [float(v) for v in found.group(1).split(",")]
+    except ValueError:
+        # The bracket matched but a field is not a number ("[1.0, 2.0, ]"). Same answer
+        # as no bracket at all: say nothing rather than raise out of prompt building.
+        return None
     return values if len(values) == 3 else None
 
 
@@ -157,15 +162,15 @@ class DirectPositionAgent(Agent):
         do. Measured on the real geometry, four benches at 97.1 / 104.5 / 122.2 / 123.0 m
         from the robot, the target moved through every slot:
 
-            coordinates, model compares   2/5   -- answered "5" whatever the arrangement
+            coordinates, model compares   1/5   -- answered "5" whatever the arrangement
             distances given as numbers    4/5
 
         It is not a reading problem. Given the same lists with an unambiguous target the
-        model scores 60/60: any slot, up to 20 candidates, same-scene distractors, the
+        model scores 64/64: any slot, up to 20 candidates, same-scene distractors, the
         target buried in filler sentences, and paraphrased so the question's noun never
         appears. It fails only when it has to do the arithmetic, and when it fails it
-        answers with the last memory. Over the twelve position questions this swap moved
-        the run from 26.9 m to 20.6 m.
+        answers with the last memory. Over the twelve position questions, `--temperature 0`,
+        this swap moved the run from 42.0 m to 21.6 m.
 
         Falls back to `Memory.memory_to_string` when the question does not say where the
         robot is, since then there is no distance to give.
@@ -177,7 +182,15 @@ class DirectPositionAgent(Agent):
         lines = []
         for number, doc in enumerate(memories, 1):
             where = [float(value) for value in doc.metadata["position"]]
+            if len(where) != 3:
+                # Same invariant `memory_index_output` enforces. Without this, `zip`
+                # would quietly drop a dimension and print a too-small distance, which
+                # is worse than failing: it steers the model onto that memory.
+                raise ValueError(f"memory {number} has no [x, y, z]: {where!r}")
             gap = sum((a - b) ** 2 for a, b in zip(where, here)) ** 0.5
+            # "The robot saw the following: " is `MilvusMemory.memory_to_string`'s own
+            # wording, repeated here because that rendering also carries the coordinate
+            # this line exists to replace. Keep the two in step by hand.
             caption = " ".join(doc.page_content.split())
             lines.append(f"{number}. distance_from_you={gap:.1f}m. "
                          f"The robot saw the following: {caption}")

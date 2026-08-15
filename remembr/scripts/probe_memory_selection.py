@@ -3,19 +3,25 @@
 Why this exists
 ---------------
 `direct+` hands the model the retrieved memories and asks which one answers the question.
-It scored 26.9 m average error on twelve position questions where picking the best of what
+It scored 42.0 m average error on twelve position questions where picking the best of what
 it was shown would have scored 7.1 m, so the selection step looked like the bottleneck --
-and three attempts to fix it by prompting all failed: naming the selection criterion in the
-system prompt, making the model commit to a memory number instead of typing a coordinate,
-and re-rendering the memories caption-first. The last one made things *worse* (26.9 -> 39.2 m).
+and four goes at fixing it by prompting moved nothing: naming the selection criterion in
+the system prompt, making the model commit to a memory number instead of typing a
+coordinate, re-rendering the memories caption-first, and cutting the caption to its first
+sentence.
 
-Every one of those measurements confounded three things at once: real captions, real
+Do not read those four A/B numbers as evidence either way: all of them were single
+`--temperature 0.7` runs, and three repeats of one fixed setting at that temperature came
+out 27.0 / 39.0 / 39.6 m, a 12.6 m spread that swallows any of the differences. On top of
+that, every one of those measurements confounded three things at once: real captions, real
 retrieval, real questions. This separates them. The memories here are synthetic, so the
 right answer is known, and one variable moves at a time.
 
 What it found
 -------------
-Identification is not the problem. 60/60, four different target objects per condition:
+Identification is not the problem. 64/64 -- sixteen conditions, four target objects each.
+(Twelve of those cases are the same baseline condition run three times, once as the control
+row of C, D and E, so there are 52 distinct ones. All correct either way.)
 
     target at slot 1 / 2 / 3 / 4 / 5 (k=5)          4/4 each
     k = 2 / 3 / 5 / 10 / 20, target in the middle   4/4 each
@@ -28,7 +34,7 @@ the question's words. The one thing it cannot do is arithmetic on coordinates:
 
     candidates at  8 / 75 / 210 m   (10x apart)     11/12   picks the nearest
     candidates at  8 / 12 / 210 m   (50% apart)     11/12
-    candidates at 97.1 / 104.5 / 122.2 / 123.0 m     2/5    <- the real geometry
+    candidates at 97.1 / 104.5 / 122.2 / 123.0 m     1/5    <- the real geometry
       same list, distances given as numbers          4/5
 
 That last pair is the finding. Asked to compare coordinates when the answers are within
@@ -44,10 +50,10 @@ Two other things worth knowing:
     model responding to the qualifier, not to position.
 
 `DirectPositionAgent` acts on this by computing each distance and showing it as a number,
-which moved the twelve-question run from 26.9 m to 20.6 m.
+which moved the twelve-question run from 42.0 m to 21.6 m at `--temperature 0`.
 
 Needs a running server with an LLM. No Milvus, no captions, no NPU beyond the LLM itself;
-about 140 one-token generations, roughly three minutes.
+102 one-token generations, roughly three minutes.
 
     python remembr/scripts/probe_memory_selection.py
 """

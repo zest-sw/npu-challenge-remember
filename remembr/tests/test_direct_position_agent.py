@@ -71,6 +71,7 @@ def test_a_memory_without_a_coordinate_is_rejected():
 
 from remembr.agents.direct_position_agent import (  # noqa: E402
     DirectPositionAgent,
+    current_position,
     split_question,
 )
 
@@ -173,7 +174,7 @@ def test_memories_are_numbered_and_carry_their_distance():
     """Numbered so the answer can name one, measured so "nearest" needs no arithmetic.
 
     Measured on the real geometry -- four candidates at 97.1/104.5/122.2/123.0 m -- the
-    model scored 2/5 comparing coordinates and 4/5 reading distances, and when it failed
+    model scored 1/5 comparing coordinates and 4/5 reading distances, and when it failed
     it answered with the last memory whatever the arrangement.
     """
     agent = make_agent("1")
@@ -196,6 +197,35 @@ def test_without_a_stated_position_it_falls_back_to_coordinates():
     assert "distance_from_you" not in prompt, prompt
     assert "1. At time=" in prompt, prompt
     assert "how far it is from you now" not in prompt, prompt
+
+
+def test_an_unreadable_position_falls_back_rather_than_raising():
+    """`current_position` promises None when the preamble does not give a usable point.
+
+    A trailing empty field still matches the bracket, and float('') would otherwise raise
+    out of prompt building -- turning a cosmetic preamble typo into an unanswered question.
+    """
+    for preamble in ("you are located at [1.0, 2.0, ].",
+                     "you are located at [1.0, 2.0].",
+                     "you are somewhere out there."):
+        assert current_position(preamble) is None, preamble
+    assert current_position("you are located at [1.0, 2.0, 3.0].") == [1.0, 2.0, 3.0]
+
+
+def test_a_memory_without_a_coordinate_stops_the_distance_line():
+    """The same invariant `memory_index_output` enforces, checked on the way in too.
+
+    `zip` would otherwise drop a dimension silently and print a too-small distance, which
+    is worse than failing: it steers the model onto exactly that memory.
+    """
+    agent = make_agent("1", memories=[FakeDoc([1.0, 2.0], "a bench")])
+    try:
+        agent.query(PREAMBLE_QUESTION)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected a ValueError for a 2-element position")
+    assert agent.chain.calls == 0, "should fail before spending an LLM call"
 
 
 def test_the_preamble_is_kept_but_out_of_the_question_sentence():
