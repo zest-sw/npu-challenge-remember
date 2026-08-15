@@ -113,9 +113,57 @@ Q2에서 정답에 가장 가까운 후보(8.1 m)의 캡션은 "금속 가로등
    **이 네 개의 A/B 숫자는 근거로 쓰지 말 것** — 전부 `--temperature 0.7` 단일 실행이라
    실행 간 변동폭(12.6 m) 안에 들어간다. 프롬프트로 안 된다는 근거는 그 숫자가 아니라
    식별 64/64과 후보 부재 쪽이다.
-3. **time/duration 확장 시 답변 계약 재설계** — 인덱스 방식은 "답이 검색된 기억의 좌표 중 하나"라는 전제에 서 있다. position에서는 12/12 성립하지만(소수점 9자리 일치) 계산이 필요한 유형에는 그대로 쓸 수 없다.
+3. **현재 위치를 문자열이 아니라 인자로 받기** — 지금 `current_position()`이 질문 문자열에서
+   정규식으로 좌표를 꺼낸다. 동작하지만 왕복이다:
+
+       벤치마크   `form_question_jsons.py`가 캡션에서 좌표를 계산 -> 문장에 글자로 삽입
+       실제 로봇  `agent_node.py`가 `/amcl_pose`로 좌표를 받음 -> 문장에 글자로 삽입
+       양쪽 다    `direct_position_agent.py`가 정규식으로 되꺼냄
+
+   실제 로봇은 **이미 구조화된 좌표를 손에 들고 있다**(`agent_node.py`가 `/amcl_pose`를 구독한다).
+   그걸 글자로 바꿨다가 파싱하는 것은 순수한 손실이고, 문구 변경에 조용히 깨진다 -- 실제로 두
+   경로의 문장이 이미 다르다(벤치마크 `you are located at [...]`, 로봇
+   `You are currently located at [...] and the time is ...`). 지금 정규식이 둘 다 잡는 것은 우연이다.
+
+   `Agent.query(question, here=None)`처럼 인자로 받으면 정규식이 사라지고 실시간 값을 그대로 쓴다.
+   기본값 `None`이면 기존 에이전트는 안 깨지지만 base 클래스와 호출부(eval, `agent_node.py`) 변경이라
+   별도 PR 사안이다.
+
+   참고로 문자열에 넣는 설계는 NVIDIA 원본이다(`cf2db07`, John Welsh). 벤치마크만의 편법이 아니라
+   실제 배포 경로도 같다. 그 선택의 대가가 위 preamble 표의 209.72 m다.
+
+4. **time/duration 확장 시 답변 계약 재설계** — 인덱스 방식은 "답이 검색된 기억의 좌표 중 하나"라는 전제에 서 있다. position에서는 12/12 성립하지만(소수점 9자리 일치) 계산이 필요한 유형에는 그대로 쓸 수 없다.
 
 ---
+
+### 측정 재현 절차
+
+질문 파일과 캡션은 `remembr/data/`(gitignored)에 있어 커밋되지 않는다. 위 숫자를 다시 내려면:
+
+```bash
+# position 12문제만 뽑는다 (human_qa.json 30문제 중)
+python - <<'EOF'
+import json
+src = '<데이터 경로>/questions/0/human_qa.json'
+d = json.load(open(src))
+pos = [x for x in d['data'] if x['type'] == 'position']
+json.dump({'version': d.get('version', 0.1), 'data': pos},
+          open('remembr/data/questions/0/human_qa_pos12.json', 'w'), indent=2)
+EOF
+
+# 캡션은 읽기 전용으로 연결
+ln -s <데이터 경로>/captions remembr/data/captions
+
+# temperature 0 필수 -- 기본값 0.7에서는 실행 간 12.6 m 흔들린다
+REMEMBR_TRACE=1 PYTHONPATH=$(pwd) python remembr/scripts/eval.py \
+  --model direct+tt/Llama-3.1-8B-Instruct --sequence_id 0 \
+  --qa_file human_qa_pos12 \
+  --caption_file captions_tt-qwen3-vl-8b-terse-200words-512-1f_3_secs \
+  --data_dir remembr/data --out_dir out --temperature 0 --postfix _repro
+```
+
+모델 능력 쪽 숫자(식별 64/64, 좌표 1/5 vs 거리 4/5)는 데이터가 필요 없다 --
+`python remembr/scripts/probe_memory_selection.py`가 합성 입력으로 102콜에 재현한다.
 
 ## 설계 요약 (승인된 결정들)
 
