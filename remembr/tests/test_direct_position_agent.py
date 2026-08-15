@@ -17,13 +17,16 @@ from remembr.agents.direct_position_agent import (  # noqa: E402
 
 
 class FakeDoc:
-    """A retrieved memory, as far as this agent is concerned: a position in metadata."""
+    """A retrieved memory, as far as this agent is concerned: a caption and a position."""
 
-    def __init__(self, position):
+    def __init__(self, position, caption="a caption"):
         self.metadata = {"position": position}
+        self.page_content = caption
 
 
-MEMORIES = [FakeDoc([1.0, 2.0, 3.0]), FakeDoc([-4.0, 5.5, -6.0]), FakeDoc([7, 8, 9])]
+MEMORIES = [FakeDoc([1.0, 2.0, 3.0], "a bench by the window"),
+            FakeDoc([-4.0, 5.5, -6.0], "a paved walkway"),
+            FakeDoc([7, 8, 9], "a bike rack")]
 
 
 def test_schema_offers_exactly_the_memories_on_hand():
@@ -166,14 +169,33 @@ def test_the_grammar_offers_only_the_memories_that_came_back():
     assert agent.chain.schemas == [{"type": "integer", "enum": [1, 2]}], agent.chain.schemas
 
 
-def test_memories_are_numbered_and_keep_their_coordinates():
-    """Numbered so the answer can name one; coordinates kept so "nearest" still works."""
+def test_memories_are_numbered_and_carry_their_distance():
+    """Numbered so the answer can name one, measured so "nearest" needs no arithmetic.
+
+    Measured on the real geometry -- four candidates at 97.1/104.5/122.2/123.0 m -- the
+    model scored 2/5 comparing coordinates and 4/5 reading distances, and when it failed
+    it answered with the last memory whatever the arrangement.
+    """
     agent = make_agent("1")
     agent.query(PREAMBLE_QUESTION)
     prompt = agent.chain.prompts[0]
-    for number in (1, 2, 3):
-        assert f"\n{number}. At time=" in f"\n{prompt}", prompt
-    assert "[-4.0, 5.5, -6.0]" in prompt, prompt
+
+    # The preamble puts the robot at the origin, so each distance is the memory's own norm.
+    for number, expected in ((1, "3.7"), (2, "9.1"), (3, "13.9")):
+        assert f"{number}. distance_from_you={expected}m." in prompt, prompt
+    # The coordinate itself is gone -- it is what the model kept mis-reading.
+    assert "[-4.0, 5.5, -6.0]" not in prompt, prompt
+    assert "how far it is from you now" in prompt, prompt
+
+
+def test_without_a_stated_position_it_falls_back_to_coordinates():
+    """No preamble means no distance to give, so do not claim to give one."""
+    agent = make_agent("1")
+    agent.query(ASKED)
+    prompt = agent.chain.prompts[0]
+    assert "distance_from_you" not in prompt, prompt
+    assert "1. At time=" in prompt, prompt
+    assert "how far it is from you now" not in prompt, prompt
 
 
 def test_the_preamble_is_kept_but_out_of_the_question_sentence():
