@@ -12,6 +12,7 @@ nothing; a parse failure raises and eval's own attempt cap records it.
 """
 import json
 import os
+import re
 
 from remembr.agents.agent import Agent, AgentOutput
 from remembr.memory.memory import Memory
@@ -42,12 +43,18 @@ def memory_index_schema(count: int) -> dict:
     return {"type": "integer", "enum": list(range(1, count + 1))}
 
 
-SYSTEM_PROMPT = (
-    "You are a robot looking back over your memory of what you saw. Each numbered memory "
-    "below records where you were and what you saw there. Pick the memory whose "
-    "description mentions the thing the question asks about, and respond with only that "
-    "memory's number."
-)
+def system_prompt(has_distance: bool) -> str:
+    """The instruction, matched to what the memory lines actually carry.
+
+    One string with one varying clause rather than two, so the two cannot drift apart:
+    saying "how far it is from you now" when the lines carry coordinates would be a lie
+    the model has to work around.
+    """
+    carries = ("records what you saw and how far it is from you now" if has_distance
+               else "records where you were and what you saw there")
+    return ("You are a robot looking back over your memory of what you saw. Each numbered "
+            f"memory below {carries}. Pick the memory whose description mentions the thing "
+            "the question asks about, and respond with only that memory's number.")
 
 
 def split_question(question: str):
@@ -78,6 +85,25 @@ def split_question(question: str):
     if not lines:
         return "", question.strip()
     return "\n".join(lines[:-1]), lines[-1]
+
+
+def current_position(preamble: str):
+    """The robot's own coordinate, out of the preamble, or None if it does not say.
+
+    What `numbered_memories` measures each candidate against. Returns None rather than
+    guessing, so a question without a preamble falls back to showing coordinates instead
+    of quietly reporting distances from the origin.
+    """
+    found = re.search(r"located at \[([-\d.,\s]+)\]", preamble)
+    if not found:
+        return None
+    try:
+        values = [float(v) for v in found.group(1).split(",")]
+    except ValueError:
+        # The bracket matched but a field is not a number ("[1.0, 2.0, ]"). Same answer
+        # as no bracket at all: say nothing rather than raise out of prompt building.
+        return None
+    return values if len(values) == 3 else None
 
 
 def memory_index_output(index, memories) -> AgentOutput:
@@ -126,24 +152,56 @@ class DirectPositionAgent(Agent):
     def set_memory(self, memory: Memory):
         self.memory = memory
 
-    def numbered_memories(self, memories) -> str:
+    def numbered_memories(self, memories, here=None) -> str:
         """The retrieved memories, numbered so the answer can name one.
 
-        Each line is `Memory.memory_to_string`'s own formatting so this does not become a
-        second spelling of it -- `agent.py` records what happened the last time one
-        contract was written out twice.
+        Each one carries how far it is from where the robot is now, worked out here rather
+        than left as a coordinate for the model to work out. Half the dataset's questions
+        turn on that distance -- "the *closest* place to sit", "the *nearest* recycling
+        bin" -- and comparing 3D coordinates is the one part of this job the model cannot
+        do. Measured on the real geometry, four benches at 97.1 / 104.5 / 122.2 / 123.0 m
+        from the robot, the target moved through every slot:
+
+            coordinates, model compares   1/5   -- answered "5" whatever the arrangement
+            distances given as numbers    4/5
+
+        It is not a reading problem. Given the same lists with an unambiguous target the
+        model scores 64/64: any slot, up to 20 candidates, same-scene distractors, the
+        target buried in filler sentences, and paraphrased so the question's noun never
+        appears. It fails only when it has to do the arithmetic, and when it fails it
+        answers with the last memory. Over the twelve position questions, `--temperature 0`,
+        this swap moved the run from 42.0 m to 21.6 m.
+
+        Falls back to `Memory.memory_to_string` when the question does not say where the
+        robot is, since then there is no distance to give.
         """
-        return "\n".join(f"{number}. {self.memory.memory_to_string([doc]).strip()}"
-                         for number, doc in enumerate(memories, 1))
+        if here is None:
+            return "\n".join(f"{number}. {self.memory.memory_to_string([doc]).strip()}"
+                             for number, doc in enumerate(memories, 1))
+
+        lines = []
+        for number, doc in enumerate(memories, 1):
+            where = [float(value) for value in doc.metadata["position"]]
+            if len(where) != 3:
+                # Same invariant `memory_index_output` enforces. Without this, `zip`
+                # would quietly drop a dimension and print a too-small distance, which
+                # is worse than failing: it steers the model onto that memory.
+                raise ValueError(f"memory {number} has no [x, y, z]: {where!r}")
+            gap = sum((a - b) ** 2 for a, b in zip(where, here)) ** 0.5
+            # "The robot saw the following: " is `MilvusMemory.memory_to_string`'s own
+            # wording, repeated here because that rendering also carries the coordinate
+            # this line exists to replace. Keep the two in step by hand.
+            caption = " ".join(doc.page_content.split())
+            lines.append(f"{number}. distance_from_you={gap:.1f}m. "
+                         f"The robot saw the following: {caption}")
+        return "\n".join(lines)
 
     def prompt_for(self, question: str, memories) -> str:
         """The one prompt this agent sends, with the preamble out of the question.
 
         See `split_question` for the measurements behind the shape. The preamble keeps its
-        own labelled block so the current time and position stay available to
-        "nearest"/"how long ago" questions -- those need to compare the candidates against
-        where the robot is now, so the coordinates stay in the memory lines too. Only the
-        *answer* is a number instead of a coordinate.
+        own labelled block so the current time stays available, and its position is what
+        `numbered_memories` measures each candidate against.
         """
         preamble, asked = split_question(question)
         situation = (
@@ -151,8 +209,9 @@ class DirectPositionAgent(Agent):
             "(This is where and when you are now. It is not the answer.)\n\n"
             if preamble else ""
         )
-        return (f"{SYSTEM_PROMPT}\n\n{situation}{self.numbered_memories(memories)}"
-                f"\n\nQuestion: {asked}")
+        here = current_position(preamble)
+        return (f"{system_prompt(here is not None)}\n\n{situation}"
+                f"{self.numbered_memories(memories, here)}\n\nQuestion: {asked}")
 
     def query(self, question: str) -> AgentOutput:
         # The asked line is the search query -- no query-generation call. The preamble
