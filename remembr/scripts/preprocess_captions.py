@@ -35,7 +35,7 @@ TERSE_QUERY = (
     "<people and what they are doing>.\"\n"
     "\n"
     "Rules:\n"
-    "- Two or three plain sentences. Under 60 words total.\n"
+    "- Four or five plain sentences. Under 200 words total.\n"
     "- Name concrete things: what they are, what they are made of, where they are.\n"
     "- Say how many people and what they are doing, or say there are none.\n"
     "- No greeting, no preamble, no markdown, no headings, no numbered or bulleted lists.\n"
