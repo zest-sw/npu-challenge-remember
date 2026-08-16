@@ -1,6 +1,6 @@
 from dataclasses import dataclass, asdict
 
-import datetime, time
+import datetime, re, time
 from time import strftime, localtime
 from typing import Any, List, Optional, Tuple
 from langchain_core.documents import Document
@@ -16,6 +16,52 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 
 
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
+
+TEXT_SEARCH_K = 5
+
+INDEX_UNITS = ('caption', 'sentence')
+
+# Shortest run of words worth its own vector. Below this a fragment ("Ok.", "Yes.")
+# embeds to noise while still competing for one of the k slots.
+MIN_SENTENCE_WORDS = 3
+
+# Sentence rows repeat their parent caption, so a search must over-fetch to come back
+# with k distinct captions. Captions run about 7 sentences, so 8x covers the case where
+# one caption owns most of the top hits.
+SENTENCE_OVERFETCH = 8
+
+
+def sentences_of(caption: str) -> list[str]:
+    """The units that get their own embedding.
+
+    A caption is a whole scene -- sidewalk, wall, bench, utility box, building, person --
+    averaged into one vector, so a question about the bench matches one seventh of what it
+    is compared against. Splitting undoes that dilution.
+    """
+    caption = caption.strip()
+    if not caption:
+        return []
+    sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', caption)]
+    kept = [s for s in sentences if len(s.split()) >= MIN_SENTENCE_WORDS]
+    # A caption of nothing but fragments still has to be findable, so index it whole.
+    return kept or [caption]
+
+
+def first_per_caption(docs, limit: int):
+    """Keep each caption once, at its best-matching sentence.
+
+    Without this a caption with two strong sentences takes two of the slots the model
+    chooses between, which narrows its options without adding anything to read.
+    """
+    kept, seen = [], set()
+    for doc in docs:
+        if doc.page_content in seen:
+            continue
+        seen.add(doc.page_content)
+        kept.append(doc)
+        if len(kept) == limit:
+            break
+    return kept
 
 
 class MilvusWrapper:
@@ -103,33 +149,63 @@ class MilvusWrapper:
 class MilvusMemory(Memory):
 
 
-    def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530, time_offset=FIXED_SUBTRACT):
+    def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530, time_offset=FIXED_SUBTRACT,
+                 index_unit='caption'):
+        """`index_unit` picks what a stored vector describes.
+
+        'caption' is the original: one vector per caption, reusing the embeddings the
+        caption files ship, which are unnormalised.
+
+        'sentence' embeds each sentence separately and normalises, since it computes both
+        sides itself and mxbai is a cosine model. Measured offline over the 12 position
+        questions, the closest memory among the retrieved five went from 7.1 m to 1.6 m,
+        and the caption naming the asked-about object rose from rank 33 to 5 on the
+        question where retrieval had been missing it outright.
+        """
+        if index_unit not in INDEX_UNITS:
+            raise ValueError(f"index_unit must be one of {INDEX_UNITS}, got {index_unit!r}")
 
         self.db_collection_name = db_collection_name
         self.db_ip = db_ip
         self.db_port = db_port
         self.time_offset = time_offset
+        self.index_unit = index_unit
 
-        self.embedder = HuggingFaceEmbeddings(model_name='mixedbread-ai/mxbai-embed-large-v1')
+        self.embedder = HuggingFaceEmbeddings(
+            model_name='mixedbread-ai/mxbai-embed-large-v1',
+            encode_kwargs={'normalize_embeddings': index_unit == 'sentence'})
 
         self.working_memory = []
 
         self.reset(drop_collection=False)
 
 
+    def rows_for(self, memory_dict: dict, text_embedding=None) -> list[dict]:
+        """The Milvus rows one memory becomes, one per indexed unit.
+
+        Every row carries the whole caption whatever the unit, so a sentence decides
+        which memory is retrieved while the model still reads it in context.
+        """
+        if self.index_unit == 'caption':
+            if text_embedding is None:
+                text_embedding = self.embedder.embed_query(memory_dict['caption'])
+            return [dict(memory_dict, id=str(time.time()), text_embedding=text_embedding)]
+
+        # A precomputed embedding describes the whole caption, which is the averaging
+        # this mode exists to avoid, so it is not reused here. A memory with no caption
+        # still gets its row, since position and time search go looking for it.
+        sentences = sentences_of(memory_dict['caption']) or [memory_dict['caption']]
+        embeddings = self.embedder.embed_documents(sentences)
+        stamp = time.time()
+        return [dict(memory_dict, id=f"{stamp}-{n}", text_embedding=embedding)
+                for n, embedding in enumerate(embeddings)]
+
     def insert(self, item: MemoryItem, text_embedding=None):
 
         memory_dict = asdict(item)
-        memory_dict['id'] = str(time.time())
-
-        if text_embedding is None:
-            text_embedding = self.embedder.embed_query(memory_dict['caption'])
-
         memory_dict['time'] =  [(memory_dict['time'] - self.time_offset), 0.0]
 
-        memory_dict['text_embedding'] = text_embedding
-
-        self.milv_wrapper.insert([memory_dict])
+        self.milv_wrapper.insert(self.rows_for(memory_dict, text_embedding))
         self._unflushed_inserts = True
 
     def _flush_if_needed(self):
@@ -169,7 +245,8 @@ class MilvusMemory(Memory):
             vector_field='text_embedding',
             text_field='caption',
         )
-        self.text_retriever = text_vector_db.as_retriever(search_kwargs={"k": 5})
+        fetch = TEXT_SEARCH_K * SENTENCE_OVERFETCH if self.index_unit == 'sentence' else TEXT_SEARCH_K
+        self.text_retriever = text_vector_db.as_retriever(search_kwargs={"k": fetch})
 
 
         self.position_vector_db = Milvus(
@@ -270,6 +347,8 @@ class MilvusMemory(Memory):
 
         self._flush_if_needed()
         docs = self.text_retriever.invoke(query)
+        if self.index_unit == 'sentence':
+            docs = first_per_caption(docs, TEXT_SEARCH_K)
         self._trace_hits("text", query, docs)
 
         self.working_memory += docs

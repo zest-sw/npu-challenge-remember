@@ -32,7 +32,7 @@ from agents.direct_position_agent import DirectPositionAgent
 from agents.vlm_non_agent import VLMNonAgent
 
 from memory.memory import MemoryItem
-from memory.milvus_memory import MilvusMemory
+from memory.milvus_memory import INDEX_UNITS, MilvusMemory
 from memory.text_memory import TextMemory
 from memory.video_memory import VideoMemory, ImageMemoryItem
 
@@ -271,7 +271,8 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
 
     if use_milvus:
         # milv = MilvusWrapper(ip_address=ip_address)
-        memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address, time_offset=start_time)
+        memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address, time_offset=start_time,
+                              index_unit=args.index_unit)
     elif 'vlm' in args.model:
         memory = VideoMemory()
     else:
@@ -536,6 +537,10 @@ if __name__ == "__main__":
     parser.add_argument("--window_size", type=int, default=5)
     parser.add_argument("--db_name", type=str, default='test')
     parser.add_argument("--db_ip", type=str, default='127.0.0.1')
+    # 'sentence' indexes each sentence of a caption separately. Slower to load, since the
+    # caption file's precomputed embeddings no longer apply, but it retrieves memories
+    # much closer to the answer -- see MilvusMemory.__init__.
+    parser.add_argument("--index_unit", type=str, default='caption', choices=INDEX_UNITS)
 
 
     args = parser.parse_args()
