@@ -10,8 +10,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from remembr.memory.milvus_memory import (  # noqa: E402
+    POSITION_TIME_K,
+    TEXT_SEARCH_K,
     MilvusMemory,
-    first_per_caption,
+    first_per_memory,
     sentences_of,
 )
 
@@ -45,23 +47,48 @@ def test_a_caption_with_nothing_long_enough_is_kept_whole():
     assert sentences_of("   ") == []
 
 
-def test_each_caption_appears_once_at_its_best_sentence():
+def test_each_memory_appears_once_at_its_best_sentence():
     """Sentence rows repeat their parent caption. Without this, one caption with two
     strong sentences would take two of the five slots the model chooses between."""
     docs = [FakeDoc("first"), FakeDoc("second"), FakeDoc("first"), FakeDoc("third")]
-    assert [doc.page_content for doc in first_per_caption(docs, 5)] == [
+    assert [doc.page_content for doc in first_per_memory(docs, 5)] == [
         "first", "second", "third"]
+
+
+def test_two_memories_that_share_a_caption_are_both_kept():
+    """A stationary robot repeats itself, and those are still separate memories at
+    separate times. Collapsing them would answer with the wrong moment."""
+    docs = [FakeDoc("a hallway", time=10.0), FakeDoc("a hallway", time=99.0)]
+    assert len(first_per_memory(docs, 5)) == 2
 
 
 def test_deduplication_stops_once_the_limit_is_reached():
     docs = [FakeDoc(str(n)) for n in range(10)]
-    assert len(first_per_caption(docs, 3)) == 3
+    assert len(first_per_memory(docs, 3)) == 3
+
+
+def test_over_fetching_only_happens_when_rows_are_sentences():
+    """Caption mode has one row per memory, so asking for more would change what the
+    original returns."""
+    assert make_memory("caption").fetch_count(TEXT_SEARCH_K) == TEXT_SEARCH_K
+    assert make_memory("sentence").fetch_count(TEXT_SEARCH_K) > TEXT_SEARCH_K
+
+
+def test_caption_mode_returns_search_hits_untouched():
+    """Two memories may legitimately share a caption, so caption mode must not dedupe."""
+    docs = [FakeDoc("a hallway"), FakeDoc("a hallway")]
+    assert make_memory("caption").distinct_memories(docs, POSITION_TIME_K) == docs
+
+
+def test_sentence_mode_deduplicates_search_hits():
+    docs = [FakeDoc("a hallway"), FakeDoc("a hallway")]
+    assert len(make_memory("sentence").distinct_memories(docs, POSITION_TIME_K)) == 1
 
 
 class FakeDoc:
-    def __init__(self, caption):
+    def __init__(self, caption, time=0.0):
         self.page_content = caption
-        self.metadata = {}
+        self.metadata = {"time": [time, 0.0]}
 
 
 class FakeEmbedder:

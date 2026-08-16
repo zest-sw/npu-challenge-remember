@@ -19,6 +19,10 @@ FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1
 
 TEXT_SEARCH_K = 5
 
+# What similarity_search_with_score_by_vector defaults to, named so position and time
+# search can over-fetch and still come back with as many memories as they used to.
+POSITION_TIME_K = 4
+
 INDEX_UNITS = ('caption', 'sentence')
 
 # Shortest run of words worth its own vector. Below this a fragment ("Ok.", "Yes.")
@@ -47,17 +51,20 @@ def sentences_of(caption: str) -> list[str]:
     return kept or [caption]
 
 
-def first_per_caption(docs, limit: int):
-    """Keep each caption once, at its best-matching sentence.
+def first_per_memory(docs, limit: int):
+    """Keep each memory once, at its best-matching sentence.
 
-    Without this a caption with two strong sentences takes two of the slots the model
-    chooses between, which narrows its options without adding anything to read.
+    Sentence rows repeat their parent's caption, position and time, so without this one
+    memory takes several of the slots the model chooses between. Two memories can
+    legitimately share a caption -- a stationary robot repeats itself -- so the timestamp
+    is part of what tells them apart.
     """
     kept, seen = [], set()
     for doc in docs:
-        if doc.page_content in seen:
+        key = (doc.page_content, str(doc.metadata.get('time')))
+        if key in seen:
             continue
-        seen.add(doc.page_content)
+        seen.add(key)
         kept.append(doc)
         if len(kept) == limit:
             break
@@ -180,6 +187,15 @@ class MilvusMemory(Memory):
         self.reset(drop_collection=False)
 
 
+    def fetch_count(self, limit: int) -> int:
+        """Rows to ask Milvus for so that `limit` distinct memories come back."""
+        return limit * SENTENCE_OVERFETCH if self.index_unit == 'sentence' else limit
+
+    def distinct_memories(self, docs, limit: int):
+        """Collapse the sentence rows of one memory. A no-op on caption rows, which are
+        already one per memory and may share a caption with each other."""
+        return first_per_memory(docs, limit) if self.index_unit == 'sentence' else docs
+
     def rows_for(self, memory_dict: dict, text_embedding=None) -> list[dict]:
         """The Milvus rows one memory becomes, one per indexed unit.
 
@@ -245,8 +261,8 @@ class MilvusMemory(Memory):
             vector_field='text_embedding',
             text_field='caption',
         )
-        fetch = TEXT_SEARCH_K * SENTENCE_OVERFETCH if self.index_unit == 'sentence' else TEXT_SEARCH_K
-        self.text_retriever = text_vector_db.as_retriever(search_kwargs={"k": fetch})
+        self.text_retriever = text_vector_db.as_retriever(
+            search_kwargs={"k": self.fetch_count(TEXT_SEARCH_K)})
 
 
         self.position_vector_db = Milvus(
@@ -298,7 +314,10 @@ class MilvusMemory(Memory):
     def search_by_position(self, query: tuple) -> str:
         self._flush_if_needed()
         # docs = pos_db.similarity_search_by_vector(np.array(query))
-        docs = similarity_search_with_score_by_vector(self.position_vector_db, np.array(query).astype(float))
+        docs = similarity_search_with_score_by_vector(
+            self.position_vector_db, np.array(query).astype(float),
+            k=self.fetch_count(POSITION_TIME_K))
+        docs = self.distinct_memories(docs, POSITION_TIME_K)
         self._trace_hits("position", query, docs)
 
         self.working_memory += docs 
@@ -332,7 +351,9 @@ class MilvusMemory(Memory):
 
 
         self._flush_if_needed()
-        docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([query, 0]))
+        docs = similarity_search_with_score_by_vector(
+            self.time_vector_db, np.array([query, 0]), k=self.fetch_count(POSITION_TIME_K))
+        docs = self.distinct_memories(docs, POSITION_TIME_K)
         self._trace_hits("time", hms_time, docs)
 
         self.working_memory += docs
@@ -346,9 +367,7 @@ class MilvusMemory(Memory):
     def search_by_text(self, query: str) -> str:
 
         self._flush_if_needed()
-        docs = self.text_retriever.invoke(query)
-        if self.index_unit == 'sentence':
-            docs = first_per_caption(docs, TEXT_SEARCH_K)
+        docs = self.distinct_memories(self.text_retriever.invoke(query), TEXT_SEARCH_K)
         self._trace_hits("text", query, docs)
 
         self.working_memory += docs
