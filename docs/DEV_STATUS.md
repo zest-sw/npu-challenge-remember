@@ -98,6 +98,42 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-16 — terse caption의 검색 특징을 첫 문장에 고정
+
+- position 평가의 실제 원본 frame과 top-5 caption을 대조해, 경찰 호출기를 일반 pole/hydrant로
+  부르거나 Gates 조형물과 건물 이름의 관계를 빠뜨리고, recycling bin을 일반 trash can으로만
+  기록한 것이 검색과 후보 선택을 함께 막는 사례를 확인했다.
+- `--caption_style terse`가 가장 구별되는 물체·랜드마크를 첫 문장에 쓰고, 읽을 수 있는 글자,
+  안전 설비, 조형물, bin·좌석·elevator·rack의 색상·형태·상태와 이름 있는 장소와의 관계를
+  우선 기록하도록 바꿨다. 정확한 종류를 모르면 보이는 단서만 쓰고 이름·글자를 지어내지 않게 했다.
+- 기존 129단어 prompt를 265단어로 크게 늘린 초안은 더 큰 NPU prefill 구간으로 넘어갈 위험이
+  있어 사용하지 않았다. 중복 지시를 걷어내고 기존과 비슷한 분량으로 제한했으며,
+  오프라인 테스트가 150단어 상한을 고정한다.
+- 최초 key-first 실행의 초반 70개를 확인하니 핵심 물체가 앞으로 온 대신 `Student Union`처럼
+  글자로 확인되지 않은 장소를 유추하거나 `No visible elevators, sculptures, or bins`처럼 없는
+  물체가 검색 keyword에 들어가는 사례가 있었다. 다음 `v2`는 prompt를 늘리지 않고 두 규칙만
+  교체해, 장소 이름에는 읽을 수 있는 글자를 요구하고 absent object 나열을 금지한다. 최초 실행의
+  두 규칙은 비교 재현을 위해 `preprocess_captions.py` 주석과 기존 산출물 이름으로 보존한다.
+- prompt는 실행 경로를 한눈에 볼 수 있도록 `preprocess_captions.py` 안에 두고, 오프라인 테스트가
+  실제 CLI의 `TERSE_QUERY` 계약을 직접 검사한다. 기존 caption을 덮어쓰지 않는
+  최초 실행 `qwen3-8b-terse-keyfirst-200w-512-1f`와 다음 실행
+  `qwen3-8b-terse-keyfirstV2-200w-512-1f` 이름을 runbook에 기록했다.
+- 현재 오프라인 검증: `pytest -q remembr/tests/test_caption_prompts.py` 3 passed,
+  `pytest -q remembr/tests` 64 passed. prompt는 149단어이며, 특정 평가 물체 종류가 들어가지 않는
+  계약도 테스트한다.
+- v2는 실제 8B VLM에서 272개 생성을 완료했다(평균 49.65단어, 중앙 latency 24.61초). 동일한
+  `temperature=0` position 12문제 평가에서 평균 오차 27.79m, top-5 좌표 oracle 13.33m,
+  정답 frame top-5 포함 7/12였다. 기존 terse-200words는 각각 21.57m, 7.12m, 7/12였다.
+  두 설정의 실제 선택-oracle 차이는 약 14.45m로 같아, v2의 열세는 후보 판단보다 검색 recall
+  차이였다. 실제 정답 frame 순위가 좌석은 3→16위, recycling container는 11→92위로 떨어진 반면,
+  police call pole은 26→4위, elevator는 30→1위로 개선됐다.
+- 이 결과를 바탕으로 다음 prompt에서는 `safety fixtures`, `sculptures`, `bins`, `elevators`, `racks`
+  같은 평가 물체의 하드코딩을 제거했다. 대신 글자·색·형태·기능·상태로 구별되는 보조 물체를 최대
+  3개 포함하고, 작거나 화면 가장자리에 있어도 기록하며 각 물체에는 종류와 특징 하나만 붙이게 했다.
+  `avoid repetition`은 인접 frame 사이의 반복을 해결하지 못하면서 한 caption 안의 유용한 관계까지
+  줄일 수 있어 사용하지 않았다. 이 변경의 실제 NPU caption/eval은 아직 수행 전이며, v2 규칙은
+  소스의 인접 주석과 기존 산출물로 보존한다.
+
 ### 2026-08-12 — VLM caption 해상도 실험과 프레임 샘플링 버그 수정
 
 - `/caption`이 모든 frame을 무조건 224x224로 찌그러뜨리던 경로에 `TT_VLM_IMAGE_LONG_SIDE`와
