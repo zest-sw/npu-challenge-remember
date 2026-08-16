@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 import numpy as np
 
 from remembr.memory.memory import Memory, MemoryItem
+from remembr.memory.sentence_chunking import dedupe_parent_documents
 from remembr.utils import trace
 
 from langchain_community.vectorstores import Milvus
@@ -103,12 +104,19 @@ class MilvusWrapper:
 class MilvusMemory(Memory):
 
 
-    def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530, time_offset=FIXED_SUBTRACT):
+    def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530,
+                 time_offset=FIXED_SUBTRACT, text_search_k=5,
+                 dedupe_text_parents=False):
 
         self.db_collection_name = db_collection_name
         self.db_ip = db_ip
         self.db_port = db_port
         self.time_offset = time_offset
+        self.text_search_k = text_search_k
+        self.dedupe_text_parents = dedupe_text_parents
+        # A parent has about seven sentences in the measured caption set. Fetch
+        # beyond the final k so duplicate sentences cannot leave fewer than k poses.
+        self.text_fetch_k = text_search_k * 10 if dedupe_text_parents else text_search_k
 
         self.embedder = HuggingFaceEmbeddings(model_name='mixedbread-ai/mxbai-embed-large-v1')
 
@@ -117,10 +125,10 @@ class MilvusMemory(Memory):
         self.reset(drop_collection=False)
 
 
-    def insert(self, item: MemoryItem, text_embedding=None):
+    def insert(self, item: MemoryItem, text_embedding=None, record_id=None):
 
         memory_dict = asdict(item)
-        memory_dict['id'] = str(time.time())
+        memory_dict['id'] = record_id or str(time.time())
 
         if text_embedding is None:
             text_embedding = self.embedder.embed_query(memory_dict['caption'])
@@ -169,7 +177,9 @@ class MilvusMemory(Memory):
             vector_field='text_embedding',
             text_field='caption',
         )
-        self.text_retriever = text_vector_db.as_retriever(search_kwargs={"k": 5})
+        self.text_retriever = text_vector_db.as_retriever(
+            search_kwargs={"k": self.text_fetch_k}
+        )
 
 
         self.position_vector_db = Milvus(
@@ -218,10 +228,21 @@ class MilvusMemory(Memory):
             where = np.array(doc.metadata['position']).round(1).tolist()
             trace.note(f"{number}  {shown}  {str(where):28s} {trace.clip(doc.page_content, 64)}")
 
+    def _select_documents(self, docs, limit):
+        if self.dedupe_text_parents:
+            return dedupe_parent_documents(docs, limit=limit)
+        return docs[:limit]
+
     def search_by_position(self, query: tuple) -> str:
         self._flush_if_needed()
         # docs = pos_db.similarity_search_by_vector(np.array(query))
-        docs = similarity_search_with_score_by_vector(self.position_vector_db, np.array(query).astype(float))
+        fetch_k = self.text_fetch_k if self.dedupe_text_parents else 4
+        docs = similarity_search_with_score_by_vector(
+            self.position_vector_db, np.array(query).astype(float), k=fetch_k
+        )
+        docs = self._select_documents(
+            docs, self.text_search_k if self.dedupe_text_parents else 4
+        )
         self._trace_hits("position", query, docs)
 
         self.working_memory += docs 
@@ -255,7 +276,13 @@ class MilvusMemory(Memory):
 
 
         self._flush_if_needed()
-        docs = similarity_search_with_score_by_vector(self.time_vector_db, np.array([query, 0]))
+        fetch_k = self.text_fetch_k if self.dedupe_text_parents else 4
+        docs = similarity_search_with_score_by_vector(
+            self.time_vector_db, np.array([query, 0]), k=fetch_k
+        )
+        docs = self._select_documents(
+            docs, self.text_search_k if self.dedupe_text_parents else 4
+        )
         self._trace_hits("time", hms_time, docs)
 
         self.working_memory += docs
@@ -270,6 +297,7 @@ class MilvusMemory(Memory):
 
         self._flush_if_needed()
         docs = self.text_retriever.invoke(query)
+        docs = self._select_documents(docs, self.text_search_k)
         self._trace_hits("text", query, docs)
 
         self.working_memory += docs
@@ -355,5 +383,4 @@ def similarity_search_with_score_by_vector(
             ret.append(pair)
 
         return [doc for doc, _ in ret]
-
 

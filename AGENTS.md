@@ -82,6 +82,13 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
 - **지연은 거의 전부 "생성 토큰 수 × 토큰당 비용"이다.** 실측(8B, accuracy): 요청당 고정비
   ~3초 + **토큰당 ~0.26초(≈3.8 tok/s)**. 프롬프트 길이 영향은 작다(22→529 words에서
   3.0→4.3초). 느리면 프롬프트나 grammar를 의심하기 전에 **생성 토큰 수와 재시도 횟수**를 보라.
+- **문장 검색은 multivector라 parent-caption dedupe가 필수다.** 한 3초 caption의 문장들은 모두
+  같은 pose를 가지므로 문장 row를 그대로 top-k로 자르면 한 pose가 후보 슬롯을 여러 개 먹는다.
+  `--memory_chunking sentence`는 더 넓게 검색한 뒤 부모별 최고 문장만 남기며, k는 서로 다른 부모
+  수를 뜻한다. 문장에는 전체 caption embedding을 복사하지 말고 반드시 문장별로 다시 embedding한다.
+  단, 더 좋은 후보군이 최종 평균을 보장하지는 않았다: position 12문제에서 offline k=5 oracle은
+  7.12→1.62m였지만 실제 8B 선택 평균은 caption k=5 21.57m, sentence k=5 22.73m, k=7
+  22.57m였다. 중앙값과 5m 이내 개수만 좋아졌고 큰 선택 실패가 평균을 덮었다.
 - **`temperature=0`은 재시도를 무의미하게 만든다.** 생성이 바이트 단위로 동일해져서 실패한
   답을 그대로 반복한다. 실측(동일 9문제, 8B): temp 0 → LLM 824초·attempts 25·미답변 4,
   temp 0.7 → **445초·12·0**. eval 기본값 0.7을 이유 없이 0으로 바꾸지 말 것.

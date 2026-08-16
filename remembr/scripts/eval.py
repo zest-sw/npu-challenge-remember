@@ -33,6 +33,7 @@ from agents.vlm_non_agent import VLMNonAgent
 
 from memory.memory import MemoryItem
 from memory.milvus_memory import MilvusMemory
+from memory.sentence_chunking import cached_sentence_chunk_index, sentence_record_id
 from memory.text_memory import TextMemory
 from memory.video_memory import VideoMemory, ImageMemoryItem
 
@@ -269,9 +270,19 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
     end_time = qa_instance['end_time']
 
 
+    memory_chunking = getattr(args, 'memory_chunking', 'caption')
+    sentence_chunking = memory_chunking == 'sentence'
+    retrieval_k = getattr(args, 'retrieval_k', None)
+    if retrieval_k is None:
+        retrieval_k = 7 if sentence_chunking else 5
+
     if use_milvus:
         # milv = MilvusWrapper(ip_address=ip_address)
-        memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address, time_offset=start_time)
+        collection_name = getattr(args, 'db_name', None) or f"eval_memory_{args.sequence_id}"
+        memory = MilvusMemory(
+            collection_name, db_ip=ip_address, time_offset=start_time,
+            text_search_k=retrieval_k, dedupe_text_parents=sentence_chunking,
+        )
     elif 'vlm' in args.model:
         memory = VideoMemory()
     else:
@@ -284,6 +295,12 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
 
     with open(captions_path, 'r') as f:
         out = json.load(f)
+
+    sentence_chunks = None
+    if sentence_chunking:
+        if not use_milvus:
+            raise ValueError("--memory_chunking sentence requires a Milvus retrieval model")
+        sentence_chunks = cached_sentence_chunk_index(captions_path, out, memory.embedder)
 
 
     outputs = []
@@ -334,8 +351,24 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
         else:
             entity = MemoryItem.from_dict(entity)
 
-        if use_milvus:
-            memory.insert(entity, text_embedding=item['text_embedding'])
+        if use_milvus and sentence_chunking:
+            parent_id = str(item['id'])
+            for chunk in sentence_chunks[parent_id]:
+                chunk_entity = MemoryItem.from_dict({
+                    **asdict(entity),
+                    'caption': chunk['caption'],
+                })
+                memory.insert(
+                    chunk_entity,
+                    text_embedding=chunk['text_embedding'],
+                    record_id=sentence_record_id(parent_id, chunk['sentence_index']),
+                )
+        elif use_milvus:
+            memory.insert(
+                entity,
+                text_embedding=item['text_embedding'],
+                record_id=str(item['id']),
+            )
         else:
             memory.insert(entity)
 
@@ -516,6 +549,14 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="remembr+llama3")
     parser.add_argument("--qa_file", type=str, default="human_qa")
     parser.add_argument("--caption_file", type=str, default="captions_VILA1.5-13b_3_secs")
+    parser.add_argument(
+        "--memory_chunking", choices=["caption", "sentence"], default="caption",
+        help="Milvus text unit: full caption (paper-compatible) or sentence chunks",
+    )
+    parser.add_argument(
+        "--retrieval_k", type=int, default=None,
+        help="number of distinct parent captions returned (default: caption=5, sentence=7)",
+    )
     parser.add_argument("--data_dir", type=str, default="./data/")
     parser.add_argument("--coda_dir", type=str, default="./coda_data/")
 
@@ -534,7 +575,10 @@ if __name__ == "__main__":
 
     # remembr specific args
     parser.add_argument("--window_size", type=int, default=5)
-    parser.add_argument("--db_name", type=str, default='test')
+    parser.add_argument(
+        "--db_name", type=str, default=None,
+        help="Milvus collection name (default: eval_memory_<sequence_id>)",
+    )
     parser.add_argument("--db_ip", type=str, default='127.0.0.1')
 
 

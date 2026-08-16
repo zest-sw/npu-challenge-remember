@@ -228,6 +228,42 @@ python scripts/eval.py \
   --sequence_id 0 --caption_file captions_tt-qwen25-vl-3b_3_secs \
   --coda_dir /home/user/coda_raw/coda_data --postfix _0
 ```
+
+**문장 multivector 검색 — 기존 caption을 다시 생성하지 않음:**
+
+```bash
+python scripts/eval.py \
+  --model direct+tt/Llama-3.1-8B-Instruct \
+  --sequence_id 0 \
+  --qa_file human_qa_position \
+  --caption_file captions_tt-qwen3-vl-8b-terse-200words-512-1f_3_secs \
+  --memory_chunking sentence \
+  --retrieval_k 7 \
+  --db_name eval_sentence_parent_k7 \
+  --temperature 0 \
+  --coda_dir /home/user/coda_raw/coda_data \
+  --postfix _sentence-parent-k7
+```
+
+- `caption`(기본)은 기존처럼 3초 caption 하나가 Milvus row 하나다. `sentence`는 원본 JSON을
+  수정하지 않고 caption을 3단어 이상 문장으로 나눠 각 문장의 embedding을 첫 질문에서 한 번에
+  계산하고, 이후 질문에서는 프로세스 cache를 쓴다. 272개 `terse-200words`는 1,796개 문장이고
+  이 host-side 준비에 실측 약 21~25초가 한 번 들었다.
+- 각 문장은 부모 caption의 time·pose를 그대로 갖는다. Milvus에서는 최종 k보다 넓게 검색하고,
+  같은 parent caption의 문장이 여러 개 잡히면 가장 높은 문장 하나만 남긴다. 따라서
+  `--retrieval_k 7`은 문장 7개이면서 동시에 **서로 다른 부모 pose 7개**다. 이 dedupe 없이 문장
+  row를 바로 top-k로 자르면 한 pose가 여러 후보 슬롯을 차지한다.
+- 공유 Milvus에서 동시 평가가 겹치지 않도록 `--db_name`에 실행별 고유 collection 이름을 준다.
+  생략하면 기존과 같은 `eval_memory_<sequence_id>`를 사용한다.
+- 실제 caption/질문으로 한 exact-L2 사전 측정(position 12문제, k=5): 전체 caption의 후보 전체
+  평균 30.61m·oracle 7.12m, 문장+parent dedupe는 각각 17.61m·1.62m였다. 이는 retrieval 후보
+  품질 측정이며 LLM이 하나를 고른 end-to-end 점수가 아니다.
+- 실제 Milvus+8B LLM, `direct+`, `--temperature 0` 결과는 전체 caption k=5가 평균
+  21.57m·중앙값 7.88m·5m 이내 4/12, 문장+dedupe k=5가 22.73m·5.62m·5/12,
+  문장+dedupe k=7이 22.57m·4.28m·6/12였다. 문장 검색이 후보군과 중앙값을 개선했지만 큰 선택
+  실패 몇 개가 평균 개선을 막았다. 그러므로 offline oracle만 보고 성능 향상으로 보고하지 말고,
+  설정 비교는 위처럼 `--temperature 0` end-to-end 결과까지 함께 기록한다.
+
 - 결과는 `./out/`로 간다. binary/position/time/duration은 채점되고, text 질문은 건너뛴다
   (원본 코드 동작). seq0의 경우 30개 중 text 질문 5개가 제외되어 **25개 질문이 채점된다**.
 - latency 필드도 함께 저장된다. 최상위 `eval_total_latency_s`는 전체 eval 실행 시간이고, 각 response의

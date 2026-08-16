@@ -98,6 +98,34 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-16 — 문장 multivector 검색과 parent-caption dedupe
+
+- 3초 구간의 전체 caption 벡터 하나가 여러 물체·배경에 희석되는지 확인하기 위해, 기존
+  `terse-200words` 272개를 3단어 이상 문장 1,796개로 나누고 같은
+  `mixedbread-ai/mxbai-embed-large-v1`로 문장별 벡터를 실제 계산했다. position 12문제의 질문별
+  시간 window 안에서 exact L2를 비교하니 top-5 전체 후보 평균 오차가 30.61→17.61m,
+  pose oracle이 7.12→1.62m로 줄었다. 고정적으로 1~5번을 고른 평균도 모든 순위에서 문장 방식이
+  낮았다(각각 28.50→13.48, 21.28→18.04, 38.10→23.59, 22.98→12.38,
+  42.18→20.57m).
+- `eval.py --memory_chunking sentence`를 추가했다. 원본 caption JSON은 바꾸지 않고 첫 질문에서
+  모든 문장을 한 번에 host embedding한 뒤 프로세스 안에 캐시한다. 각 문장은 부모의 time·pose를
+  그대로 갖고 Milvus row id에 명시적인 parent id와 sentence index를 넣는다. 이미 저장된 전체
+  caption embedding을 문장에 재사용하지 않는다.
+- 문장 row를 그대로 top-k로 자르면 같은 부모의 여러 문장이 후보 슬롯을 차지하므로, 검색은 최종
+  k의 10배를 가져온 뒤 rank가 가장 높은 문장 하나만 부모별로 남긴다. sentence 모드 기본 k는
+  서로 다른 부모 7개이고 `--retrieval_k`로 바꿀 수 있다. text뿐 아니라 position/time 검색도 같은
+  dedupe를 거쳐 multivector 때문에 후보가 한 pose로 도배되지 않는다. 기존 `caption` 모드와 k=5는
+  그대로라 논문 재현 경로는 바뀌지 않는다. 공유 Milvus 충돌을 피하도록 기존에 선언만 되고 쓰이지
+  않던 `--db_name`도 실제 collection 이름으로 연결했고, 생략 시에만 기존 `eval_memory_<sequence_id>`를
+  쓴다.
+- 검증: `pytest -q remembr/tests` 70 passed, `py_compile` 통과, 실제 저장 캡션을 새 모듈로 다시
+  embedding한 오프라인 측정에서 위 수치를 재현했다. sandbox 밖에서 `/health ready`, `llm-8b`,
+  Milvus 연결을 확인한 뒤 `direct+`, temperature 0으로 실제 12문제를 완주했다. 기존 caption k=5는
+  평균 21.57m·중앙값 7.88m·5m 이내 4/12였고, sentence+dedupe k=5는
+  22.73m·5.62m·5/12, k=7은 22.57m·4.28m·6/12였다. 후보 품질과 전형적 오차는 좋아졌지만
+  몇 개의 큰 LLM 선택 실패 때문에 평균은 개선되지 않았다. 결과는
+  `out/0/human_qa_position/*sentence_parent_k{5,7}_impl.json`에 남겼다.
+
 ### 2026-08-16 — terse caption의 검색 특징을 첫 문장에 고정
 
 - position 평가의 실제 원본 frame과 top-5 caption을 대조해, 경찰 호출기를 일반 pole/hydrant로
