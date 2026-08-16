@@ -263,6 +263,11 @@ python scripts/eval.py \
   문장+dedupe k=7이 22.57m·4.28m·6/12였다. 문장 검색이 후보군과 중앙값을 개선했지만 큰 선택
   실패 몇 개가 평균 개선을 막았다. 그러므로 offline oracle만 보고 성능 향상으로 보고하지 말고,
   설정 비교는 위처럼 `--temperature 0` end-to-end 결과까지 함께 기록한다.
+- `keyfirstV2` caption에서는 같은 sentence+dedupe k=5가 전체 caption k=5의 평균
+  27.79→**5.98m**, 중앙값 11.44→2.88m, 5m 이내 6/12→8/12로 크게 개선됐다. 문장 후보의
+  균등 랜덤 기대값은 19.81m, oracle은 3.41m라 LLM 선택도 실제로 기여했다. 앞의
+  `terse-200words`에서는 평균이 21.57→22.73m로 악화됐으므로, 문장 청킹 자체를 일반적인 개선으로
+  간주하지 말고 caption style별 end-to-end 결과를 따로 본다.
 
 - 결과는 `./out/`로 간다. binary/position/time/duration은 채점되고, text 질문은 건너뛴다
   (원본 코드 동작). seq0의 경우 30개 중 text 질문 5개가 제외되어 **25개 질문이 채점된다**.

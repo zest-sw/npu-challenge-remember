@@ -125,6 +125,13 @@ _최종 수정: 2026-07-21 · branch `main`_
   22.73m·5.62m·5/12, k=7은 22.57m·4.28m·6/12였다. 후보 품질과 전형적 오차는 좋아졌지만
   몇 개의 큰 LLM 선택 실패 때문에 평균은 개선되지 않았다. 결과는
   `out/0/human_qa_position/*sentence_parent_k{5,7}_impl.json`에 남겼다.
+- 같은 sentence+dedupe k=5를 `keyfirstV2` caption에 적용하니 결과가 달랐다. 전체 caption k=5의
+  평균 27.79m·중앙값 11.44m·5m 이내 6/12에서 **문장 k=5는 5.98m·2.88m·8/12**로 개선됐다.
+  1,400개 문장의 exact-L2 후보 전체 평균은 19.81m, oracle은 3.41m였고 실제 LLM 선택은
+  5.98m라 랜덤 선택보다 13.83m 좋고 oracle과의 gap도 2.57m뿐이었다. 선택 rank는
+  `[3,4,5,5,5,1,5,3,5,5,3,5]`로 뒤쪽 편향이 남았지만, V2의 문장 구성에서는 그 편향이 좋은
+  후보와 맞았다. 즉 sentence 검색 효과는 caption style과 selector의 상호작용까지 실제로 재야 한다.
+  결과: `out/0/human_qa_position/*keyfirstV2*sentence_parent_k5_impl.json`.
 
 ### 2026-08-16 — terse caption의 검색 특징을 첫 문장에 고정
 

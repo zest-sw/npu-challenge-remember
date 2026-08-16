@@ -88,7 +88,9 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
   수를 뜻한다. 문장에는 전체 caption embedding을 복사하지 말고 반드시 문장별로 다시 embedding한다.
   단, 더 좋은 후보군이 최종 평균을 보장하지는 않았다: position 12문제에서 offline k=5 oracle은
   7.12→1.62m였지만 실제 8B 선택 평균은 caption k=5 21.57m, sentence k=5 22.73m, k=7
-  22.57m였다. 중앙값과 5m 이내 개수만 좋아졌고 큰 선택 실패가 평균을 덮었다.
+  22.57m였다. 중앙값과 5m 이내 개수만 좋아졌고 큰 선택 실패가 평균을 덮었다. 반면
+  `keyfirstV2`는 같은 sentence k=5에서 27.79→**5.98m**로 개선됐다(랜덤 기대 19.81m,
+  oracle 3.41m). 문장 청킹 효과는 caption style과 selector 순번 편향의 상호작용에 의존한다.
 - **`temperature=0`은 재시도를 무의미하게 만든다.** 생성이 바이트 단위로 동일해져서 실패한
   답을 그대로 반복한다. 실측(동일 9문제, 8B): temp 0 → LLM 824초·attempts 25·미답변 4,
   temp 0.7 → **445초·12·0**. eval 기본값 0.7을 이유 없이 0으로 바꾸지 말 것.
