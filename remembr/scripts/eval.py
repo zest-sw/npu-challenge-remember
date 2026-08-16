@@ -25,11 +25,9 @@ import warnings
 # load this directory
 sys.path.append(sys.path[0] + '/..')
 
-from agents.remembr_agent import ReMEmbRAgent
-from agents.non_agent import NonAgent
-from agents.retrieve_agent import RetrieveAgent
-from agents.direct_position_agent import DirectPositionAgent
-from agents.vlm_non_agent import VLMNonAgent
+# Agents are imported where they are chosen, not here. Each pulls in the stack its own
+# backend needs -- remembr_agent alone needs langgraph -- and importing all five up front
+# means one backend's missing dependency stops every other model from running.
 
 from memory.memory import MemoryItem
 from memory.milvus_memory import INDEX_UNITS, MilvusMemory
@@ -354,11 +352,13 @@ def main(args):
     use_milvus = False
     use_optimal_context = False
     if 'remembr' in args.model:
+        from agents.remembr_agent import ReMEmbRAgent
         base_llm = args.model.split('+')[-1]
         agent = ReMEmbRAgent(llm_type=base_llm, num_ctx=args.num_ctx, temperature=args.temperature)
         use_milvus = True
 
     elif 'retrieve' in args.model:
+        from agents.retrieve_agent import RetrieveAgent
         # Real Milvus retrieval like remembr+, but without the tool-calling loop
         # the planner cannot drive on this board: one plain query, one search,
         # then NonAgent's answer stage. Directly comparable to optimal+, which
@@ -368,6 +368,7 @@ def main(args):
         use_milvus = True
 
     elif 'direct' in args.model:
+        from agents.direct_position_agent import DirectPositionAgent
         # The question itself is the Milvus query and the answer grammar is a
         # bare [x, y, z]: no query call, no answer-type call, no JSON-object
         # tokens. Position-only probe -- non-position questions are knowingly
@@ -378,13 +379,16 @@ def main(args):
         use_milvus = True
 
     elif 'optimal' in args.model:
+        from agents.non_agent import NonAgent
         base_llm = args.model.split('+')[-1]
         agent = NonAgent(llm_type=base_llm, num_ctx=args.num_ctx, temperature=args.temperature)
         use_optimal_context = True
     elif 'vlm' in args.model:
+        from agents.vlm_non_agent import VLMNonAgent
         agent = VLMNonAgent(llm_type='gpt-4o')
 
     else:
+        from agents.non_agent import NonAgent
         agent = NonAgent(llm_type=args.model, num_ctx=args.num_ctx*4, temperature=args.temperature)
 
 
