@@ -281,19 +281,26 @@ python scripts/eval.py \
 ```
 
 - 기본값 `direct`는 질문 마지막 줄 하나만 검색하므로 기존 결과가 바뀌지 않는다. `multi`는 8B가
-  `target_query`(대상과 일반적인 시각 동의어)와 `visual_query`(캡션처럼 쓴 한 문장)를 JSON으로
-  한 번 생성하고, 원문 질문을 포함한 최대 3개 검색 결과를 RRF(reciprocal-rank fusion)로 합친다.
-  원문을 버리지 않으므로 고유 장소명과 질문에 명시된 색·상태·관계가 rewrite에서 빠져도 검색
-  근거가 남는다.
+  질문에서 그대로 복사한 `target_phrase` 하나와 그 완전한 명사구의 `aliases` 최대 3개를 JSON으로
+  생성한다. 코드는 원문에서 그 명사구만 alias로 치환하므로 고유 장소명과 색·상태·거리·관계는
+  모든 검색어에 그대로 남는다. 원문을 포함한 최대 4개 검색 결과는 RRF(reciprocal-rank fusion)로
+  합친다.
 - 쿼리별 embedding 거리는 서로 직접 비교하지 않고 순위만 융합한다. sentence 모드에서는 쿼리
   하나 안에서도 같은 parent를 한 표로 세고, 융합 뒤에도 같은 3초 parent pose는 하나만 남긴다.
   최종 후보 수는 `--retrieval_k` 그대로이므로 selector prompt의 후보 수가 3배가 되지 않는다.
-- 생성 스키마의 두 문자열은 각각 `maxLength=180`이다. 대상 쿼리는 쉼표 단위 중복을 제거하고
-  최대 5개 명칭만 남긴다. 시각 쿼리에 원문·대상 쿼리가 뒷받침하지 않는 내용어가 있으면 그
-  쿼리만 폐기한다. 실제 8B가 질문에 없던 경찰차·소화전·색·위치를 넣은 사례가 있어 프롬프트
-  지시만 믿지 않고 결정론적으로 차단한다. 빈 문자열·원문과 같은 rewrite도 제거하며, JSON 파싱이나
-  생성 요청이 실패하면 해당 질문만 기존 원문 검색으로 폴백한다. Multi-query는 질문당 LLM 호출이
-  하나 늘어나므로 8B 기준 지연도 함께 비교해야 한다.
+- `target_phrase`는 `maxLength=60`, alias 항목은 각각 `maxLength=40`, 배열은 `maxItems=3`이다.
+  target이 질문에 연속된 원문 그대로 존재하지 않으면 전체 확장을 거부한다. alias는 최대 4단어의
+  단일 명사구만 허용하고 중복·쉼표 나열·질문 전체 rewrite를 제거한다. 생성·파싱 실패는 해당
+  질문만 기존 원문 검색으로 폴백한다. 같은 asked line이 여러 time window에 반복되면 생성 결과를
+  cache해 LLM 호출을 다시 하지 않는다.
+- 자유 rewrite 방식은 실제 V4 sentence k5 12문제에서 평균 5.38→16.83m, 최대 20.03→105.75m,
+  총시간 117→327초로 악화됐다. `statue` 확장이 Gates 관계를 잃고 다른 조형물을 끌어왔으며,
+  `bike rack that is not empty`를 `bike/bicycle/vehicle`로 바꾸고, 질문에 없는 색·계단·난간까지
+  만들었다. 이 결과 때문에 자유 `target_query`와 가상 `visual_query`는 사용하지 않는다.
+- 제한 치환을 실제 8B에서 확인하니 `statue→sculpture/monument`에도 Gates 건물 관계가 유지되고,
+  `bike rack→cycle stand/...`에도 `nearest/not empty`, `fire hydrant→hydrant/fireplug/...`에도
+  `red`가 모든 쿼리에 유지됐다. Multi-query는 여전히 추가 LLM 호출이 있으므로 최종 A/B에서
+  정확도와 지연을 함께 비교해야 한다.
 - 공유 Milvus에서는 예를 들어 `--db_name eval_v4_sentence_multi_k5`처럼 다른 평가와 겹치지 않는
   이름을 사용한다. A/B 비교는 selector와 query rewrite를 재현할 수 있도록 `--temperature 0`으로
   실행한다.

@@ -1,11 +1,11 @@
 """Question -> vector search -> which memory answers it.
 
 The default path searches with the question itself and makes one LLM selection call.
-The optional multi-query path first asks the LLM for two complementary retrieval views,
-then fuses those with the original question.  In both paths the selector answers with a
-memory's *number*, not a coordinate, and this module reads the coordinate off that
-memory. A position-only probe -- every question gets a coordinate, and non-position
-questions are knowingly wrong.
+The optional multi-query path asks the LLM for aliases of one copied target noun phrase,
+substitutes only that phrase in the original question, then fuses those searches. In both
+paths the selector answers with a memory's *number*, not a coordinate, and this module
+reads the coordinate off that memory. A position-only probe -- every question gets a
+coordinate, and non-position questions are knowingly wrong.
 
 No retries. Greedy decoding repeats itself byte-for-byte, so a second try buys
 nothing; a parse failure raises and eval's own attempt cap records it.
@@ -23,93 +23,72 @@ from remembr.utils import trace
 # Cheap because the answer is one token, and short because the grammar cannot open with
 # whitespace the way an object's can.
 ANSWER_MAX_TOKENS = 8
-QUERY_MAX_TOKENS = 128
-QUERY_MAX_LENGTH = 180
-TARGET_PHRASE_LIMIT = 5
-_QUERY_WORD = re.compile(r"[A-Za-z0-9]+")
-_VISUAL_GLUE_WORDS = {
-    "a", "an", "and", "are", "at", "be", "beside", "by", "in", "is", "it",
-    "located", "near", "of", "on", "seen", "stand", "standing", "stands", "the",
-    "there", "to", "visible", "with",
-}
+QUERY_MAX_TOKENS = 64
+TARGET_MAX_LENGTH = 60
+ALIAS_MAX_LENGTH = 40
+ALIAS_LIMIT = 3
 
 QUERY_EXPANSION_PROMPT = (
-    "Rewrite a question for vector retrieval against captions written from images. "
-    "Return two complementary English queries. target_query is a compact retrieval "
-    "phrase: name the requested target, then add two to four generic names that an image "
-    "captioner might use for the same or visually confusable object category. Preserve "
-    "every color, readable text, state, and spatial relation explicitly in the question. "
-    "visual_query is one caption-style sentence using those names but only facts stated "
-    "in the question. Apart from generic target names, every factual word must be "
-    "supported by the question; add no size, material, shape, label, count, attachment, "
-    "or scene setting. Omit the robot's current time and position and requests such as "
-    "where, find, closest, or nearest."
+    "Identify only the smallest complete noun phrase naming the requested visual target. "
+    "Copy that target_phrase exactly and contiguously from the question, excluding color, "
+    "state, distance, location, and relation words. Return up to three short aliases that "
+    "mean the same complete object category and that an image captioner might use. For a "
+    "compound noun, each alias must replace the whole compound. An alias must not be a "
+    "component, superclass, related object, visual feature, surrounding object, or an "
+    "alternative color or attribute. Do not rewrite the question and do not add scene facts."
 )
 
 
 def query_expansion_schema() -> dict:
-    """Bound both generated strings so constrained decoding cannot run away."""
-    query_string = {"type": "string", "maxLength": QUERY_MAX_LENGTH}
+    """Bound the copied target and every alias so constrained decoding cannot run away."""
     return {
         "type": "object",
         "properties": {
-            "target_query": query_string,
-            "visual_query": query_string,
+            "target_phrase": {"type": "string", "maxLength": TARGET_MAX_LENGTH},
+            "aliases": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": ALIAS_MAX_LENGTH},
+                "maxItems": ALIAS_LIMIT,
+            },
         },
-        "required": ["target_query", "visual_query"],
+        "required": ["target_phrase", "aliases"],
         "additionalProperties": False,
     }
 
 
-def _compact_target_query(query: str) -> str:
-    """Keep at most five distinct comma-separated target names."""
-    phrases = []
-    seen = set()
-    for phrase in re.split(r"[,;]", query):
-        phrase = " ".join(phrase.split()).strip('"\' .')
-        canonical = re.sub(r"^(?:a|an|the)\s+", "", phrase, flags=re.IGNORECASE).lower()
-        words = {word.lower() for word in _QUERY_WORD.findall(canonical)}
-        if not canonical or not (words - _VISUAL_GLUE_WORDS) or canonical in seen:
-            continue
-        phrases.append(phrase)
-        seen.add(canonical)
-        if len(phrases) >= TARGET_PHRASE_LIMIT:
-            break
-    return ", ".join(phrases)
-
-
-def _visual_query_is_grounded(original: str, target_query: str, visual_query: str) -> bool:
-    """Reject a hypothetical caption that adds unsupported content words.
-
-    The 8B followed the JSON grammar but once invented a police car, hydrant, colors,
-    and spatial relations absent from the question.  Words from the original, generated
-    target aliases, and a small grammatical glue vocabulary are the only safe inputs.
-    """
-    supported = {
-        word.lower() for word in _QUERY_WORD.findall(f"{original} {target_query}")
-    } | _VISUAL_GLUE_WORDS
-    return all(word.lower() in supported for word in _QUERY_WORD.findall(visual_query))
-
-
 def combined_queries(original: str, expansion: dict) -> list[str]:
-    """Keep the original, compact aliases, and only a grounded visual rewrite."""
-    target_query = expansion.get("target_query", "")
-    visual_query = expansion.get("visual_query", "")
-    if not isinstance(target_query, str) or not isinstance(visual_query, str):
-        raise ValueError(f"generated queries are not strings: {expansion!r}")
-    target_query = _compact_target_query(target_query)
-    if not _visual_query_is_grounded(original, target_query, visual_query):
-        visual_query = ""
+    """Replace only the copied target phrase; all question constraints stay verbatim."""
+    target = expansion.get("target_phrase", "")
+    aliases = expansion.get("aliases", [])
+    if not isinstance(target, str) or not isinstance(aliases, list):
+        raise ValueError(f"generated target or aliases have wrong types: {expansion!r}")
 
-    queries = [original, target_query, visual_query]
-    normalized = []
-    seen = set()
-    for query in queries:
-        query = " ".join(query.split()).rstrip(".").strip().strip('"\'').strip()
-        if query and query not in seen:
-            normalized.append(query)
-            seen.add(query)
-    return normalized
+    original = " ".join(original.split()).strip()
+    target = " ".join(target.split()).strip('"\' .')
+    if not target:
+        return [original]
+    target_pattern = re.compile(
+        r"(?<![A-Za-z0-9])" + re.escape(target).replace(r"\ ", r"\s+")
+        + r"(?![A-Za-z0-9])",
+        flags=re.IGNORECASE,
+    )
+    if not target_pattern.search(original):
+        raise ValueError(f"target phrase was not copied from the question: {target!r}")
+
+    queries = [original]
+    seen_aliases = {target.casefold()}
+    for alias in aliases[:ALIAS_LIMIT]:
+        if not isinstance(alias, str):
+            raise ValueError(f"generated alias is not a string: {alias!r}")
+        alias = " ".join(alias.split()).strip('"\' .,;:?')
+        canonical = alias.casefold()
+        # Long, comma-packed output is a rewritten query, not one noun-phrase alias.
+        if (not alias or canonical in seen_aliases or len(alias.split()) > 4
+                or "," in alias or ";" in alias):
+            continue
+        seen_aliases.add(canonical)
+        queries.append(target_pattern.sub(alias, original, count=1))
+    return queries
 
 
 def memory_index_schema(count: int) -> dict:
@@ -232,6 +211,7 @@ class DirectPositionAgent(Agent):
         if text_query_mode not in {"direct", "multi"}:
             raise ValueError(f"unknown text_query_mode: {text_query_mode!r}")
         self.text_query_mode = text_query_mode
+        self.query_cache = {}
         # The grammar is bound per call, not here: it enumerates the memory numbers on
         # offer, and how many came back is only known once the search has run.
         self.chain = ChatOpenAI(
@@ -316,25 +296,29 @@ class DirectPositionAgent(Agent):
                 f"{self.numbered_memories(memories, here)}\n\nQuestion: {asked}")
 
     def search_queries_for(self, asked: str) -> list[str]:
-        """Return original + two rewrites, falling back to original on generation errors.
+        """Return target-only substitutions, falling back to the original on errors.
 
-        The original is never replaced: it preserves proper names and constraints that
-        a rewrite may accidentally drop.  A malformed expansion should degrade to the
-        established direct-search path rather than make the question unanswered.
+        The original is never replaced. Each extra query changes one copied noun phrase,
+        leaving proper names, colors, state, distance, and relations byte-for-byte intact.
+        Repeated asked lines reuse their expansion because several eval questions differ
+        only in the time window and current pose.
         """
         if self.text_query_mode == "direct":
             return [asked]
+        if asked in self.query_cache:
+            return self.query_cache[asked]
         try:
             reply = self.query_chain.bind(response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "visual_memory_queries",
+                    "name": "visual_target_aliases",
                     "schema": query_expansion_schema(),
                 },
             }).invoke(f"{QUERY_EXPANSION_PROMPT}\n\nQuestion: {asked}")
             queries = combined_queries(asked, json.loads(reply.content))
             if len(queries) == 1:
                 trace.warn("multi-query가 원문과 다른 검색어를 만들지 못해 원문만 사용한다")
+            self.query_cache[asked] = queries
             return queries
         except Exception as error:  # noqa: BLE001 - retrieval has a safe direct fallback
             trace.warn(f"multi-query 생성 실패, 원문 검색으로 대체: {error!r}")

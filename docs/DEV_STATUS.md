@@ -98,6 +98,25 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-17 — multi-query를 핵심 명사구 제한 치환으로 수정
+
+- 최초 자유 rewrite 방식의 V4 sentence k5 12문제 실측은 평균 오차 16.83m·중앙값 2.75m·5m 이내
+  9/12·최대 105.75m로, 기존 direct의 5.38m·2.82m·7/12·20.03m보다 중앙값과 근거리 정답 수만
+  좋아지고 평균·최대 오차가 크게 악화됐다. 총시간도 117.1→326.9초였다. Gates LONG은 일반
+  `statue/sculpture` 표가 다른 금속 조형물을 top-5에 채워 11.06→105.75m, bike rack은 `rack`과
+  `not empty`를 잃은 `bike/bicycle/cycle/vehicle` 때문에 5.58→64.55m, 빨간 소화전은 다른 색을
+  지어낸 확장과 selector 후순위 편향으로 5.74→20.48m가 됐다.
+- query JSON을 질문 전체를 쓰는 `target_query`/`visual_query`에서, 질문에 연속된 그대로 복사하는
+  `target_phrase`와 같은 완전한 물체 범주의 `aliases` 최대 3개로 교체했다. 코드는 원문에서 해당
+  명사구만 기계적으로 바꾸므로 색·상태·거리·관계·고유 장소명이 모든 검색어에 그대로 남는다.
+  target이 원문에 없거나 alias가 4단어를 넘거나 쉼표 나열이면 버리고, 실패 시 원문으로 폴백한다.
+  생성 상한도 128→64 tokens로 줄이고 같은 asked line의 결과를 cache해 반복 질문의 생성 호출을
+  생략한다.
+- 검증: `py_compile` 통과, `pytest -q remembr/tests` **82 passed**. 실제 `llm-8b`, temperature 0에서 Gates 질문은
+  `statue→sculpture/monument`만 바뀌고 건물 앞 관계가 유지됐다. bike rack 질문은 모든 치환에
+  `nearest`와 `not empty`, 소화전 질문은 모든 치환에 `red`가 유지됐다. 세 질문 생성은 합계
+  24.3초였다. 전체 제한 치환 12문제 A/B는 별도 평가가 필요하다.
+
 ### 2026-08-17 — 원문+대상+시각 캡션 multi-query 검색
 
 - 질문 원문 하나로만 검색하면 캡션과 질문의 명칭이 어긋날 때 후보를 놓쳤다. 실제 V4 sentence

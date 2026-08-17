@@ -8,6 +8,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from remembr.agents.agent import AgentOutput  # noqa: E402
@@ -136,6 +138,7 @@ def make_agent(reply, memories=MEMORIES):
     agent = DirectPositionAgent.__new__(DirectPositionAgent)
     agent.llm_type = "tt/fake"
     agent.text_query_mode = "direct"
+    agent.query_cache = {}
     agent.chain = FakeChain(reply)
     agent.query_chain = None
     agent.memory = FakeMemory(memories)
@@ -177,16 +180,17 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
     agent = make_agent("2")
     agent.text_query_mode = "multi"
     agent.query_chain = FakeChain(json.dumps({
-        "target_query": "yellow emergency call pole help station post",
-        "visual_query": "A yellow emergency call post is visible.",
+        "target_phrase": "police call pole",
+        "aliases": ["emergency call box", "help station", "call post"],
     }))
 
     out = agent.query(PREAMBLE_QUESTION)
 
     assert agent.memory.searched == [[
         ASKED,
-        "yellow emergency call pole help station post",
-        "A yellow emergency call post is visible",
+        "Where is the yellow emergency call box?",
+        "Where is the yellow help station?",
+        "Where is the yellow call post?",
     ]]
     assert agent.query_chain.calls == 1
     assert agent.chain.calls == 1
@@ -196,39 +200,70 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
 def test_multi_query_schema_bounds_every_generated_string():
     schema = query_expansion_schema()
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {"target_query", "visual_query"}
-    for field in schema["required"]:
-        assert schema["properties"][field]["type"] == "string"
-        assert schema["properties"][field]["maxLength"] == 180
+    assert set(schema["required"]) == {"target_phrase", "aliases"}
+    assert schema["properties"]["target_phrase"] == {"type": "string", "maxLength": 60}
+    assert schema["properties"]["aliases"] == {
+        "type": "array",
+        "items": {"type": "string", "maxLength": 40},
+        "maxItems": 3,
+    }
 
 
-def test_combined_queries_removes_packaging_blanks_and_duplicates():
-    assert combined_queries("Where is the bench?", {
-        "target_query": '  "empty bench". ',
-        "visual_query": "Where is the bench?",
-    }) == ["Where is the bench?", "empty bench"]
-
-
-def test_combined_queries_compacts_aliases_and_rejects_hallucinated_visual_facts():
-    queries = combined_queries("Where is the yellow police call pole?", {
-        "target_query": (
-            "police call pole, yellow pole, traffic pole, street pole, pole, "
-            "the pole, extra sixth name"
-        ),
-        "visual_query": "A blue police car is beside the yellow police call pole.",
+def test_combined_queries_replaces_only_the_target_and_preserves_every_constraint():
+    queries = combined_queries("Where is the nearest bike rack that is not empty?", {
+        "target_phrase": "bike rack",
+        "aliases": ["bicycle rack", "cycle stand"],
     })
     assert queries == [
-        "Where is the yellow police call pole?",
-        "police call pole, yellow pole, traffic pole, street pole, pole",
+        "Where is the nearest bike rack that is not empty?",
+        "Where is the nearest bicycle rack that is not empty?",
+        "Where is the nearest cycle stand that is not empty?",
     ]
 
 
-def test_combined_queries_keeps_a_visual_rewrite_grounded_in_question_and_aliases():
+def test_combined_queries_preserves_named_place_and_relation():
     queries = combined_queries("Where is the statue in front of Gates Building?", {
-        "target_query": "statue, monument, sculpture, public art",
-        "visual_query": "The sculpture is in front of Gates Building.",
+        "target_phrase": "statue",
+        "aliases": ["sculpture", "monument", "public art"],
     })
-    assert queries[-1] == "The sculpture is in front of Gates Building"
+    assert queries == [
+        "Where is the statue in front of Gates Building?",
+        "Where is the sculpture in front of Gates Building?",
+        "Where is the monument in front of Gates Building?",
+        "Where is the public art in front of Gates Building?",
+    ]
+
+
+def test_combined_queries_rejects_a_target_not_copied_from_the_question():
+    with pytest.raises(ValueError, match="not copied"):
+        combined_queries("Where is the red object?", {
+            "target_phrase": "blue object",
+            "aliases": ["item"],
+        })
+
+
+def test_combined_queries_drops_duplicate_and_non_phrase_aliases():
+    assert combined_queries("Where is the marked object?", {
+        "target_phrase": "object",
+        "aliases": ["object", "item, thing", "item"],
+    }) == ["Where is the marked object?", "Where is the marked item?"]
+
+
+def test_multi_query_caches_repeated_asked_lines():
+    agent = make_agent("1")
+    agent.text_query_mode = "multi"
+    agent.query_chain = FakeChain(json.dumps({
+        "target_phrase": "police call pole",
+        "aliases": ["emergency call box"],
+    }))
+
+    agent.query(PREAMBLE_QUESTION)
+    agent.query(PREAMBLE_QUESTION)
+
+    assert agent.query_chain.calls == 1
+    assert agent.memory.searched == [[
+        ASKED, "Where is the yellow emergency call box?"
+    ]] * 2
 
 
 def test_multi_query_generation_failure_falls_back_to_original_search():
