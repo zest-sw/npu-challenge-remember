@@ -98,6 +98,15 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-17 — alias 2개 제한 브랜치에 원문 RRF 1.2표 적용
+
+- `fix/limit-query-aliases`의 원문 질문 + 핵심 키워드 묶음 2-query 구조는 유지하되, RRF에서
+  원문 질문을 1.2표, 키워드 묶음을 1.0표로 가중했다. `constant=60` 기준 원문-only rank 13까지는
+  keyword-only rank 1보다 앞서므로, keyword query는 recall 보조로 쓰고 원문 질문의 장소·관계·상태
+  단서가 지나치게 밀리지 않게 한다.
+- 검증: `pytest -q remembr/tests/test_multi_query.py remembr/tests/test_direct_position_agent.py`
+  **33 passed**.
+
 ### 2026-08-17 — keyword bundle의 동의어를 최대 2개로 축소
 
 - 원문 질문 1표와 핵심 키워드 묶음 1표 구조는 유지하되, keyword-bundle 평가에서 약한 세 번째

@@ -34,6 +34,7 @@ def reciprocal_rank_fusion(
     *,
     dedupe_text_parents: bool = False,
     constant: int = RRF_CONSTANT,
+    weights: Sequence[float] | None = None,
 ):
     """Fuse query rankings and return at most ``limit`` distinct parent memories.
 
@@ -47,13 +48,23 @@ def reciprocal_rank_fusion(
     if constant < 0:
         raise ValueError(f"RRF constant must be non-negative, got {constant}")
 
+    rankings = list(rankings)
+    if weights is None:
+        weights = [1.0] * len(rankings)
+    if len(weights) != len(rankings):
+        raise ValueError(
+            f"weights length must match rankings length: {len(weights)} != {len(rankings)}"
+        )
+    if any(weight <= 0 for weight in weights):
+        raise ValueError(f"RRF weights must be positive, got {list(weights)!r}")
+
     scores = {}
     representatives = {}
     representative_ranks = {}
     first_seen = {}
     seen_order = 0
 
-    for ranking in rankings:
+    for ranking, weight in zip(rankings, weights):
         seen_in_query = set()
         parent_rank = 0
         for document in ranking:
@@ -62,7 +73,7 @@ def reciprocal_rank_fusion(
                 continue
             seen_in_query.add(key)
             parent_rank += 1
-            contribution = 1.0 / (constant + parent_rank)
+            contribution = weight / (constant + parent_rank)
             scores[key] = scores.get(key, 0.0) + contribution
             if key not in representatives:
                 representatives[key] = document

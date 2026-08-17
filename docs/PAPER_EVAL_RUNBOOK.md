@@ -284,7 +284,7 @@ python scripts/eval.py \
   질문에서 그대로 복사한 `target_phrase` 하나와 그 완전한 명사구의 `aliases` 1~2개를 JSON으로
   생성한다. 검색어는 정확히 두 관점이다: ① 원문 질문, ② `target_phrase, alias1, alias2`로
   만든 짧은 핵심 키워드 묶음. 각 alias를 긴 질문에 다시 끼워 넣지 않는다. 두 검색 순위는
-  RRF(reciprocal-rank fusion)에서 각각 한 표만 가진다.
+  RRF(reciprocal-rank fusion)에서 원문 1.2표, 키워드 묶음 1.0표로 융합한다.
 - 쿼리별 embedding 거리는 서로 직접 비교하지 않고 순위만 융합한다. sentence 모드에서는 쿼리
   하나 안에서도 같은 parent를 한 표로 세고, 융합 뒤에도 같은 3초 parent pose는 하나만 남긴다.
   최종 후보 수는 `--retrieval_k` 그대로이므로 selector prompt의 후보 수가 3배가 되지 않는다.
@@ -293,6 +293,9 @@ python scripts/eval.py \
   단일 명사구만 허용하고 중복·쉼표 나열·질문 전체 rewrite를 제거한다. 생성·파싱 실패는 해당
   질문만 기존 원문 검색으로 폴백한다. 같은 asked line이 여러 time window에 반복되면 생성 결과를
   cache해 LLM 호출을 다시 하지 않는다.
+- RRF의 `constant=60`에서 원문 1.2표는 원문-only rank 13까지 keyword-only rank 1보다 앞서게
+  만든다. keyword bundle은 recall을 보강하되, 원문 질문의 장소·관계·상태 단서가 과하게 밀리지
+  않도록 둔 가중치다.
 - 명사구만 바꿨더라도 `Where is ...?` 전체 문장을 alias마다 만들면 안 된다. 실제 제한 치환
   A/B도 평균 21.81m·중앙값 9.64m·5m 이내 2/12로 direct 5.38m보다 악화됐다. 거의 같은 긴 질문이
   3~4표를 얻어 recycling 정답을 top-5 밖으로 밀고, `elevators→escalators`가 계단 후보를 채웠다.

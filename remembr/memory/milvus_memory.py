@@ -18,6 +18,8 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 
 
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
+MULTI_QUERY_ORIGINAL_WEIGHT = 1.2
+MULTI_QUERY_KEYWORD_WEIGHT = 1.0
 
 
 class MilvusWrapper:
@@ -330,10 +332,14 @@ class MilvusMemory(Memory):
 
         self._flush_if_needed()
         rankings = [self.text_retriever.invoke(query) for query in normalized]
+        weights = [MULTI_QUERY_ORIGINAL_WEIGHT] + [
+            MULTI_QUERY_KEYWORD_WEIGHT
+        ] * (len(rankings) - 1)
         docs = reciprocal_rank_fusion(
             rankings,
             self.text_search_k,
             dedupe_text_parents=self.dedupe_text_parents,
+            weights=weights,
         )
         self._trace_hits("text-multi", normalized, docs)
         # Multi-query is a complete retrieval round.  Replace rather than append so an

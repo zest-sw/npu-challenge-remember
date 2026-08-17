@@ -24,6 +24,20 @@ def test_rrf_keeps_final_candidate_count_and_stable_ties():
     assert fused == [a, b]
 
 
+def test_weighted_rrf_can_bias_the_original_query():
+    original = [doc(str(index)) for index in range(1, 14)]
+    keyword_only = doc("keyword-only")
+
+    fused = reciprocal_rank_fusion(
+        [original, [keyword_only]],
+        limit=15,
+        weights=[1.2, 1.0],
+    )
+
+    ordered_ids = [item.metadata["id"] for item in fused]
+    assert ordered_ids.index("13") < ordered_ids.index("keyword-only")
+
+
 def test_sentence_rows_vote_once_per_parent_and_return_distinct_parents():
     a0 = doc(sentence_record_id("a", 0), "A weak sentence")
     a1 = doc(sentence_record_id("a", 1), "A strongest sentence")
@@ -49,3 +63,10 @@ def test_rrf_rejects_missing_ids_and_invalid_limits():
         reciprocal_rank_fusion([[SimpleNamespace(metadata={}, page_content="x")]], limit=1)
     with pytest.raises(ValueError, match="positive"):
         reciprocal_rank_fusion([], limit=0)
+
+
+def test_rrf_rejects_invalid_weights():
+    with pytest.raises(ValueError, match="weights length"):
+        reciprocal_rank_fusion([[doc("a")]], limit=1, weights=[1.0, 1.0])
+    with pytest.raises(ValueError, match="positive"):
+        reciprocal_rank_fusion([[doc("a")]], limit=1, weights=[0.0])
