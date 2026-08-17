@@ -96,7 +96,7 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
   117→327초로 악화됐다. 완전한 핵심 명사구만 치환해도 긴 질문을 alias마다 만들면 같은 비핵심
   단어가 RRF에서 여러 표를 얻어 평균 21.81m·5m 이내 2/12로 더 나빴다. `--text_query_mode multi`는
   반드시 원문 질문 한 쿼리와 `target, alias1, alias2` 핵심 키워드 한 쿼리만 검색한다. RRF는
-  원문 1.2표, 키워드 1.0표로 융합한다(`constant=60` 기준 원문-only rank 13까지 keyword-only
+  원문 1.5표, 키워드 1.0표로 융합한다(`constant=60` 기준 원문-only rank 30까지 keyword-only
   rank 1보다 앞섬). selector에는 원문만 주고, 반복 asked line은 query-generation cache를 쓴다.
 - **`temperature=0`은 재시도를 무의미하게 만든다.** 생성이 바이트 단위로 동일해져서 실패한
   답을 그대로 반복한다. 실측(동일 9문제, 8B): temp 0 → LLM 824초·attempts 25·미답변 4,

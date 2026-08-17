@@ -98,6 +98,15 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-17 — alias 2개 검색의 원문 RRF 가중치를 1.5표로 조정
+
+- `fix/limit-query-aliases`의 원문 질문 + 핵심 키워드 묶음 2-query 구조와 alias 최대 2개 제한은
+  유지하고, 원문 질문 가중치를 1.2에서 1.5로 올렸다. 키워드 묶음은 1.0표로 유지한다.
+- `constant=60` 기준 원문-only rank 30까지 keyword-only rank 1보다 앞서므로, 장소·관계·상태가
+  포함된 원문 검색 결과가 넓은 동의어 검색 결과에 밀리는 것을 더 강하게 방지한다.
+- 검증: `pytest -q remembr/tests` 및 `git diff --check` 완료. 실제 평가는 고유 DB 이름과
+  `--temperature 0`으로 별도 실행해야 한다.
+
 ### 2026-08-17 — alias 2개 제한 브랜치에 원문 RRF 1.2표 적용
 
 - `fix/limit-query-aliases`의 원문 질문 + 핵심 키워드 묶음 2-query 구조는 유지하되, RRF에서

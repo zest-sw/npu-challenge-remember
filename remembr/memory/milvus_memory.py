@@ -18,7 +18,7 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 
 
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
-MULTI_QUERY_ORIGINAL_WEIGHT = 1.2
+MULTI_QUERY_ORIGINAL_WEIGHT = 1.5
 MULTI_QUERY_KEYWORD_WEIGHT = 1.0
 
 
