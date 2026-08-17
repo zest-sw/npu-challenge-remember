@@ -25,15 +25,18 @@ from remembr.utils import trace
 ANSWER_MAX_TOKENS = 8
 QUERY_MAX_TOKENS = 64
 TARGET_MAX_LENGTH = 60
-TARGET_MAX_WORDS = 2
 ALIAS_MAX_LENGTH = 40
 ALIAS_LIMIT = 1
 
 QUERY_EXPANSION_PROMPT = (
-    "Identify the requested visual target in at most two words. Copy target_phrase exactly "
-    "and contiguously from the question. Use only the core noun words; do not add adjectives, "
-    "colors, states, distances, locations, relation words, or scene facts. Return exactly one "
-    "short alias that means the same complete object category. Do not add surrounding objects."
+    "Copy the noun phrase naming the requested object exactly and contiguously from the "
+    "question. Keep essential visual modifiers and attached identifying features, such as "
+    "yellow police call pole, red fire hydrant, or sculpture with hanging boats. Exclude "
+    "location or relation clauses and proper-place descriptions, such as in front of the "
+    "Bill and Melinda Gates Computer Science building; for that question the target is "
+    "statue. Keep target_phrase under 60 characters. Return exactly one short alias for "
+    "the same complete object category. The alias must not be a component, feature, "
+    "superclass, surrounding object, or guessed interpretation. Do not invent scene facts."
 )
 
 
@@ -65,10 +68,6 @@ def combined_queries(original: str, expansion: dict) -> list[str]:
     target = " ".join(target.split()).strip('"\' .')
     if not target:
         return [original]
-    if len(target.split()) > TARGET_MAX_WORDS:
-        raise ValueError(
-            f"target phrase exceeds {TARGET_MAX_WORDS} words: {target!r}"
-        )
     target_pattern = re.compile(
         r"(?<![A-Za-z0-9])" + re.escape(target).replace(r"\ ", r"\s+")
         + r"(?![A-Za-z0-9])",
