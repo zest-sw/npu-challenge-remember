@@ -29,14 +29,10 @@ ALIAS_MAX_LENGTH = 40
 ALIAS_LIMIT = 1
 
 QUERY_EXPANSION_PROMPT = (
-    "Copy the noun phrase naming the requested object exactly and contiguously from the "
-    "question. Keep essential visual modifiers and attached identifying features, such as "
-    "yellow police call pole, red fire hydrant, or sculpture with hanging boats. Exclude "
-    "location or relation clauses and proper-place descriptions, such as in front of the "
-    "Bill and Melinda Gates Computer Science building; for that question the target is "
-    "statue. Keep target_phrase under 60 characters. Return exactly one short alias for "
-    "the same complete object category. The alias must not be a component, feature, "
-    "superclass, surrounding object, or guessed interpretation. Do not invent scene facts."
+    "Identify only the smallest complete noun phrase naming the requested visual target. "
+    "Copy that target_phrase exactly and contiguously from the question, excluding color, "
+    "state, distance, location, and relation words. Return exactly one short alias that "
+    "means the same complete object category. Do not add surrounding objects or scene facts."
 )
 
 
