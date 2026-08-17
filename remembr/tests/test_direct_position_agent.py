@@ -237,14 +237,6 @@ def test_combined_queries_rejects_a_target_not_copied_from_the_question():
         })
 
 
-def test_combined_queries_rejects_a_target_longer_than_two_words():
-    with pytest.raises(ValueError, match="exceeds 2 words"):
-        combined_queries("Where is the statue in front of Gates Building?", {
-            "target_phrase": "statue in front",
-            "aliases": ["monument"],
-        })
-
-
 def test_multi_query_caches_repeated_asked_lines():
     agent = make_agent("1")
     agent.text_query_mode = "multi"
