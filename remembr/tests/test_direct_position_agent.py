@@ -83,22 +83,30 @@ class FakeReply:
 
 class FakeChain:
     """Stands in for ChatOpenAI. Counts calls so the no-retry rule is testable, and keeps
-    the bound schema so the grammar can be asserted on."""
+    the bound schema so the grammar can be asserted on.
+
+    `replies` lets a test script a multi-call turn; without it every call gets the same
+    content. Only calls that bind a schema record one, so an unconstrained thinking call
+    is visible as a call with no grammar.
+    """
 
     def __init__(self, content):
         self.content = content
+        self.replies = None
         self.calls = 0
         self.prompts = []
         self.schemas = []
 
     def bind(self, **kwargs):
-        self.schemas.append(kwargs["response_format"]["json_schema"]["schema"])
+        if "response_format" in kwargs:
+            self.schemas.append(kwargs["response_format"]["json_schema"]["schema"])
         return self
 
     def invoke(self, inputs):
-        self.calls += 1
         self.prompts.append(inputs)
-        return FakeReply(self.content)
+        content = self.content if self.replies is None else self.replies[self.calls]
+        self.calls += 1
+        return FakeReply(content)
 
 
 class FakeMemory:
@@ -124,12 +132,14 @@ class FakeMemory:
             for doc in memory_list)
 
 
-def make_agent(reply, memories=MEMORIES):
+def make_agent(reply, memories=MEMORIES, abstain=False, reason=False):
     """Build the agent without __init__ (which would build an LLM client)."""
     agent = DirectPositionAgent.__new__(DirectPositionAgent)
     agent.llm_type = "tt/fake"
     agent.chain = FakeChain(reply)
     agent.memory = FakeMemory(memories)
+    agent.abstain = abstain
+    agent.reason = reason
     return agent
 
 
@@ -251,6 +261,99 @@ def test_a_question_with_no_preamble_gets_no_situation_block():
     agent = make_agent("1")
     agent.query(ASKED)
     assert "Your current situation:" not in agent.chain.prompts[0], agent.chain.prompts[0]
+
+
+
+
+def test_reasoning_is_off_by_default_and_costs_one_call():
+    agent = make_agent("2")
+    agent.query(PREAMBLE_QUESTION)
+    assert agent.chain.calls == 1
+    assert agent.chain.schemas == [{"type": "integer", "enum": [1, 2, 3]}]
+
+
+def test_reasoning_thinks_first_then_picks_under_the_grammar():
+    """The grammar has to come second. Asked for {reason, memory} in one call the server
+    generated `memory` first, whatever order the schema declared, so the reasoning was a
+    justification of a choice already made. Two calls are what puts the words first."""
+    agent = make_agent("2", reason=True)
+    agent.chain.replies = ["Memory 2 is the only one that mentions a walkway.", "2"]
+    out = agent.query(PREAMBLE_QUESTION)
+
+    assert agent.chain.calls == 2, agent.chain.calls
+    # Thinking is unconstrained; only the answer is bound to the memory numbers.
+    assert agent.chain.schemas == [{"type": "integer", "enum": [1, 2, 3]}], agent.chain.schemas
+    assert out.position == [-4.0, 5.5, -6.0]
+
+
+def test_the_answer_call_can_see_what_the_thinking_call_said():
+    agent = make_agent("1", reason=True)
+    agent.chain.replies = ["The bench is memory 1.", "1"]
+    agent.query(PREAMBLE_QUESTION)
+    first, second = agent.chain.prompts
+    assert "The bench is memory 1." not in first, first
+    assert "The bench is memory 1." in second, second
+    # Same memories in both, so the numbering the reasoning used still holds.
+    assert "1. distance_from_you=3.7m." in first and "1. distance_from_you=3.7m." in second
+
+
+def test_thinking_is_asked_for_but_not_answered_with():
+    """The thinking call must not be handed the answer contract, or it answers instead of
+    reasoning and the second call has nothing to work from."""
+    agent = make_agent("3", reason=True)
+    agent.chain.replies = ["Only memory 3 names a bike rack.", "3"]
+    agent.query(PREAMBLE_QUESTION)
+    assert "Think" in agent.chain.prompts[0], agent.chain.prompts[0]
+    assert "respond with only that memory's number" not in agent.chain.prompts[0]
+
+
+
+
+
+
+
+
+
+ABSTAIN = 0
+
+
+def test_the_grammar_offers_abstention_only_when_it_is_enabled():
+    assert memory_index_schema(3) == {"type": "integer", "enum": [1, 2, 3]}
+    assert memory_index_schema(3, abstain=True) == {"type": "integer", "enum": [0, 1, 2, 3]}
+
+
+def test_abstaining_answers_with_the_top_search_hit():
+    """Measured: on 4 of 12 position questions the model replaced a good top hit with a
+    worse candidate, because the grammar made it name one and no candidate named the
+    thing asked about. Q5's top hit was 2.8 m out and its pick was 115.9 m out. With a
+    way to say "none of these", the search's own best answer stands."""
+    agent = make_agent(str(ABSTAIN), abstain=True)
+    out = agent.query(PREAMBLE_QUESTION)
+    assert out.position == [1.0, 2.0, 3.0], out.position
+    assert agent.chain.calls == 1
+
+
+
+def test_abstention_is_rejected_when_it_was_not_offered():
+    agent = make_agent(str(ABSTAIN))
+    try:
+        agent.query(PREAMBLE_QUESTION)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected a ValueError for 0 when abstention is off")
+
+
+def test_the_prompt_explains_abstention_only_when_it_is_offered():
+    on = make_agent("1", abstain=True)
+    on.query(PREAMBLE_QUESTION)
+    assert "0" in on.chain.prompts[0], on.chain.prompts[0]
+    assert "none of the memories" in on.chain.prompts[0], on.chain.prompts[0]
+
+    off = make_agent("1")
+    off.query(PREAMBLE_QUESTION)
+    assert "none of the memories" not in off.chain.prompts[0], off.chain.prompts[0]
+
 
 
 def test_a_parse_failure_raises_immediately_no_retry():

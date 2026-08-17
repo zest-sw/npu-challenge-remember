@@ -30,7 +30,7 @@ sys.path.append(sys.path[0] + '/..')
 # means one backend's missing dependency stops every other model from running.
 
 from memory.memory import MemoryItem
-from memory.milvus_memory import INDEX_UNITS, MilvusMemory
+from memory.milvus_memory import INDEX_UNITS, TEXT_SEARCH_K, MilvusMemory
 from memory.text_memory import TextMemory
 from memory.video_memory import VideoMemory, ImageMemoryItem
 
@@ -270,7 +270,7 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
     if use_milvus:
         # milv = MilvusWrapper(ip_address=ip_address)
         memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address, time_offset=start_time,
-                              index_unit=args.index_unit)
+                              index_unit=args.index_unit, text_k=args.text_k)
     elif 'vlm' in args.model:
         memory = VideoMemory()
     else:
@@ -375,7 +375,8 @@ def main(args):
         # wrong. See remembr/agents/direct_position_agent.py.
         base_llm = args.model.split('+')[-1]
         agent = DirectPositionAgent(llm_type=base_llm, num_ctx=args.num_ctx,
-                                    temperature=args.temperature)
+                                    temperature=args.temperature,
+                                    abstain=args.abstain, reason=args.reason)
         use_milvus = True
 
     elif 'optimal' in args.model:
@@ -545,6 +546,15 @@ if __name__ == "__main__":
     # caption file's precomputed embeddings no longer apply, but it retrieves memories
     # much closer to the answer -- see MilvusMemory.__init__.
     parser.add_argument("--index_unit", type=str, default='caption', choices=INDEX_UNITS)
+    # How many memories a text search hands over. 5 is the measured optimum without a
+    # thinking call; with --reason a longer list may pay, which is why this is a flag.
+    parser.add_argument("--text_k", type=int, default=TEXT_SEARCH_K)
+    # direct+ only. Lets the model answer "none of these", which falls back to the top
+    # search hit instead of the best of a set that does not contain the answer.
+    parser.add_argument("--abstain", action='store_true')
+    # direct+ only. A second call that thinks in words before the grammar-constrained
+    # pick. Costs a call and roughly triples the per-question time.
+    parser.add_argument("--reason", action='store_true')
 
 
     args = parser.parse_args()

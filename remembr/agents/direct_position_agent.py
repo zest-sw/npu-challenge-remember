@@ -22,8 +22,18 @@ from remembr.utils import trace
 # whitespace the way an object's can.
 ANSWER_MAX_TOKENS = 8
 
+# Room for the optional thinking call. Long enough for a sentence about each of the five
+# memories, short enough that a rambling reply cannot dominate the turn.
+REASON_MAX_TOKENS = 160
 
-def memory_index_schema(count: int) -> dict:
+# The answer that names no memory. Measured over the 12 position questions, the model
+# replaced a good top hit with a worse candidate on 4 of them -- Q5's top hit was 2.8 m
+# out and its pick 115.9 m -- because six of the questions have no caption in the window
+# that names the thing asked about, and the grammar still made it name one.
+ABSTAIN = 0
+
+
+def memory_index_schema(count: int, abstain: bool = False) -> dict:
     """The whole answer contract: one of the memory numbers on offer.
 
     An answer is always one of the retrieved memories' own coordinates, never a computed
@@ -40,10 +50,11 @@ def memory_index_schema(count: int) -> dict:
     of merely out of range. (Both forms were measured working on the board; the enum is
     the one that cannot quietly stop constraining.)
     """
-    return {"type": "integer", "enum": list(range(1, count + 1))}
+    return {"type": "integer",
+            "enum": list(range(ABSTAIN if abstain else 1, count + 1))}
 
 
-def system_prompt(has_distance: bool) -> str:
+def system_prompt(has_distance: bool, abstain: bool = False) -> str:
     """The instruction, matched to what the memory lines actually carry.
 
     One string with one varying clause rather than two, so the two cannot drift apart:
@@ -52,9 +63,40 @@ def system_prompt(has_distance: bool) -> str:
     """
     carries = ("records what you saw and how far it is from you now" if has_distance
                else "records where you were and what you saw there")
+    way_out = (f" If none of the memories mentions it, answer {ABSTAIN}."
+               if abstain else "")
     return ("You are a robot looking back over your memory of what you saw. Each numbered "
             f"memory below {carries}. Pick the memory whose description mentions the thing "
-            "the question asks about, and respond with only that memory's number.")
+            f"the question asks about, and respond with only that memory's number.{way_out}")
+
+
+def reason_prompt(has_distance: bool) -> str:
+    """The thinking half, which deliberately does not ask for an answer.
+
+    Given the answer contract this call answers instead of reasoning, and the second call
+    is left with a bare number to agree with. A separate call is what puts the words
+    first: asked for {reason, memory} in one, the server generated `memory` first whatever
+    order the schema declared, so the reasoning only justified a choice already made.
+    """
+    carries = ("records what you saw and how far it is from you now" if has_distance
+               else "records where you were and what you saw there")
+    return ("You are a robot looking back over your memory of what you saw. Each numbered "
+            f"memory below {carries}.\n"
+            "Think about which memories could be the thing the question asks about, and "
+            "which cannot. Two or three sentences. Do not give a final answer yet.")
+
+
+def distance_from(doc, here) -> float:
+    """How far a retrieved memory is from where the robot stands now.
+
+    Raises rather than coping with a short coordinate: `zip` would quietly drop a
+    dimension and report a too-small distance, which is worse than failing, because a
+    too-small distance is exactly what steers the model onto that memory.
+    """
+    where = [float(value) for value in doc.metadata["position"]]
+    if len(where) != 3:
+        raise ValueError(f"memory has no [x, y, z]: {where!r}")
+    return sum((a - b) ** 2 for a, b in zip(where, here)) ** 0.5
 
 
 def split_question(question: str):
@@ -128,7 +170,8 @@ def memory_index_output(index, memories) -> AgentOutput:
 
 
 class DirectPositionAgent(Agent):
-    def __init__(self, llm_type="tt/Llama-3.1-8B-Instruct", num_ctx=8192, temperature=0):
+    def __init__(self, llm_type="tt/Llama-3.1-8B-Instruct", num_ctx=8192, temperature=0,
+                 abstain=False, reason=False):
         # num_ctx: accepted so eval.py can construct every agent the same way; the
         # tt server owns its own context budget, so it is unused here.
         if not llm_type.startswith("tt/"):
@@ -139,6 +182,8 @@ class DirectPositionAgent(Agent):
         from langchain_openai import ChatOpenAI  # lazy: optional dep
 
         self.llm_type = llm_type
+        self.abstain = abstain
+        self.reason = reason
         # The grammar is bound per call, not here: it enumerates the memory numbers on
         # offer, and how many came back is only known once the search has run.
         self.chain = ChatOpenAI(
@@ -181,13 +226,7 @@ class DirectPositionAgent(Agent):
 
         lines = []
         for number, doc in enumerate(memories, 1):
-            where = [float(value) for value in doc.metadata["position"]]
-            if len(where) != 3:
-                # Same invariant `memory_index_output` enforces. Without this, `zip`
-                # would quietly drop a dimension and print a too-small distance, which
-                # is worse than failing: it steers the model onto that memory.
-                raise ValueError(f"memory {number} has no [x, y, z]: {where!r}")
-            gap = sum((a - b) ** 2 for a, b in zip(where, here)) ** 0.5
+            gap = distance_from(doc, here)
             # "The robot saw the following: " is `MilvusMemory.memory_to_string`'s own
             # wording, repeated here because that rendering also carries the coordinate
             # this line exists to replace. Keep the two in step by hand.
@@ -196,45 +235,68 @@ class DirectPositionAgent(Agent):
                          f"The robot saw the following: {caption}")
         return "\n".join(lines)
 
-    def prompt_for(self, question: str, memories) -> str:
+    def think(self, preamble: str, asked: str, memories, here) -> str:
+        """One unconstrained call whose words become context for the choosing call.
+
+        Measured over eight runs of the twelve position questions, 75 of 88 answers were
+        memory 1 or memory 5 -- the model reads the list but, with one token to answer in,
+        falls back to an end of it rather than discriminating. This buys it somewhere to
+        do the discriminating.
+        """
+        prompt = (f"{reason_prompt(here is not None)}\n\n"
+                  f"{self.numbered_memories(memories, here)}\n\nQuestion: {asked}")
+        thought = self.chain.bind(max_tokens=REASON_MAX_TOKENS).invoke(prompt).content
+        trace.step("추론", trace.clip(" ".join(thought.split()), 120))
+        return thought
+
+    def prompt_for(self, preamble: str, asked: str, memories, here, thought=None) -> str:
         """The one prompt this agent sends, with the preamble out of the question.
 
         See `split_question` for the measurements behind the shape. The preamble keeps its
         own labelled block so the current time stays available, and its position is what
         `numbered_memories` measures each candidate against.
         """
-        preamble, asked = split_question(question)
         situation = (
             f"Your current situation: {preamble}\n"
             "(This is where and when you are now. It is not the answer.)\n\n"
             if preamble else ""
         )
-        here = current_position(preamble)
-        return (f"{system_prompt(here is not None)}\n\n{situation}"
-                f"{self.numbered_memories(memories, here)}\n\nQuestion: {asked}")
+        thinking = f"Your earlier thinking about these memories:\n{thought}\n\n" if thought else ""
+        return (f"{system_prompt(here is not None, self.abstain)}\n\n{situation}"
+                f"{self.numbered_memories(memories, here)}\n\n{thinking}Question: {asked}")
 
     def query(self, question: str) -> AgentOutput:
         # The asked line is the search query -- no query-generation call. The preamble
         # is dropped here rather than hoisted: it names the robot's own position and
         # time, which the retriever has no use for and which only dilute the embedding.
-        _, asked = split_question(question)
+        preamble, asked = split_question(question)
         trace.step("검색어", repr(asked))
         self.memory.search_by_text(asked)
+        here = current_position(preamble)
         memories = self.memory.get_working_memory()
         if not memories:
             # Nothing to name, so there is no answer to give. Raising lets eval record an
             # unanswered attempt instead of scoring a guess.
             raise ValueError("retrieval returned no memories; nothing to choose from")
 
-        # Exactly one LLM call. No retry: greedy decoding would repeat the same
-        # bytes, and eval.answer_squad_question already caps attempts at 5.
+        thought = self.think(preamble, asked, memories, here) if self.reason else None
+
+        # One LLM call, or two with --reason. No retry: greedy decoding would repeat the
+        # same bytes, and eval.answer_squad_question already caps attempts at 5.
         reply = self.chain.bind(response_format={
             "type": "json_schema",
             "json_schema": {"name": "memory_index",
-                            "schema": memory_index_schema(len(memories))},
-        }).invoke(self.prompt_for(question, memories))
+                            "schema": memory_index_schema(len(memories), self.abstain)},
+        }).invoke(self.prompt_for(preamble, asked, memories, here, thought))
 
         index = json.loads(reply.content)
+        if self.abstain and index == ABSTAIN:
+            # No memory names the thing asked about, so the search's own first hit stands
+            # -- taken from retrieval order, which `ordered` only changes the display of.
+            output = memory_index_output(1, memories)
+            trace.step("답변", f"기권 -> 검색 1위  position={output.position!r}")
+            return output
+
         output = memory_index_output(index, memories)
         trace.step("답변", f"memory={index}/{len(memories)}  position={output.position!r}")
         return output
