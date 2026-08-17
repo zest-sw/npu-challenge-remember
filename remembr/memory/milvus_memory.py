@@ -157,7 +157,7 @@ class MilvusMemory(Memory):
 
 
     def __init__(self, db_collection_name: str, db_ip='127.0.0.1', db_port=19530, time_offset=FIXED_SUBTRACT,
-                 index_unit='caption'):
+                 index_unit='caption', text_k=TEXT_SEARCH_K):
         """`index_unit` picks what a stored vector describes.
 
         'caption' is the original: one vector per caption, reusing the embeddings the
@@ -169,6 +169,8 @@ class MilvusMemory(Memory):
         and the caption naming the asked-about object rose from rank 33 to 5 on the
         question where retrieval had been missing it outright.
         """
+        if text_k < 1:
+            raise ValueError(f"text_k must be at least 1, got {text_k}")
         if index_unit not in INDEX_UNITS:
             raise ValueError(f"index_unit must be one of {INDEX_UNITS}, got {index_unit!r}")
 
@@ -177,6 +179,7 @@ class MilvusMemory(Memory):
         self.db_port = db_port
         self.time_offset = time_offset
         self.index_unit = index_unit
+        self.text_k = text_k
 
         self.embedder = HuggingFaceEmbeddings(
             model_name='mixedbread-ai/mxbai-embed-large-v1',
@@ -262,7 +265,7 @@ class MilvusMemory(Memory):
             text_field='caption',
         )
         self.text_retriever = text_vector_db.as_retriever(
-            search_kwargs={"k": self.fetch_count(TEXT_SEARCH_K)})
+            search_kwargs={"k": self.fetch_count(self.text_k)})
 
 
         self.position_vector_db = Milvus(
@@ -367,7 +370,7 @@ class MilvusMemory(Memory):
     def search_by_text(self, query: str) -> str:
 
         self._flush_if_needed()
-        docs = self.distinct_memories(self.text_retriever.invoke(query), TEXT_SEARCH_K)
+        docs = self.distinct_memories(self.text_retriever.invoke(query), self.text_k)
         self._trace_hits("text", query, docs)
 
         self.working_memory += docs

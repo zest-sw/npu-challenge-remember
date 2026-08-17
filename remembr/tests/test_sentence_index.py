@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from remembr.memory.milvus_memory import (  # noqa: E402
     POSITION_TIME_K,
+    SENTENCE_OVERFETCH,
     TEXT_SEARCH_K,
     MilvusMemory,
     first_per_memory,
@@ -74,6 +75,28 @@ def test_over_fetching_only_happens_when_rows_are_sentences():
     assert make_memory("sentence").fetch_count(TEXT_SEARCH_K) > TEXT_SEARCH_K
 
 
+def test_a_text_pool_smaller_than_one_memory_is_refused():
+    """`DirectPositionAgent(near_slots=...)` reserves places for whatever is physically
+    closest, which it can only do if search hands over more than it shows -- so the pool
+    size is a constructor argument, and a pool of nothing is a caller mistake."""
+    try:
+        MilvusMemory(db_collection_name="never_built", text_k=0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected a ValueError for an empty text pool")
+
+
+def test_text_search_returns_as_many_memories_as_the_pool_allows():
+    memory = make_memory("sentence", text_k=3)
+    memory.text_retriever = FakeRetriever([FakeDoc(str(n)) for n in range(10)])
+    memory._unflushed_inserts = False
+    memory.working_memory = []
+    memory.search_by_text("where is the bench?")
+    assert memory.text_retriever.asked == "where is the bench?"
+    assert len(memory.get_working_memory()) == 3, memory.get_working_memory()
+
+
 def test_caption_mode_returns_search_hits_untouched():
     """Two memories may legitimately share a caption, so caption mode must not dedupe."""
     docs = [FakeDoc("a hallway"), FakeDoc("a hallway")]
@@ -88,7 +111,17 @@ def test_sentence_mode_deduplicates_search_hits():
 class FakeDoc:
     def __init__(self, caption, time=0.0):
         self.page_content = caption
-        self.metadata = {"time": [time, 0.0]}
+        self.metadata = {"time": [time, 0.0], "position": [0.0, 0.0, 0.0]}
+
+
+class FakeRetriever:
+    def __init__(self, docs):
+        self.docs = docs
+        self.asked = None
+
+    def invoke(self, query):
+        self.asked = query
+        return self.docs
 
 
 class FakeEmbedder:
@@ -101,10 +134,11 @@ class FakeEmbedder:
         return [float(len(text))]
 
 
-def make_memory(index_unit):
+def make_memory(index_unit, text_k=TEXT_SEARCH_K):
     """Build the memory without __init__, which would connect to Milvus."""
     memory = MilvusMemory.__new__(MilvusMemory)
     memory.index_unit = index_unit
+    memory.text_k = text_k
     memory.embedder = FakeEmbedder()
     memory.time_offset = 0.0
     return memory
