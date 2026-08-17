@@ -188,9 +188,7 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
 
     assert agent.memory.searched == [[
         ASKED,
-        "Where is the yellow emergency call box?",
-        "Where is the yellow help station?",
-        "Where is the yellow call post?",
+        "police call pole, emergency call box, help station, call post",
     ]]
     assert agent.query_chain.calls == 1
     assert agent.chain.calls == 1
@@ -209,28 +207,25 @@ def test_multi_query_schema_bounds_every_generated_string():
     }
 
 
-def test_combined_queries_replaces_only_the_target_and_preserves_every_constraint():
+def test_combined_queries_keeps_one_original_and_one_keyword_bundle():
     queries = combined_queries("Where is the nearest bike rack that is not empty?", {
         "target_phrase": "bike rack",
         "aliases": ["bicycle rack", "cycle stand"],
     })
     assert queries == [
         "Where is the nearest bike rack that is not empty?",
-        "Where is the nearest bicycle rack that is not empty?",
-        "Where is the nearest cycle stand that is not empty?",
+        "bike rack, bicycle rack, cycle stand",
     ]
 
 
-def test_combined_queries_preserves_named_place_and_relation():
+def test_combined_queries_keeps_relation_in_original_and_aliases_in_keywords():
     queries = combined_queries("Where is the statue in front of Gates Building?", {
         "target_phrase": "statue",
         "aliases": ["sculpture", "monument", "public art"],
     })
     assert queries == [
         "Where is the statue in front of Gates Building?",
-        "Where is the sculpture in front of Gates Building?",
-        "Where is the monument in front of Gates Building?",
-        "Where is the public art in front of Gates Building?",
+        "statue, sculpture, monument, public art",
     ]
 
 
@@ -246,7 +241,7 @@ def test_combined_queries_drops_duplicate_and_non_phrase_aliases():
     assert combined_queries("Where is the marked object?", {
         "target_phrase": "object",
         "aliases": ["object", "item, thing", "item"],
-    }) == ["Where is the marked object?", "Where is the marked item?"]
+    }) == ["Where is the marked object?", "object, item"]
 
 
 def test_multi_query_caches_repeated_asked_lines():
@@ -262,7 +257,7 @@ def test_multi_query_caches_repeated_asked_lines():
 
     assert agent.query_chain.calls == 1
     assert agent.memory.searched == [[
-        ASKED, "Where is the yellow emergency call box?"
+        ASKED, "police call pole, emergency call box"
     ]] * 2
 
 

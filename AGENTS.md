@@ -91,12 +91,12 @@ NVIDIA 원본, `tt_server/`가 이번 포팅으로 추가된 NPU 추론 서버. 
   22.57m였다. 중앙값과 5m 이내 개수만 좋아졌고 큰 선택 실패가 평균을 덮었다. 반면
   `keyfirstV2`는 같은 sentence k=5에서 27.79→**5.98m**로 개선됐다(랜덤 기대 19.81m,
   oracle 3.41m). 문장 청킹 효과는 caption style과 selector 순번 편향의 상호작용에 의존한다.
-- **multi-query에서 질문 전체를 자유 rewrite하지 말 것.** V4 sentence k5 실측에서 자유 확장은
-  `statue`에 주변 조형물을 섞고 `bike rack that is not empty`에서 rack/state 제약을 버리며 질문에
-  없는 색·계단·난간까지 만들었다. 12문제 평균이 5.38→16.83m, 최대가 20.03→105.75m로 악화되고
-  시간도 117→327초가 됐다. `--text_query_mode multi`는 질문에서 복사한 완전한 핵심 명사구만
-  alias로 치환하고 나머지 색·상태·거리·관계·장소명을 그대로 보존해야 한다. 반복 asked line은
-  query-generation cache를 써야 한다.
+- **multi-query에서 질문 전체를 자유 rewrite하거나 alias마다 반복하지 말 것.** 자유 확장은
+  질문에 없는 속성과 주변 물체를 만들어 평균 5.38→16.83m, 최대 20.03→105.75m, 시간
+  117→327초로 악화됐다. 완전한 핵심 명사구만 치환해도 긴 질문을 alias마다 만들면 같은 비핵심
+  단어가 RRF에서 여러 표를 얻어 평균 21.81m·5m 이내 2/12로 더 나빴다. `--text_query_mode multi`는
+  반드시 원문 질문 한 쿼리와 `target, alias1, ...` 핵심 키워드 한 쿼리만 검색해 각각 한 표로
+  융합한다. selector에는 원문만 주고, 반복 asked line은 query-generation cache를 쓴다.
 - **`temperature=0`은 재시도를 무의미하게 만든다.** 생성이 바이트 단위로 동일해져서 실패한
   답을 그대로 반복한다. 실측(동일 9문제, 8B): temp 0 → LLM 824초·attempts 25·미답변 4,
   temp 0.7 → **445초·12·0**. eval 기본값 0.7을 이유 없이 0으로 바꾸지 말 것.

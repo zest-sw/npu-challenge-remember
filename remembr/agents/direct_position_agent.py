@@ -2,9 +2,9 @@
 
 The default path searches with the question itself and makes one LLM selection call.
 The optional multi-query path asks the LLM for aliases of one copied target noun phrase,
-substitutes only that phrase in the original question, then fuses those searches. In both
-paths the selector answers with a memory's *number*, not a coordinate, and this module
-reads the coordinate off that memory. A position-only probe -- every question gets a
+then fuses the original-question ranking with one compact keyword ranking. In both paths
+the selector answers with a memory's *number*, not a coordinate, and this module reads
+the coordinate off that memory. A position-only probe -- every question gets a
 coordinate, and non-position questions are knowingly wrong.
 
 No retries. Greedy decoding repeats itself byte-for-byte, so a second try buys
@@ -57,7 +57,13 @@ def query_expansion_schema() -> dict:
 
 
 def combined_queries(original: str, expansion: dict) -> list[str]:
-    """Replace only the copied target phrase; all question constraints stay verbatim."""
+    """Return the original question plus one compact target-and-alias keyword query.
+
+    Aliases are deliberately not expanded back into whole questions. Doing that gives
+    near-duplicate long queries several RRF votes and lets their shared non-target words
+    dominate the ranking. One keyword bundle gives expansion one vote, equal to the
+    original question's one vote.
+    """
     target = expansion.get("target_phrase", "")
     aliases = expansion.get("aliases", [])
     if not isinstance(target, str) or not isinstance(aliases, list):
@@ -75,7 +81,7 @@ def combined_queries(original: str, expansion: dict) -> list[str]:
     if not target_pattern.search(original):
         raise ValueError(f"target phrase was not copied from the question: {target!r}")
 
-    queries = [original]
+    terms = [target]
     seen_aliases = {target.casefold()}
     for alias in aliases[:ALIAS_LIMIT]:
         if not isinstance(alias, str):
@@ -87,8 +93,8 @@ def combined_queries(original: str, expansion: dict) -> list[str]:
                 or "," in alias or ";" in alias):
             continue
         seen_aliases.add(canonical)
-        queries.append(target_pattern.sub(alias, original, count=1))
-    return queries
+        terms.append(alias)
+    return [original, ", ".join(terms)]
 
 
 def memory_index_schema(count: int) -> dict:
@@ -296,12 +302,12 @@ class DirectPositionAgent(Agent):
                 f"{self.numbered_memories(memories, here)}\n\nQuestion: {asked}")
 
     def search_queries_for(self, asked: str) -> list[str]:
-        """Return target-only substitutions, falling back to the original on errors.
+        """Return original + one target keyword bundle, falling back on errors.
 
-        The original is never replaced. Each extra query changes one copied noun phrase,
-        leaving proper names, colors, state, distance, and relations byte-for-byte intact.
-        Repeated asked lines reuse their expansion because several eval questions differ
-        only in the time window and current pose.
+        The original preserves proper names, colors, state, distance, and relations. The
+        second query contains only the copied target and its aliases, rather than several
+        rewrites of the whole question. Repeated asked lines reuse their expansion because
+        several eval questions differ only in the time window and current pose.
         """
         if self.text_query_mode == "direct":
             return [asked]

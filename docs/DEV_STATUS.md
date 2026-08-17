@@ -98,6 +98,20 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-17 — multi-query의 추가 검색을 핵심 키워드 한 묶음으로 교정
+
+- 핵심 명사구만 치환해도 alias마다 원래 질문 전체를 만들면 거의 같은 긴 질문이 RRF에서 3~4표를
+  얻는 문제가 남았다. 실제 V4 sentence k5 12문제는 평균 21.81m·중앙값 9.64m·5m 이내 2/12·
+  최대 102.27m·총 192.6초로, direct의 5.38m·2.82m·7/12·20.03m·117.1초보다 악화됐다.
+  recycling 질문은 waste/trash/garbage를 넣은 긴 질문들이 exact blue recycling bin을 top-5에서
+  밀어내 102.27m, elevators는 `escalators`가 계단·난간을 채워 53.01m가 됐다.
+- 검색 입력을 ① 원문 질문 하나와 ② `target_phrase, alias1, alias2, alias3` 핵심 키워드 묶음 하나로
+  변경했다. 따라서 RRF 표도 원문 1개 대 확장 1개이며, alias마다 질문을 반복하지 않는다. 후보
+  selector에는 이전과 같이 원문 질문만 전달한다.
+- 검증: `py_compile` 통과, `pytest -q remembr/tests` **82 passed**. 실제 `llm-8b`, temperature 0에서 recycling/elevators/Gates 질문이
+  각각 원문 하나와 핵심 키워드 묶음 하나, 총 두 검색어만 만드는 것을 확인했다. 전체 12문제
+  keyword-bundle A/B는 별도 평가가 필요하다.
+
 ### 2026-08-17 — multi-query를 핵심 명사구 제한 치환으로 수정
 
 - 최초 자유 rewrite 방식의 V4 sentence k5 12문제 실측은 평균 오차 16.83m·중앙값 2.75m·5m 이내

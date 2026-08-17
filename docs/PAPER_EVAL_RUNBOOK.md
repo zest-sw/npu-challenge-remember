@@ -282,9 +282,9 @@ python scripts/eval.py \
 
 - 기본값 `direct`는 질문 마지막 줄 하나만 검색하므로 기존 결과가 바뀌지 않는다. `multi`는 8B가
   질문에서 그대로 복사한 `target_phrase` 하나와 그 완전한 명사구의 `aliases` 최대 3개를 JSON으로
-  생성한다. 코드는 원문에서 그 명사구만 alias로 치환하므로 고유 장소명과 색·상태·거리·관계는
-  모든 검색어에 그대로 남는다. 원문을 포함한 최대 4개 검색 결과는 RRF(reciprocal-rank fusion)로
-  합친다.
+  생성한다. 검색어는 정확히 두 관점이다: ① 원문 질문, ② `target_phrase, alias1, alias2, alias3`로
+  만든 짧은 핵심 키워드 묶음. 각 alias를 긴 질문에 다시 끼워 넣지 않는다. 두 검색 순위는
+  RRF(reciprocal-rank fusion)에서 각각 한 표만 가진다.
 - 쿼리별 embedding 거리는 서로 직접 비교하지 않고 순위만 융합한다. sentence 모드에서는 쿼리
   하나 안에서도 같은 parent를 한 표로 세고, 융합 뒤에도 같은 3초 parent pose는 하나만 남긴다.
   최종 후보 수는 `--retrieval_k` 그대로이므로 selector prompt의 후보 수가 3배가 되지 않는다.
@@ -293,14 +293,18 @@ python scripts/eval.py \
   단일 명사구만 허용하고 중복·쉼표 나열·질문 전체 rewrite를 제거한다. 생성·파싱 실패는 해당
   질문만 기존 원문 검색으로 폴백한다. 같은 asked line이 여러 time window에 반복되면 생성 결과를
   cache해 LLM 호출을 다시 하지 않는다.
+- 명사구만 바꿨더라도 `Where is ...?` 전체 문장을 alias마다 만들면 안 된다. 실제 제한 치환
+  A/B도 평균 21.81m·중앙값 9.64m·5m 이내 2/12로 direct 5.38m보다 악화됐다. 거의 같은 긴 질문이
+  3~4표를 얻어 recycling 정답을 top-5 밖으로 밀고, `elevators→escalators`가 계단 후보를 채웠다.
+  핵심 키워드들을 한 쿼리로 묶어야 원문 1표 대 확장 1표가 된다.
 - 자유 rewrite 방식은 실제 V4 sentence k5 12문제에서 평균 5.38→16.83m, 최대 20.03→105.75m,
   총시간 117→327초로 악화됐다. `statue` 확장이 Gates 관계를 잃고 다른 조형물을 끌어왔으며,
   `bike rack that is not empty`를 `bike/bicycle/vehicle`로 바꾸고, 질문에 없는 색·계단·난간까지
   만들었다. 이 결과 때문에 자유 `target_query`와 가상 `visual_query`는 사용하지 않는다.
-- 제한 치환을 실제 8B에서 확인하니 `statue→sculpture/monument`에도 Gates 건물 관계가 유지되고,
-  `bike rack→cycle stand/...`에도 `nearest/not empty`, `fire hydrant→hydrant/fireplug/...`에도
-  `red`가 모든 쿼리에 유지됐다. Multi-query는 여전히 추가 LLM 호출이 있으므로 최종 A/B에서
-  정확도와 지연을 함께 비교해야 한다.
+- 핵심 키워드 묶음을 실제 8B에서 확인한 결과는 원문과
+  `recycling bin, waste receptacle, trash can, dumpster`, 원문과
+  `elevators, lifts, escalators`, 원문과 `statue, sculpture, monument`처럼 항상 두 쿼리였다.
+  Multi-query는 여전히 추가 LLM 호출이 있으므로 최종 A/B에서 정확도와 지연을 함께 비교해야 한다.
 - 공유 Milvus에서는 예를 들어 `--db_name eval_v4_sentence_multi_k5`처럼 다른 평가와 겹치지 않는
   이름을 사용한다. A/B 비교는 selector와 query rewrite를 재현할 수 있도록 `--temperature 0`으로
   실행한다.
