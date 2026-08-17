@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from remembr.agents.agent import AgentOutput  # noqa: E402
 from remembr.agents.direct_position_agent import (  # noqa: E402
+    ABSTAIN,
     memory_index_output,
     memory_index_schema,
 )
@@ -263,8 +264,6 @@ def test_a_question_with_no_preamble_gets_no_situation_block():
     assert "Your current situation:" not in agent.chain.prompts[0], agent.chain.prompts[0]
 
 
-
-
 def test_reasoning_is_off_by_default_and_costs_one_call():
     agent = make_agent("2")
     agent.query(PREAMBLE_QUESTION)
@@ -307,16 +306,6 @@ def test_thinking_is_asked_for_but_not_answered_with():
     assert "respond with only that memory's number" not in agent.chain.prompts[0]
 
 
-
-
-
-
-
-
-
-ABSTAIN = 0
-
-
 def test_the_grammar_offers_abstention_only_when_it_is_enabled():
     assert memory_index_schema(3) == {"type": "integer", "enum": [1, 2, 3]}
     assert memory_index_schema(3, abstain=True) == {"type": "integer", "enum": [0, 1, 2, 3]}
@@ -331,7 +320,6 @@ def test_abstaining_answers_with_the_top_search_hit():
     out = agent.query(PREAMBLE_QUESTION)
     assert out.position == [1.0, 2.0, 3.0], out.position
     assert agent.chain.calls == 1
-
 
 
 def test_abstention_is_rejected_when_it_was_not_offered():
@@ -353,7 +341,6 @@ def test_the_prompt_explains_abstention_only_when_it_is_offered():
     off = make_agent("1")
     off.query(PREAMBLE_QUESTION)
     assert "none of the memories" not in off.chain.prompts[0], off.chain.prompts[0]
-
 
 
 def test_a_parse_failure_raises_immediately_no_retry():

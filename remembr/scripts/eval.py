@@ -497,6 +497,10 @@ def main(args):
     # save all_questions into json
     out_json = {
         "version": 0.1,
+        # The filename is model + caption_file + postfix, so two runs differing only in
+        # --index_unit or --reason overwrite each other. Recording the args means a result
+        # file can at least be attributed after the fact.
+        "args": vars(args),
         "eval_total_latency_s": time.perf_counter() - eval_run_start,
         "responses": responses
     }
@@ -558,4 +562,8 @@ if __name__ == "__main__":
 
 
     args = parser.parse_args()
+    # These change what direct+ does and nothing else; silently ignoring them would put a
+    # run in out/ that reads as if the flag had applied.
+    if (args.abstain or args.reason) and 'direct' not in args.model:
+        parser.error("--abstain and --reason only apply to --model direct+...")
     main(args)

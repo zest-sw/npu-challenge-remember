@@ -19,8 +19,7 @@ FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1
 
 TEXT_SEARCH_K = 5
 
-# What similarity_search_with_score_by_vector defaults to, named so position and time
-# search can over-fetch and still come back with as many memories as they used to.
+# How many memories position and time search come back with.
 POSITION_TIME_K = 4
 
 INDEX_UNITS = ('caption', 'sentence')
@@ -33,6 +32,14 @@ MIN_SENTENCE_WORDS = 3
 # with k distinct captions. Captions run about 7 sentences, so 8x covers the case where
 # one caption owns most of the top hits.
 SENTENCE_OVERFETCH = 8
+
+# Sentence embeddings, shared across MilvusMemory instances rather than held per instance.
+# eval rebuilds the memory once per question and the question windows overlap heavily: on
+# the 12-question position set, 1617 caption inserts cover only 265 distinct captions, so
+# 84% of the ~10,600 embeddings are a recomputation. Keyed on sentence text; one sequence
+# is ~1800 sentences, so this is tens of MB. Only sentence mode reads it, and that mode
+# always normalises with the same model, so the text alone identifies a vector.
+_SENTENCE_VECTORS: dict[str, list[float]] = {}
 
 
 def sentences_of(caption: str) -> list[str]:
@@ -160,14 +167,14 @@ class MilvusMemory(Memory):
                  index_unit='caption', text_k=TEXT_SEARCH_K):
         """`index_unit` picks what a stored vector describes.
 
-        'caption' is the original: one vector per caption, reusing the embeddings the
-        caption files ship, which are unnormalised.
+        'caption' is the original: one vector per caption, reusing the unnormalised
+        embeddings the caption files ship.
 
-        'sentence' embeds each sentence separately and normalises, since it computes both
-        sides itself and mxbai is a cosine model. Measured offline over the 12 position
-        questions, the closest memory among the retrieved five went from 7.1 m to 1.6 m,
-        and the caption naming the asked-about object rose from rank 33 to 5 on the
-        question where retrieval had been missing it outright.
+        'sentence' embeds each sentence separately. It also normalises, and the two are
+        inseparable rather than independent improvements -- it computes both sides itself,
+        so it can use the cosine metric mxbai was trained for, which caption mode cannot
+        without recomputing the shipped vectors. Read any A/B of the two modes as a
+        two-variable change. Numbers in docs/2026-08-14-direct-position-agent.md.
         """
         if text_k < 1:
             raise ValueError(f"text_k must be at least 1, got {text_k}")
@@ -190,14 +197,31 @@ class MilvusMemory(Memory):
         self.reset(drop_collection=False)
 
 
+    def sentence_vectors(self, sentences: list[str]) -> list[list[float]]:
+        """Embed the sentences not seen before, and reuse the rest. See _SENTENCE_VECTORS."""
+        fresh = [s for s in sentences if s not in _SENTENCE_VECTORS]
+        if fresh:
+            _SENTENCE_VECTORS.update(zip(fresh, self.embedder.embed_documents(fresh)))
+        return [_SENTENCE_VECTORS[s] for s in sentences]
+
     def fetch_count(self, limit: int) -> int:
         """Rows to ask Milvus for so that `limit` distinct memories come back."""
         return limit * SENTENCE_OVERFETCH if self.index_unit == 'sentence' else limit
 
-    def distinct_memories(self, docs, limit: int):
-        """Collapse the sentence rows of one memory. A no-op on caption rows, which are
-        already one per memory and may share a caption with each other."""
+    def _distinct(self, docs, limit: int):
+        """`limit` distinct memories out of the rows a search returned.
+
+        A no-op on caption rows: they are already one per memory, and two of them may
+        legitimately share a caption. Paired with `fetch_count` -- over-fetch without
+        this returns near-duplicates, this without over-fetch returns too few.
+        """
         return first_per_memory(docs, limit) if self.index_unit == 'sentence' else docs
+
+    def _vector_hits(self, db, vector, limit=POSITION_TIME_K):
+        """One position/time search, over-fetched and collapsed to distinct memories."""
+        docs = similarity_search_with_score_by_vector(
+            db, vector, k=self.fetch_count(limit))
+        return self._distinct(docs, limit)
 
     def rows_for(self, memory_dict: dict, text_embedding=None) -> list[dict]:
         """The Milvus rows one memory becomes, one per indexed unit.
@@ -214,7 +238,7 @@ class MilvusMemory(Memory):
         # this mode exists to avoid, so it is not reused here. A memory with no caption
         # still gets its row, since position and time search go looking for it.
         sentences = sentences_of(memory_dict['caption']) or [memory_dict['caption']]
-        embeddings = self.embedder.embed_documents(sentences)
+        embeddings = self.sentence_vectors(sentences)
         stamp = time.time()
         return [dict(memory_dict, id=f"{stamp}-{n}", text_embedding=embedding)
                 for n, embedding in enumerate(embeddings)]
@@ -317,10 +341,7 @@ class MilvusMemory(Memory):
     def search_by_position(self, query: tuple) -> str:
         self._flush_if_needed()
         # docs = pos_db.similarity_search_by_vector(np.array(query))
-        docs = similarity_search_with_score_by_vector(
-            self.position_vector_db, np.array(query).astype(float),
-            k=self.fetch_count(POSITION_TIME_K))
-        docs = self.distinct_memories(docs, POSITION_TIME_K)
+        docs = self._vector_hits(self.position_vector_db, np.array(query).astype(float))
         self._trace_hits("position", query, docs)
 
         self.working_memory += docs 
@@ -354,9 +375,7 @@ class MilvusMemory(Memory):
 
 
         self._flush_if_needed()
-        docs = similarity_search_with_score_by_vector(
-            self.time_vector_db, np.array([query, 0]), k=self.fetch_count(POSITION_TIME_K))
-        docs = self.distinct_memories(docs, POSITION_TIME_K)
+        docs = self._vector_hits(self.time_vector_db, np.array([query, 0]))
         self._trace_hits("time", hms_time, docs)
 
         self.working_memory += docs
@@ -370,7 +389,7 @@ class MilvusMemory(Memory):
     def search_by_text(self, query: str) -> str:
 
         self._flush_if_needed()
-        docs = self.distinct_memories(self.text_retriever.invoke(query), self.text_k)
+        docs = self._distinct(self.text_retriever.invoke(query), self.text_k)
         self._trace_hits("text", query, docs)
 
         self.working_memory += docs
@@ -400,7 +419,7 @@ class MilvusMemory(Memory):
 def similarity_search_with_score_by_vector(
         pos_db,
         embedding: List[float],
-        k: int = 4,
+        k: int = POSITION_TIME_K,
         param: Optional[dict] = None,
         expr: Optional[str] = None,
         timeout: Optional[float] = None,

@@ -18,6 +18,43 @@ from remembr.memory.milvus_memory import (  # noqa: E402
     sentences_of,
 )
 
+
+class FakeDoc:
+    def __init__(self, caption, time=0.0):
+        self.page_content = caption
+        self.metadata = {"time": [time, 0.0], "position": [0.0, 0.0, 0.0]}
+
+
+class FakeRetriever:
+    def __init__(self, docs):
+        self.docs = docs
+        self.asked = None
+
+    def invoke(self, query):
+        self.asked = query
+        return self.docs
+
+
+class FakeEmbedder:
+    """Returns a distinct vector per text so rows can be told apart."""
+
+    def embed_documents(self, texts):
+        return [[float(len(text))] for text in texts]
+
+    def embed_query(self, text):
+        return [float(len(text))]
+
+
+def make_memory(index_unit, text_k=TEXT_SEARCH_K):
+    """Build the memory without __init__, which would connect to Milvus."""
+    memory = MilvusMemory.__new__(MilvusMemory)
+    memory.index_unit = index_unit
+    memory.text_k = text_k
+    memory.embedder = FakeEmbedder()
+    memory.time_offset = 0.0
+    return memory
+
+
 CAPTION = ("Concrete sidewalk stretches forward. A metal bench sits empty near the wall. "
            "A gray utility box stands between the sidewalk and the enclosure.")
 
@@ -76,9 +113,8 @@ def test_over_fetching_only_happens_when_rows_are_sentences():
 
 
 def test_a_text_pool_smaller_than_one_memory_is_refused():
-    """`DirectPositionAgent(near_slots=...)` reserves places for whatever is physically
-    closest, which it can only do if search hands over more than it shows -- so the pool
-    size is a constructor argument, and a pool of nothing is a caller mistake."""
+    """The pool size is a constructor argument so a k sweep does not have to reach into
+    `text_retriever.search_kwargs`, which is what the reverted rerank experiment did."""
     try:
         MilvusMemory(db_collection_name="never_built", text_k=0)
     except ValueError:
@@ -100,48 +136,12 @@ def test_text_search_returns_as_many_memories_as_the_pool_allows():
 def test_caption_mode_returns_search_hits_untouched():
     """Two memories may legitimately share a caption, so caption mode must not dedupe."""
     docs = [FakeDoc("a hallway"), FakeDoc("a hallway")]
-    assert make_memory("caption").distinct_memories(docs, POSITION_TIME_K) == docs
+    assert make_memory("caption")._distinct(docs, POSITION_TIME_K) == docs
 
 
 def test_sentence_mode_deduplicates_search_hits():
     docs = [FakeDoc("a hallway"), FakeDoc("a hallway")]
-    assert len(make_memory("sentence").distinct_memories(docs, POSITION_TIME_K)) == 1
-
-
-class FakeDoc:
-    def __init__(self, caption, time=0.0):
-        self.page_content = caption
-        self.metadata = {"time": [time, 0.0], "position": [0.0, 0.0, 0.0]}
-
-
-class FakeRetriever:
-    def __init__(self, docs):
-        self.docs = docs
-        self.asked = None
-
-    def invoke(self, query):
-        self.asked = query
-        return self.docs
-
-
-class FakeEmbedder:
-    """Returns a distinct vector per text so rows can be told apart."""
-
-    def embed_documents(self, texts):
-        return [[float(len(text))] for text in texts]
-
-    def embed_query(self, text):
-        return [float(len(text))]
-
-
-def make_memory(index_unit, text_k=TEXT_SEARCH_K):
-    """Build the memory without __init__, which would connect to Milvus."""
-    memory = MilvusMemory.__new__(MilvusMemory)
-    memory.index_unit = index_unit
-    memory.text_k = text_k
-    memory.embedder = FakeEmbedder()
-    memory.time_offset = 0.0
-    return memory
+    assert len(make_memory("sentence")._distinct(docs, POSITION_TIME_K)) == 1
 
 
 ITEM = {"caption": CAPTION, "position": [1.0, 2.0, 3.0], "theta": 0.5, "time": [10.0, 0.0]}

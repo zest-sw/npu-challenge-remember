@@ -42,11 +42,12 @@ import json
 import os
 import re
 import sys
-import time
-import urllib.error
-import urllib.request
 
-URL = os.environ.get("TT_LLM_BASE_URL", "http://localhost:8100/v1") + "/chat/completions"
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from remembr.scripts.probe_query_generation import post_choice  # noqa: E402
+
+BASE_URL = os.environ.get("TT_LLM_BASE_URL", "http://localhost:8100/v1")
 MODEL = os.environ.get("TT_LLM_MODEL", "Llama-3.1-8B-Instruct")
 
 NEAREST, NAMED = "nearest", "named"
@@ -142,31 +143,21 @@ VARIANTS = {"two_class": two_class, "yes_no": yes_no,
 
 REGEX = re.compile(r"\b(nearest|closest)\b", re.I)
 calls = 0
+served = set()
 
 
 def classify(system, question, digits):
     """digits: {NEAREST: int, NAMED: int}. Returns the class the model chose."""
     global calls
-    payload = {
-        "model": MODEL,
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": question}],
-        "temperature": 0,
-        # One digit, so the grammar leaves nothing else generable and nothing to trim.
-        "max_tokens": 4,
-        "response_format": {"type": "json_schema", "json_schema": {
-            "name": "question_kind",
-            "schema": {"type": "integer", "enum": sorted(digits.values())}}},
-    }
-    request = urllib.request.Request(
-        URL, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     calls += 1
-    try:
-        with urllib.request.urlopen(request, timeout=120) as reply:
-            answer = json.loads(json.loads(reply.read())["choices"][0]["message"]["content"])
-    except urllib.error.HTTPError as error:
-        print(f"    HTTP {error.code}: {error.read().decode()[:160]}", file=sys.stderr)
-        raise
+    # One digit, so the grammar leaves nothing else generable and nothing to trim.
+    choice, model = post_choice(
+        BASE_URL,
+        [{"role": "system", "content": system}, {"role": "user", "content": question}],
+        max_tokens=4, model=MODEL,
+        schema={"type": "integer", "enum": sorted(digits.values())})
+    served.add(model)
+    answer = json.loads(choice["message"]["content"])
     return next(kind for kind, digit in digits.items() if digit == answer), answer
 
 
@@ -213,7 +204,7 @@ def main():
             print(f"{name:14s}{label:>8}{hits[NEAREST]:8d}/{totals[NEAREST]}"
                   f"{hits[NAMED]:8d}/{totals[NAMED]}"
                   f"{sum(hits.values()):6d}/{len(CASES)}   {spread}")
-    print(f"\n콜 {calls}회")
+    print(f"\n콜 {calls}회   서버가 서빙한 모델: {sorted(served)}")
 
 
 if __name__ == "__main__":
