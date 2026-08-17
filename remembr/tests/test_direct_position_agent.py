@@ -180,7 +180,7 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
     agent = make_agent("2")
     agent.text_query_mode = "multi"
     agent.query_chain = FakeChain(json.dumps({
-        "target_phrase": "police call pole",
+        "target_phrase": "call pole",
         "aliases": ["emergency call box"],
     }))
 
@@ -188,7 +188,7 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
 
     assert agent.memory.searched == [[
         ASKED,
-        "police call pole, emergency call box",
+        "call pole, emergency call box",
     ]]
     assert agent.query_chain.calls == 1
     assert agent.chain.calls == 1
@@ -237,11 +237,19 @@ def test_combined_queries_rejects_a_target_not_copied_from_the_question():
         })
 
 
+def test_combined_queries_rejects_a_target_longer_than_two_words():
+    with pytest.raises(ValueError, match="exceeds 2 words"):
+        combined_queries("Where is the statue in front of Gates Building?", {
+            "target_phrase": "statue in front",
+            "aliases": ["monument"],
+        })
+
+
 def test_multi_query_caches_repeated_asked_lines():
     agent = make_agent("1")
     agent.text_query_mode = "multi"
     agent.query_chain = FakeChain(json.dumps({
-        "target_phrase": "police call pole",
+        "target_phrase": "call pole",
         "aliases": ["emergency call box"],
     }))
 
@@ -250,7 +258,7 @@ def test_multi_query_caches_repeated_asked_lines():
 
     assert agent.query_chain.calls == 1
     assert agent.memory.searched == [[
-        ASKED, "police call pole, emergency call box"
+        ASKED, "call pole, emergency call box"
     ]] * 2
 
 
