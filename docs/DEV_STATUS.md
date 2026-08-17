@@ -162,12 +162,12 @@ _최종 수정: 2026-07-21 · branch `main`_
   두 설정의 실제 선택-oracle 차이는 약 14.45m로 같아, v2의 열세는 후보 판단보다 검색 recall
   차이였다. 실제 정답 frame 순위가 좌석은 3→16위, recycling container는 11→92위로 떨어진 반면,
   police call pole은 26→4위, elevator는 30→1위로 개선됐다.
-- 이 결과를 바탕으로 다음 prompt에서는 `safety fixtures`, `sculptures`, `bins`, `elevators`, `racks`
-  같은 평가 물체의 하드코딩을 제거했다. 대신 글자·색·형태·기능·상태로 구별되는 보조 물체를 최대
-  3개 포함하고, 작거나 화면 가장자리에 있어도 기록하며 각 물체에는 종류와 특징 하나만 붙이게 했다.
-  `avoid repetition`은 인접 frame 사이의 반복을 해결하지 못하면서 한 caption 안의 유용한 관계까지
-  줄일 수 있어 사용하지 않았다. 이 변경의 실제 NPU caption/eval은 아직 수행 전이며, v2 규칙은
-  소스의 인접 주석과 기존 산출물로 보존한다.
+- 이 결과를 바탕으로 v4 prompt에서는 `safety fixtures`, `sculptures`, `bins`, `elevators`, `racks`
+  같은 평가 물체 하드코딩 없이, 글자·조작부·색·형태·상태처럼 식별 단서가 있는 작은/가장자리
+  물체와 물체별 넓은 시각적 종류·특징 하나를 요구한다. 최대 5개의 짧은 문장으로 제한하고,
+  `avoid repetition`은 한 caption 안의 유용한 관계까지 줄일 수 있어 사용하지 않았다. v2·v3
+  규칙은 소스의 인접 주석과 기존 산출물로 보존한다. 오프라인 prompt 계약 검증을 통과했으며,
+  실제 V4 NPU caption/eval은 아직 수행 전이다.
 
 ### 2026-08-12 — VLM caption 해상도 실험과 프레임 샘플링 버그 수정
 

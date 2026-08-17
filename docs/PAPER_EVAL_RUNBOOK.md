@@ -156,11 +156,12 @@ python scripts/preprocess_captions.py \
   segment 길이에 따라 의도보다 많은 frame을 넣을 수 있었다.
 - `--caption_style paper`의 caption 프롬프트는 논문 원문을 그대로 사용하며, VILA video 문구만 중립화한다(`<video>` 제거,
   "the few seconds of the video" → "the image"). 나머지("Think step by step", focus list)는 논문과 정확히 동일하다.
-- `--caption_style terse`는 검색 index용 4~5문장, 200단어 이하 prompt다. 첫 문장에 가장 구별되는
-  물체·랜드마크를 두고, 글자·색·형태·기능·상태로 구별되는 보조 물체를 최대 3개까지 물체별 시각
-  특징 하나와 함께 기록한다. 작거나 화면 가장자리에 있는 물체도 대상이다. 특정 평가 물체 종류는
-  prompt에 나열하지 않으며, 보이지 않는 종류나 글자는 추측하지 않는다. 논문 재현용 caption에는
-  쓰지 말고, caption 품질/검색 recall 실험을 따로 할 때만 파일명을 분리해서 사용한다.
+- `--caption_style terse`는 검색 index용 최대 5문장, 200단어 이하 prompt다. 첫 문장에 독립적으로
+  식별하기 좋은 물체·랜드마크를 두고, 글자·조작부·색·형태·상태로 구별되는 보조 물체를 최대
+  3개까지 기록한다. 작거나 화면 가장자리에 있는 물체는 그런 식별 단서가 있을 때 포함하며,
+  각 물체에는 넓은 시각적 종류와 특징 하나를 붙인다. 특정 평가 물체 종류는 prompt에 나열하지
+  않고, 종류가 불확실하면 보이는 단서만 기록한다. 논문 재현용 caption에는 쓰지 말고, caption
+  품질/검색 recall 실험을 따로 할 때만 파일명을 분리해서 사용한다.
 - 검색 특징 우선 prompt의 기존 결과 덮어쓰기를 피하려면 아래처럼 새 `captioner_name`을 쓴다.
   `captioner_name`은 산출물 이름표일 뿐 서버 모델을 바꾸지 않는다.
 
@@ -170,7 +171,7 @@ python scripts/preprocess_captions.py \
     --seq_id 0 --seconds_per_caption 3 \
     --num-video-frames 1 \
     --caption_style terse \
-    --captioner_name qwen3-8b-terse-keyfirstV3-200w-512-1f \
+    --captioner_name qwen3-8b-terse-keyfirstV4-200w-512-1f \
     --data_path /home/user/coda_raw/coda_data \
     --out_path data/captions/0/captions
   ```
@@ -178,7 +179,9 @@ python scripts/preprocess_captions.py \
   연결하고 사람이 없으면 없다고 쓰게 했다. `v2`
   (`qwen3-8b-terse-keyfirstV2-200w-512-1f`)는 글자가 실제로 읽힐 때만 장소 이름을 쓰고,
   없는 물체를 나열하지 않아 negative keyword가 검색되는 문제를 줄였다. `v3`는 v2의 구체적인
-  우선 물체 목록을 없애고, 종류와 무관하게 구별 가능한 보조 물체를 제한된 수만 기록한다.
+  우선 물체 목록을 없애고, 종류와 무관하게 구별 가능한 보조 물체를 제한된 수만 기록한다. `v4`는
+  식별 단서가 있는 작은/가장자리 물체와 물체별 넓은 시각적 종류·특징 하나를 명시하되, 평가 물체
+  이름을 하드코딩하지 않는다. v3 규칙은 `preprocess_captions.py`의 인접 주석으로 보존한다.
 - **문장 잘림 방지**: captioner는 `max_gen_len=256`을 보낸다(기본값, `TT_VLM_MAX_GEN_LEN`으로 조정 가능).
   서버 기본값인 128이면 장황한 caption이 중간에 잘린다.
 - **Checkpoint/resume**: 모든 caption 하나하나가 즉시

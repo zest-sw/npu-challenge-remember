@@ -17,15 +17,16 @@ def test_terse_style_keeps_paper_reproduction_separate():
 
 
 def test_terse_style_puts_searchable_evidence_first_without_guessing():
-    assert "Lead with a distinctive object or landmark" in TERSE_QUERY
-    assert "Add up to three visible objects" in TERSE_QUERY
-    assert "even small or off-center" in TERSE_QUERY
-    assert "text, color, shape, function, or state" in TERSE_QUERY
-    assert "Name each type and one feature" in TERSE_QUERY
+    assert "At most five short sentences" in TERSE_QUERY
+    assert "Lead with the most identifiable object or landmark" in TERSE_QUERY
+    assert "Add up to three others" in TERSE_QUERY
+    assert "including a small or edge object with text, controls" in TERSE_QUERY
+    assert "distinctive color, shape, or state" in TERSE_QUERY
+    assert "broad visible type and distinguishing feature" in TERSE_QUERY
     assert "avoid repetition" not in TERSE_QUERY
     assert "use place names only when those words are readable" in TERSE_QUERY
-    assert "If its type is uncertain" in TERSE_QUERY
-    assert "Do not guess or invent names or text" in TERSE_QUERY
+    assert "If uncertain" in TERSE_QUERY
+    assert "readable text without guessing" in TERSE_QUERY
     assert "Do not list other absent objects" in TERSE_QUERY
     assert "or say none are visible" in TERSE_QUERY
     assert "or say there are none" not in TERSE_QUERY

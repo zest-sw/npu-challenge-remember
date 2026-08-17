@@ -34,12 +34,17 @@ TERSE_QUERY = (
     "<location and nearby objects>. <people and actions>.\"\n"
     "\n"
     "Rules:\n"
-    "- Four or five sentences, under 200 words.\n"
+    "- At most five short sentences, under 200 words.\n"
+    # Third key-first run (`qwen3-8b-terse-keyfirstV3-200w-512-1f`):
+    # "- Four or five sentences, under 200 words.\n"
     # Second key-first run (`qwen3-8b-terse-keyfirstV2-200w-512-1f`):
     # "- Four or five plain sentences. Under 200 words total.\n"
-    "- Lead with a distinctive object or landmark. Add up to three visible objects, "
-    "even small or off-center, distinguished by text, color, shape, function, "
-    "or state. Name each type and one feature.\n"
+    "- Lead with the most identifiable object or landmark. Add up to three others, "
+    "including a small or edge object with text, controls, or distinctive color, "
+    "shape, or state.\n"
+    # Third key-first run (`qwen3-8b-terse-keyfirstV3-200w-512-1f`):
+    # "- Lead with the most distinctive object or landmark. Add up to three visible objects, "
+    # "distinguished by text, color, shape, function, or state.\n"
     # Second key-first run (`qwen3-8b-terse-keyfirstV2-200w-512-1f`):
     # "- Start with the most distinctive visible object or landmark and its type, color, "
     # "count, or state. Prefer readable text, safety fixtures, sculptures, bins, elevators, "
@@ -47,8 +52,11 @@ TERSE_QUERY = (
     "- Copy readable words exactly; use place names only when those words are readable.\n"
     # First key-first run (`qwen3-8b-terse-keyfirst-200w-512-1f`):
     # "- Copy readable words exactly and relate the object to any visible named place.\n"
-    "- If its type is uncertain, describe shape, color, markings, and text. Do not guess "
-    "or invent names or text.\n"
+    "- Give each a broad visible type and distinguishing feature. If uncertain, describe "
+    "shape, parts, color, markings, or readable text without guessing.\n"
+    # Third key-first run (`qwen3-8b-terse-keyfirstV3-200w-512-1f`):
+    # "- If its type is uncertain, describe shape, color, markings, and text. Do not guess "
+    # "or invent names or text.\n"
     "- Describe people and actions, or say none are visible. Do not list other absent objects.\n"
     # First key-first run (`qwen3-8b-terse-keyfirst-200w-512-1f`):
     # "- Say how many people and what they are doing, or say there are none.\n"
