@@ -272,6 +272,32 @@ python scripts/eval.py \
   `terse-200words`에서는 평균이 21.57→22.73m로 악화됐으므로, 문장 청킹 자체를 일반적인 개선으로
   간주하지 말고 caption style별 end-to-end 결과를 따로 본다.
 
+**Multi-query 검색 — 원문을 보존하면서 시각 어휘 불일치 보완:**
+
+위 명령에 다음 옵션을 추가한다.
+
+```bash
+  --text_query_mode multi
+```
+
+- 기본값 `direct`는 질문 마지막 줄 하나만 검색하므로 기존 결과가 바뀌지 않는다. `multi`는 8B가
+  `target_query`(대상과 일반적인 시각 동의어)와 `visual_query`(캡션처럼 쓴 한 문장)를 JSON으로
+  한 번 생성하고, 원문 질문을 포함한 최대 3개 검색 결과를 RRF(reciprocal-rank fusion)로 합친다.
+  원문을 버리지 않으므로 고유 장소명과 질문에 명시된 색·상태·관계가 rewrite에서 빠져도 검색
+  근거가 남는다.
+- 쿼리별 embedding 거리는 서로 직접 비교하지 않고 순위만 융합한다. sentence 모드에서는 쿼리
+  하나 안에서도 같은 parent를 한 표로 세고, 융합 뒤에도 같은 3초 parent pose는 하나만 남긴다.
+  최종 후보 수는 `--retrieval_k` 그대로이므로 selector prompt의 후보 수가 3배가 되지 않는다.
+- 생성 스키마의 두 문자열은 각각 `maxLength=180`이다. 대상 쿼리는 쉼표 단위 중복을 제거하고
+  최대 5개 명칭만 남긴다. 시각 쿼리에 원문·대상 쿼리가 뒷받침하지 않는 내용어가 있으면 그
+  쿼리만 폐기한다. 실제 8B가 질문에 없던 경찰차·소화전·색·위치를 넣은 사례가 있어 프롬프트
+  지시만 믿지 않고 결정론적으로 차단한다. 빈 문자열·원문과 같은 rewrite도 제거하며, JSON 파싱이나
+  생성 요청이 실패하면 해당 질문만 기존 원문 검색으로 폴백한다. Multi-query는 질문당 LLM 호출이
+  하나 늘어나므로 8B 기준 지연도 함께 비교해야 한다.
+- 공유 Milvus에서는 예를 들어 `--db_name eval_v4_sentence_multi_k5`처럼 다른 평가와 겹치지 않는
+  이름을 사용한다. A/B 비교는 selector와 query rewrite를 재현할 수 있도록 `--temperature 0`으로
+  실행한다.
+
 - 결과는 `./out/`로 간다. binary/position/time/duration은 채점되고, text 질문은 건너뛴다
   (원본 코드 동작). seq0의 경우 30개 중 text 질문 5개가 제외되어 **25개 질문이 채점된다**.
 - latency 필드도 함께 저장된다. 최상위 `eval_total_latency_s`는 전체 eval 실행 시간이고, 각 response의

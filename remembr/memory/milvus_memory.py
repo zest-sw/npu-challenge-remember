@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 import numpy as np
 
 from remembr.memory.memory import Memory, MemoryItem
+from remembr.memory.multi_query import reciprocal_rank_fusion
 from remembr.memory.sentence_chunking import dedupe_parent_documents
 from remembr.utils import trace
 
@@ -306,6 +307,39 @@ class MilvusMemory(Memory):
 
         """Look up things online."""
         return docs
+
+    def search_by_text_multi(self, queries: list[str]) -> str:
+        """Search independent query views and fuse them into the usual final k.
+
+        Embedding distances from different queries do not share a useful absolute
+        scale, so this uses rank fusion rather than comparing raw distances.  Query
+        strings are de-duplicated in order: an expansion identical to the original
+        must not give that wording an extra vote.
+        """
+        normalized = []
+        seen = set()
+        for query in queries:
+            query = " ".join((query or "").split())
+            if not query or query in seen:
+                continue
+            normalized.append(query)
+            seen.add(query)
+        if not normalized:
+            self.working_memory = []
+            return ""
+
+        self._flush_if_needed()
+        rankings = [self.text_retriever.invoke(query) for query in normalized]
+        docs = reciprocal_rank_fusion(
+            rankings,
+            self.text_search_k,
+            dedupe_text_parents=self.dedupe_text_parents,
+        )
+        self._trace_hits("text-multi", normalized, docs)
+        # Multi-query is a complete retrieval round.  Replace rather than append so an
+        # eval-level retry cannot duplicate the same candidates in the selector prompt.
+        self.working_memory = docs
+        return self.memory_to_string(docs)
     
 
     ### Doc formatting for the last LLM
@@ -383,4 +417,3 @@ def similarity_search_with_score_by_vector(
             ret.append(pair)
 
         return [doc for doc, _ in ret]
-

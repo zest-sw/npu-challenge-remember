@@ -1,9 +1,11 @@
-"""Question -> vector search with the question itself -> which memory answers it.
+"""Question -> vector search -> which memory answers it.
 
-No query-generation call, no answer-type call, one LLM call per question. The model
-answers with a memory's *number*, not a coordinate, and this module reads the coordinate
-off that memory. A position-only probe -- every question gets a coordinate, and
-non-position questions are knowingly wrong.
+The default path searches with the question itself and makes one LLM selection call.
+The optional multi-query path first asks the LLM for two complementary retrieval views,
+then fuses those with the original question.  In both paths the selector answers with a
+memory's *number*, not a coordinate, and this module reads the coordinate off that
+memory. A position-only probe -- every question gets a coordinate, and non-position
+questions are knowingly wrong.
 
 No retries. Greedy decoding repeats itself byte-for-byte, so a second try buys
 nothing; a parse failure raises and eval's own attempt cap records it.
@@ -21,6 +23,93 @@ from remembr.utils import trace
 # Cheap because the answer is one token, and short because the grammar cannot open with
 # whitespace the way an object's can.
 ANSWER_MAX_TOKENS = 8
+QUERY_MAX_TOKENS = 128
+QUERY_MAX_LENGTH = 180
+TARGET_PHRASE_LIMIT = 5
+_QUERY_WORD = re.compile(r"[A-Za-z0-9]+")
+_VISUAL_GLUE_WORDS = {
+    "a", "an", "and", "are", "at", "be", "beside", "by", "in", "is", "it",
+    "located", "near", "of", "on", "seen", "stand", "standing", "stands", "the",
+    "there", "to", "visible", "with",
+}
+
+QUERY_EXPANSION_PROMPT = (
+    "Rewrite a question for vector retrieval against captions written from images. "
+    "Return two complementary English queries. target_query is a compact retrieval "
+    "phrase: name the requested target, then add two to four generic names that an image "
+    "captioner might use for the same or visually confusable object category. Preserve "
+    "every color, readable text, state, and spatial relation explicitly in the question. "
+    "visual_query is one caption-style sentence using those names but only facts stated "
+    "in the question. Apart from generic target names, every factual word must be "
+    "supported by the question; add no size, material, shape, label, count, attachment, "
+    "or scene setting. Omit the robot's current time and position and requests such as "
+    "where, find, closest, or nearest."
+)
+
+
+def query_expansion_schema() -> dict:
+    """Bound both generated strings so constrained decoding cannot run away."""
+    query_string = {"type": "string", "maxLength": QUERY_MAX_LENGTH}
+    return {
+        "type": "object",
+        "properties": {
+            "target_query": query_string,
+            "visual_query": query_string,
+        },
+        "required": ["target_query", "visual_query"],
+        "additionalProperties": False,
+    }
+
+
+def _compact_target_query(query: str) -> str:
+    """Keep at most five distinct comma-separated target names."""
+    phrases = []
+    seen = set()
+    for phrase in re.split(r"[,;]", query):
+        phrase = " ".join(phrase.split()).strip('"\' .')
+        canonical = re.sub(r"^(?:a|an|the)\s+", "", phrase, flags=re.IGNORECASE).lower()
+        words = {word.lower() for word in _QUERY_WORD.findall(canonical)}
+        if not canonical or not (words - _VISUAL_GLUE_WORDS) or canonical in seen:
+            continue
+        phrases.append(phrase)
+        seen.add(canonical)
+        if len(phrases) >= TARGET_PHRASE_LIMIT:
+            break
+    return ", ".join(phrases)
+
+
+def _visual_query_is_grounded(original: str, target_query: str, visual_query: str) -> bool:
+    """Reject a hypothetical caption that adds unsupported content words.
+
+    The 8B followed the JSON grammar but once invented a police car, hydrant, colors,
+    and spatial relations absent from the question.  Words from the original, generated
+    target aliases, and a small grammatical glue vocabulary are the only safe inputs.
+    """
+    supported = {
+        word.lower() for word in _QUERY_WORD.findall(f"{original} {target_query}")
+    } | _VISUAL_GLUE_WORDS
+    return all(word.lower() in supported for word in _QUERY_WORD.findall(visual_query))
+
+
+def combined_queries(original: str, expansion: dict) -> list[str]:
+    """Keep the original, compact aliases, and only a grounded visual rewrite."""
+    target_query = expansion.get("target_query", "")
+    visual_query = expansion.get("visual_query", "")
+    if not isinstance(target_query, str) or not isinstance(visual_query, str):
+        raise ValueError(f"generated queries are not strings: {expansion!r}")
+    target_query = _compact_target_query(target_query)
+    if not _visual_query_is_grounded(original, target_query, visual_query):
+        visual_query = ""
+
+    queries = [original, target_query, visual_query]
+    normalized = []
+    seen = set()
+    for query in queries:
+        query = " ".join(query.split()).rstrip(".").strip().strip('"\'').strip()
+        if query and query not in seen:
+            normalized.append(query)
+            seen.add(query)
+    return normalized
 
 
 def memory_index_schema(count: int) -> dict:
@@ -128,7 +217,8 @@ def memory_index_output(index, memories) -> AgentOutput:
 
 
 class DirectPositionAgent(Agent):
-    def __init__(self, llm_type="tt/Llama-3.1-8B-Instruct", num_ctx=8192, temperature=0):
+    def __init__(self, llm_type="tt/Llama-3.1-8B-Instruct", num_ctx=8192, temperature=0,
+                 text_query_mode="direct"):
         # num_ctx: accepted so eval.py can construct every agent the same way; the
         # tt server owns its own context budget, so it is unused here.
         if not llm_type.startswith("tt/"):
@@ -139,6 +229,9 @@ class DirectPositionAgent(Agent):
         from langchain_openai import ChatOpenAI  # lazy: optional dep
 
         self.llm_type = llm_type
+        if text_query_mode not in {"direct", "multi"}:
+            raise ValueError(f"unknown text_query_mode: {text_query_mode!r}")
+        self.text_query_mode = text_query_mode
         # The grammar is bound per call, not here: it enumerates the memory numbers on
         # offer, and how many came back is only known once the search has run.
         self.chain = ChatOpenAI(
@@ -148,6 +241,15 @@ class DirectPositionAgent(Agent):
             temperature=temperature,
             max_tokens=ANSWER_MAX_TOKENS,
         )
+        self.query_chain = None
+        if text_query_mode == "multi":
+            self.query_chain = ChatOpenAI(
+                model=llm_type[len("tt/"):],
+                base_url=os.environ.get("TT_LLM_BASE_URL", "http://localhost:8100/v1"),
+                api_key="local",
+                temperature=temperature,
+                max_tokens=QUERY_MAX_TOKENS,
+            )
 
     def set_memory(self, memory: Memory):
         self.memory = memory
@@ -213,13 +315,42 @@ class DirectPositionAgent(Agent):
         return (f"{system_prompt(here is not None)}\n\n{situation}"
                 f"{self.numbered_memories(memories, here)}\n\nQuestion: {asked}")
 
+    def search_queries_for(self, asked: str) -> list[str]:
+        """Return original + two rewrites, falling back to original on generation errors.
+
+        The original is never replaced: it preserves proper names and constraints that
+        a rewrite may accidentally drop.  A malformed expansion should degrade to the
+        established direct-search path rather than make the question unanswered.
+        """
+        if self.text_query_mode == "direct":
+            return [asked]
+        try:
+            reply = self.query_chain.bind(response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "visual_memory_queries",
+                    "schema": query_expansion_schema(),
+                },
+            }).invoke(f"{QUERY_EXPANSION_PROMPT}\n\nQuestion: {asked}")
+            queries = combined_queries(asked, json.loads(reply.content))
+            if len(queries) == 1:
+                trace.warn("multi-query가 원문과 다른 검색어를 만들지 못해 원문만 사용한다")
+            return queries
+        except Exception as error:  # noqa: BLE001 - retrieval has a safe direct fallback
+            trace.warn(f"multi-query 생성 실패, 원문 검색으로 대체: {error!r}")
+            return [asked]
+
     def query(self, question: str) -> AgentOutput:
-        # The asked line is the search query -- no query-generation call. The preamble
-        # is dropped here rather than hoisted: it names the robot's own position and
-        # time, which the retriever has no use for and which only dilute the embedding.
+        # The asked line is always one search query and is also the input to optional
+        # expansion. The preamble is dropped: it names the robot's own position and time,
+        # which the retriever has no use for and which only dilute the embedding.
         _, asked = split_question(question)
-        trace.step("검색어", repr(asked))
-        self.memory.search_by_text(asked)
+        queries = self.search_queries_for(asked)
+        trace.step("검색어", repr(queries if self.text_query_mode == "multi" else asked))
+        if self.text_query_mode == "multi":
+            self.memory.search_by_text_multi(queries)
+        else:
+            self.memory.search_by_text(asked)
         memories = self.memory.get_working_memory()
         if not memories:
             # Nothing to name, so there is no answer to give. Raising lets eval record an

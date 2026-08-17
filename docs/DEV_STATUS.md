@@ -98,6 +98,30 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-17 — 원문+대상+시각 캡션 multi-query 검색
+
+- 질문 원문 하나로만 검색하면 캡션과 질문의 명칭이 어긋날 때 후보를 놓쳤다. 실제 V4 sentence
+  index에서 Gates 조형물 정답은 원문 질문 rank 30, 경찰 호출 폴 정답은 rank 17이었지만, 대상의
+  일반적 시각 동의어와 캡션 형태 문장으로 검색하면 각각 rank 5와 rank 3까지 올라오는 것을 먼저
+  확인했다. 단, 대상 명사만 쓰면 다른 조형물·폴이 섞이므로 원문을 대체하지 않고 세 관점을 함께
+  쓰는 방식으로 구현했다.
+- `eval.py --text_query_mode multi`를 추가했다. `direct` 기본값과 기존 결과는 유지한다. Multi 모드는
+  grammar-constrained JSON으로 `target_query`와 `visual_query`를 한 번 생성하고 원문까지 최대 3개
+  검색 순위를 RRF로 융합한다. 서로 다른 쿼리의 embedding distance를 직접 비교하지 않으며 최종
+  후보 수는 기존 `retrieval_k`다. sentence index에서는 쿼리 내부와 최종 결과 모두 parent-caption
+  기준으로 중복 제거해 한 pose가 여러 슬롯이나 여러 표를 차지하지 못하게 했다.
+- 생성 문자열 두 개 모두 `maxLength=180`을 적용했고, 대상 명칭은 중복 제거 후 최대 5개로 제한한다.
+  실보드 8B가 시각 쿼리에 질문에 없던 `blue police car`, `red fire hydrant`와 위치 관계를 지어낸
+  사례가 있어, 원문·대상 alias가 뒷받침하지 않는 내용어가 하나라도 있으면 시각 쿼리를 폐기하는
+  결정론적 필터를 추가했다. 빈/중복 rewrite를 제거하고 생성·파싱 실패는 원문 검색으로 폴백한다.
+  검색 latency 계측도 `search_by_text_multi`를 포함하며, eval 재시도 때 후보가 중복 누적되지 않게
+  multi-query 한 라운드가 working memory를 교체한다.
+- 검증: `py_compile` 통과, `pytest -q remembr/tests` **80 passed**. `/health`에서 `ready=true`,
+  `mode=llm-8b`를 확인하고 실제 grammar-constrained 요청으로 Gates 조형물과 노란 경찰 호출 폴의
+  쿼리 생성을 끝까지 실행했다. 최종 안전 필터를 거친 호출 폴 결과는 원문과
+  `police call pole, yellow pole, traffic pole, street pole, pole`만 남아, 생성된 경찰차·소화전
+  환각 문장이 검색에 들어가지 않음을 확인했다. 12문제 end-to-end A/B 점수는 별도 평가가 필요하다.
+
 ### 2026-08-16 — 문장 multivector 검색과 parent-caption dedupe
 
 - 3초 구간의 전체 caption 벡터 하나가 여러 물체·배경에 희석되는지 확인하기 위해, 기존

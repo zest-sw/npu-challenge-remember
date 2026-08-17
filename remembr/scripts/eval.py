@@ -132,7 +132,9 @@ MAX_ATTEMPTS = 5
 
 # Helper function for wrapping memory search methods and appending per-call latency records.
 def instrument_memory_search(memory, search_events):
-    for method_name in ("search_by_text", "search_by_position", "search_by_time"):
+    for method_name in (
+        "search_by_text", "search_by_text_multi", "search_by_position", "search_by_time"
+    ):
         if not hasattr(memory, method_name):
             continue
 
@@ -406,7 +408,8 @@ def main(args):
         # wrong. See remembr/agents/direct_position_agent.py.
         base_llm = args.model.split('+')[-1]
         agent = DirectPositionAgent(llm_type=base_llm, num_ctx=args.num_ctx,
-                                    temperature=args.temperature)
+                                    temperature=args.temperature,
+                                    text_query_mode=getattr(args, "text_query_mode", "direct"))
         use_milvus = True
 
     elif 'optimal' in args.model:
@@ -556,6 +559,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--retrieval_k", type=int, default=None,
         help="number of distinct parent captions returned (default: caption=5, sentence=7)",
+    )
+    parser.add_argument(
+        "--text_query_mode", choices=["direct", "multi"], default="direct",
+        help="search with the asked question only, or fuse it with two LLM rewrites",
     )
     parser.add_argument("--data_dir", type=str, default="./data/")
     parser.add_argument("--coda_dir", type=str, default="./coda_data/")

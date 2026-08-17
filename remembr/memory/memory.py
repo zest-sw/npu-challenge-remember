@@ -38,6 +38,8 @@ class Memory:
     def search_by_text(self, query: str) -> list[MemoryItem]:
         raise NotImplementedError
 
-    def memory_to_string(self, memory_list: list[MemoryItem]) -> str:
+    def search_by_text_multi(self, queries: list[str]) -> list[MemoryItem]:
         raise NotImplementedError
 
+    def memory_to_string(self, memory_list: list[MemoryItem]) -> str:
+        raise NotImplementedError

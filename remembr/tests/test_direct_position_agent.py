@@ -4,6 +4,7 @@ No NPU, no Milvus, no server:
 
     python remembr/tests/test_direct_position_agent.py
 """
+import json
 import os
 import sys
 
@@ -11,8 +12,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from remembr.agents.agent import AgentOutput  # noqa: E402
 from remembr.agents.direct_position_agent import (  # noqa: E402
+    combined_queries,
     memory_index_output,
     memory_index_schema,
+    query_expansion_schema,
 )
 
 
@@ -112,6 +115,10 @@ class FakeMemory:
         self.searched.append(query)
         return []
 
+    def search_by_text_multi(self, queries):
+        self.searched.append(list(queries))
+        return []
+
     def get_working_memory(self):
         return self.memories
 
@@ -128,7 +135,9 @@ def make_agent(reply, memories=MEMORIES):
     """Build the agent without __init__ (which would build an LLM client)."""
     agent = DirectPositionAgent.__new__(DirectPositionAgent)
     agent.llm_type = "tt/fake"
+    agent.text_query_mode = "direct"
     agent.chain = FakeChain(reply)
+    agent.query_chain = None
     agent.memory = FakeMemory(memories)
     return agent
 
@@ -162,6 +171,75 @@ def test_query_searches_with_the_asked_line_only_and_calls_once():
     assert agent.chain.calls == 1, f"expected 1 call, made {agent.chain.calls}"
     # Memory 2's coordinate, looked up here rather than typed by the model.
     assert out.position == [-4.0, 5.5, -6.0]
+
+
+def test_multi_query_keeps_original_and_searches_fused_candidates():
+    agent = make_agent("2")
+    agent.text_query_mode = "multi"
+    agent.query_chain = FakeChain(json.dumps({
+        "target_query": "yellow emergency call pole help station post",
+        "visual_query": "A yellow emergency call post is visible.",
+    }))
+
+    out = agent.query(PREAMBLE_QUESTION)
+
+    assert agent.memory.searched == [[
+        ASKED,
+        "yellow emergency call pole help station post",
+        "A yellow emergency call post is visible",
+    ]]
+    assert agent.query_chain.calls == 1
+    assert agent.chain.calls == 1
+    assert out.position == [-4.0, 5.5, -6.0]
+
+
+def test_multi_query_schema_bounds_every_generated_string():
+    schema = query_expansion_schema()
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {"target_query", "visual_query"}
+    for field in schema["required"]:
+        assert schema["properties"][field]["type"] == "string"
+        assert schema["properties"][field]["maxLength"] == 180
+
+
+def test_combined_queries_removes_packaging_blanks_and_duplicates():
+    assert combined_queries("Where is the bench?", {
+        "target_query": '  "empty bench". ',
+        "visual_query": "Where is the bench?",
+    }) == ["Where is the bench?", "empty bench"]
+
+
+def test_combined_queries_compacts_aliases_and_rejects_hallucinated_visual_facts():
+    queries = combined_queries("Where is the yellow police call pole?", {
+        "target_query": (
+            "police call pole, yellow pole, traffic pole, street pole, pole, "
+            "the pole, extra sixth name"
+        ),
+        "visual_query": "A blue police car is beside the yellow police call pole.",
+    })
+    assert queries == [
+        "Where is the yellow police call pole?",
+        "police call pole, yellow pole, traffic pole, street pole, pole",
+    ]
+
+
+def test_combined_queries_keeps_a_visual_rewrite_grounded_in_question_and_aliases():
+    queries = combined_queries("Where is the statue in front of Gates Building?", {
+        "target_query": "statue, monument, sculpture, public art",
+        "visual_query": "The sculpture is in front of Gates Building.",
+    })
+    assert queries[-1] == "The sculpture is in front of Gates Building"
+
+
+def test_multi_query_generation_failure_falls_back_to_original_search():
+    agent = make_agent("1")
+    agent.text_query_mode = "multi"
+    agent.query_chain = FakeChain("not JSON")
+
+    agent.query(PREAMBLE_QUESTION)
+
+    assert agent.memory.searched == [[ASKED]]
+    assert agent.query_chain.calls == 1
 
 
 def test_the_grammar_offers_only_the_memories_that_came_back():
