@@ -281,14 +281,14 @@ python scripts/eval.py \
 ```
 
 - 기본값 `direct`는 질문 마지막 줄 하나만 검색하므로 기존 결과가 바뀌지 않는다. `multi`는 8B가
-  질문에서 그대로 복사한 `target_phrase` 하나와 그 완전한 명사구의 `aliases` 최대 3개를 JSON으로
-  생성한다. 검색어는 정확히 두 관점이다: ① 원문 질문, ② `target_phrase, alias1, alias2, alias3`로
+  질문에서 그대로 복사한 `target_phrase` 하나와 그 완전한 명사구의 `aliases` 1~2개를 JSON으로
+  생성한다. 검색어는 정확히 두 관점이다: ① 원문 질문, ② `target_phrase, alias1, alias2`로
   만든 짧은 핵심 키워드 묶음. 각 alias를 긴 질문에 다시 끼워 넣지 않는다. 두 검색 순위는
   RRF(reciprocal-rank fusion)에서 각각 한 표만 가진다.
 - 쿼리별 embedding 거리는 서로 직접 비교하지 않고 순위만 융합한다. sentence 모드에서는 쿼리
   하나 안에서도 같은 parent를 한 표로 세고, 융합 뒤에도 같은 3초 parent pose는 하나만 남긴다.
   최종 후보 수는 `--retrieval_k` 그대로이므로 selector prompt의 후보 수가 3배가 되지 않는다.
-- `target_phrase`는 `maxLength=60`, alias 항목은 각각 `maxLength=40`, 배열은 `maxItems=3`이다.
+- `target_phrase`는 `maxLength=60`, alias 항목은 각각 `maxLength=40`, 배열은 `maxItems=2`다.
   target이 질문에 연속된 원문 그대로 존재하지 않으면 전체 확장을 거부한다. alias는 최대 4단어의
   단일 명사구만 허용하고 중복·쉼표 나열·질문 전체 rewrite를 제거한다. 생성·파싱 실패는 해당
   질문만 기존 원문 검색으로 폴백한다. 같은 asked line이 여러 time window에 반복되면 생성 결과를

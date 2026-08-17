@@ -188,7 +188,7 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
 
     assert agent.memory.searched == [[
         ASKED,
-        "police call pole, emergency call box, help station, call post",
+        "police call pole, emergency call box, help station",
     ]]
     assert agent.query_chain.calls == 1
     assert agent.chain.calls == 1
@@ -203,7 +203,7 @@ def test_multi_query_schema_bounds_every_generated_string():
     assert schema["properties"]["aliases"] == {
         "type": "array",
         "items": {"type": "string", "maxLength": 40},
-        "maxItems": 3,
+        "maxItems": 2,
     }
 
 
@@ -225,7 +225,7 @@ def test_combined_queries_keeps_relation_in_original_and_aliases_in_keywords():
     })
     assert queries == [
         "Where is the statue in front of Gates Building?",
-        "statue, sculpture, monument, public art",
+        "statue, sculpture, monument",
     ]
 
 
@@ -237,11 +237,11 @@ def test_combined_queries_rejects_a_target_not_copied_from_the_question():
         })
 
 
-def test_combined_queries_drops_duplicate_and_non_phrase_aliases():
+def test_combined_queries_drops_bad_aliases_without_reading_past_the_limit():
     assert combined_queries("Where is the marked object?", {
         "target_phrase": "object",
         "aliases": ["object", "item, thing", "item"],
-    }) == ["Where is the marked object?", "object, item"]
+    }) == ["Where is the marked object?", "object"]
 
 
 def test_multi_query_caches_repeated_asked_lines():

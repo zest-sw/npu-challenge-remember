@@ -26,12 +26,12 @@ ANSWER_MAX_TOKENS = 8
 QUERY_MAX_TOKENS = 64
 TARGET_MAX_LENGTH = 60
 ALIAS_MAX_LENGTH = 40
-ALIAS_LIMIT = 3
+ALIAS_LIMIT = 2
 
 QUERY_EXPANSION_PROMPT = (
     "Identify only the smallest complete noun phrase naming the requested visual target. "
     "Copy that target_phrase exactly and contiguously from the question, excluding color, "
-    "state, distance, location, and relation words. Return up to three short aliases that "
+    "state, distance, location, and relation words. Return one or two short aliases that "
     "mean the same complete object category and that an image captioner might use. For a "
     "compound noun, each alias must replace the whole compound. An alias must not be a "
     "component, superclass, related object, visual feature, surrounding object, or an "

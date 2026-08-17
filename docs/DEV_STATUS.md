@@ -98,6 +98,21 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-17 — keyword bundle의 동의어를 최대 2개로 축소
+
+- 원문 질문 1표와 핵심 키워드 묶음 1표 구조는 유지하되, keyword-bundle 평가에서 약한 세 번째
+  alias가 검색 범위를 불필요하게 넓히는 사례를 확인했다. 경찰 호출 폴의 `box`, elevator의
+  `escalators`, 소화전의 `spigot`처럼 완전한 동의어가 아닌 말이 caption embedding을 끌 수 있다.
+- query JSON의 alias 배열을 `maxItems=3`에서 `maxItems=2`로 줄이고 prompt도 1~2개만 요구하도록
+  맞췄다. 후처리도 같은 상수를 사용하므로 서버 grammar를 우회한 입력에서도 세 번째 alias는
+  검색어에 들어가지 않는다. 원문+키워드 두 검색, RRF, 반복 질문 cache, selector 입력은 바뀌지 않는다.
+- 실제 `llm-8b`, temperature 0 검증에서 호출 폴은 `police call pole, payphone`, 소화전은
+  `fire hydrant, hydrant, spigot`으로 target+alias가 최대 3개 항목에 멈췄다. 엘리베이터는 모델이
+  원문에 연속해서 존재하지 않는 `the elevators`를 target으로 내어 검증기가 확장을 거부하고 원문
+  검색으로 안전하게 폴백했다. 생성 제약이 달라지면 모델이 기존 alias 목록을 단순 절단하지 않고
+  새로 고르므로, 개수 축소가 `payphone`/`spigot` 같은 약한 alias의 의미 품질까지 보장하지는 않는다.
+  검증은 `py_compile`과 `pytest -q remembr/tests` **82 passed**까지 완료했다.
+
 ### 2026-08-17 — multi-query의 추가 검색을 핵심 키워드 한 묶음으로 교정
 
 - 핵심 명사구만 치환해도 alias마다 원래 질문 전체를 만들면 거의 같은 긴 질문이 RRF에서 3~4표를
