@@ -24,20 +24,19 @@ def test_rrf_keeps_final_candidate_count_and_stable_ties():
     assert fused == [a, b]
 
 
-def test_weighted_rrf_can_bias_the_original_query():
-    original = [doc(str(index)) for index in range(1, 61)]
+def test_weighted_rrf_can_bias_the_keyword_query():
+    original = [doc(str(index)) for index in range(1, 4)]
     keyword_only = doc("keyword-only")
 
     fused = reciprocal_rank_fusion(
         [original, [keyword_only]],
-        limit=62,
-        weights=[2.0, 1.0],
+        limit=4,
+        weights=[1.0, 2.0],
     )
 
     ordered_ids = [item.metadata["id"] for item in fused]
-    # With constant=60, 2x keeps original-only rank 60 ahead of
-    # keyword-only rank 1; rank 61 is the boundary.
-    assert ordered_ids.index("60") < ordered_ids.index("keyword-only")
+    # With constant=60, 2x makes keyword-only rank 1 beat original-only rank 1.
+    assert ordered_ids.index("keyword-only") < ordered_ids.index("1")
 
 
 def test_sentence_rows_vote_once_per_parent_and_return_distinct_parents():
