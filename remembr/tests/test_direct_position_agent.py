@@ -181,13 +181,14 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
     agent.text_query_mode = "multi"
     agent.query_chain = FakeChain(json.dumps({
         "target_phrase": "police call pole",
+        "aliases": ["emergency call box"],
     }))
 
     out = agent.query(PREAMBLE_QUESTION)
 
     assert agent.memory.searched == [[
         ASKED,
-        "police call pole",
+        "police call pole, emergency call box",
     ]]
     assert agent.query_chain.calls == 1
     assert agent.chain.calls == 1
@@ -197,27 +198,34 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
 def test_multi_query_schema_bounds_every_generated_string():
     schema = query_expansion_schema()
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {"target_phrase"}
+    assert set(schema["required"]) == {"target_phrase", "aliases"}
     assert schema["properties"]["target_phrase"] == {"type": "string", "maxLength": 60}
+    assert schema["properties"]["aliases"] == {
+        "type": "array",
+        "items": {"type": "string", "maxLength": 40},
+        "maxItems": 1,
+    }
 
 
 def test_combined_queries_keeps_one_original_and_one_keyword_bundle():
     queries = combined_queries("Where is the nearest bike rack that is not empty?", {
         "target_phrase": "bike rack",
+        "aliases": ["bicycle rack"],
     })
     assert queries == [
         "Where is the nearest bike rack that is not empty?",
-        "bike rack",
+        "bike rack, bicycle rack",
     ]
 
 
 def test_combined_queries_keeps_relation_in_original_and_uses_target_only():
     queries = combined_queries("Where is the statue in front of Gates Building?", {
         "target_phrase": "statue",
+        "aliases": ["sculpture"],
     })
     assert queries == [
         "Where is the statue in front of Gates Building?",
-        "statue",
+        "statue, sculpture",
     ]
 
 
@@ -234,6 +242,7 @@ def test_multi_query_caches_repeated_asked_lines():
     agent.text_query_mode = "multi"
     agent.query_chain = FakeChain(json.dumps({
         "target_phrase": "police call pole",
+        "aliases": ["emergency call box"],
     }))
 
     agent.query(PREAMBLE_QUESTION)
@@ -241,7 +250,7 @@ def test_multi_query_caches_repeated_asked_lines():
 
     assert agent.query_chain.calls == 1
     assert agent.memory.searched == [[
-        ASKED, "police call pole"
+        ASKED, "police call pole, emergency call box"
     ]] * 2
 
 

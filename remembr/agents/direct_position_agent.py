@@ -1,8 +1,8 @@
 """Question -> vector search -> which memory answers it.
 
 The default path searches with the question itself and makes one LLM selection call.
-The optional multi-query path asks the LLM for one copied target noun phrase, then fuses
-the original-question ranking with one target-only keyword ranking. In both paths
+The optional multi-query path asks the LLM for one copied target noun phrase and one alias,
+then fuses the original-question ranking with one compact keyword ranking. In both paths
 the selector answers with a memory's *number*, not a coordinate, and this module reads
 the coordinate off that memory. A position-only probe -- every question gets a
 coordinate, and non-position questions are knowingly wrong.
@@ -25,32 +25,40 @@ from remembr.utils import trace
 ANSWER_MAX_TOKENS = 8
 QUERY_MAX_TOKENS = 64
 TARGET_MAX_LENGTH = 60
+ALIAS_MAX_LENGTH = 40
+ALIAS_LIMIT = 1
 
 QUERY_EXPANSION_PROMPT = (
     "Identify only the smallest complete noun phrase naming the requested visual target. "
     "Copy that target_phrase exactly and contiguously from the question, excluding color, "
-    "state, distance, location, and relation words. Return only that target_phrase. "
-    "Do not generate synonyms, aliases, surrounding objects, or scene facts."
+    "state, distance, location, and relation words. Return exactly one short alias that "
+    "means the same complete object category. Do not add surrounding objects or scene facts."
 )
 
 
 def query_expansion_schema() -> dict:
-    """Bound the copied target so constrained decoding cannot run away."""
+    """Bound the copied target and one alias so constrained decoding cannot run away."""
     return {
         "type": "object",
         "properties": {
             "target_phrase": {"type": "string", "maxLength": TARGET_MAX_LENGTH},
+            "aliases": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": ALIAS_MAX_LENGTH},
+                "maxItems": ALIAS_LIMIT,
+            },
         },
-        "required": ["target_phrase"],
+        "required": ["target_phrase", "aliases"],
         "additionalProperties": False,
     }
 
 
 def combined_queries(original: str, expansion: dict) -> list[str]:
-    """Return the original question plus one target-only keyword query."""
+    """Return the original question plus one target-and-alias keyword query."""
     target = expansion.get("target_phrase", "")
-    if not isinstance(target, str):
-        raise ValueError(f"generated target has wrong type: {expansion!r}")
+    aliases = expansion.get("aliases", [])
+    if not isinstance(target, str) or not isinstance(aliases, list):
+        raise ValueError(f"generated target or aliases have wrong types: {expansion!r}")
 
     original = " ".join(original.split()).strip()
     target = " ".join(target.split()).strip('"\' .')
@@ -64,6 +72,10 @@ def combined_queries(original: str, expansion: dict) -> list[str]:
     if not target_pattern.search(original):
         raise ValueError(f"target phrase was not copied from the question: {target!r}")
 
+    alias = " ".join(aliases[0].split()).strip('"\' .,;:?') if aliases else ""
+    if alias and alias.casefold() != target.casefold() and len(alias.split()) <= 4 \
+            and "," not in alias and ";" not in alias:
+        return [original, f"{target}, {alias}"]
     return [original, target]
 
 
@@ -275,8 +287,8 @@ class DirectPositionAgent(Agent):
         """Return original + one target keyword bundle, falling back on errors.
 
         The original preserves proper names, colors, state, distance, and relations. The
-        second query contains only the copied target, rather than aliases or rewrites of the
-        whole question. Repeated asked lines reuse their expansion because
+        second query contains only the copied target and one alias, rather than rewrites of
+        the whole question. Repeated asked lines reuse their expansion because
         several eval questions differ only in the time window and current pose.
         """
         if self.text_query_mode == "direct":
@@ -287,7 +299,7 @@ class DirectPositionAgent(Agent):
             reply = self.query_chain.bind(response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "visual_target",
+                    "name": "visual_target_alias",
                     "schema": query_expansion_schema(),
                 },
             }).invoke(f"{QUERY_EXPANSION_PROMPT}\n\nQuestion: {asked}")
