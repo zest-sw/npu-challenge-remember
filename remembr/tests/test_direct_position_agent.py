@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from remembr.agents.agent import AgentOutput  # noqa: E402
 from remembr.agents.direct_position_agent import (  # noqa: E402
     ABSTAIN,
+    REASON_MAX_TOKENS,
     memory_index_output,
     memory_index_schema,
 )
@@ -97,10 +98,12 @@ class FakeChain:
         self.calls = 0
         self.prompts = []
         self.schemas = []
+        self.budgets = []
 
     def bind(self, **kwargs):
         if "response_format" in kwargs:
             self.schemas.append(kwargs["response_format"]["json_schema"]["schema"])
+        self.budgets.append(kwargs.get("max_tokens"))
         return self
 
     def invoke(self, inputs):
@@ -133,7 +136,8 @@ class FakeMemory:
             for doc in memory_list)
 
 
-def make_agent(reply, memories=MEMORIES, abstain=False, reason=False):
+def make_agent(reply, memories=MEMORIES, abstain=False, reason=False,
+               reason_tokens=REASON_MAX_TOKENS):
     """Build the agent without __init__ (which would build an LLM client)."""
     agent = DirectPositionAgent.__new__(DirectPositionAgent)
     agent.llm_type = "tt/fake"
@@ -141,6 +145,7 @@ def make_agent(reply, memories=MEMORIES, abstain=False, reason=False):
     agent.memory = FakeMemory(memories)
     agent.abstain = abstain
     agent.reason = reason
+    agent.reason_tokens = reason_tokens
     return agent
 
 
@@ -283,6 +288,33 @@ def test_reasoning_thinks_first_then_picks_under_the_grammar():
     # Thinking is unconstrained; only the answer is bound to the memory numbers.
     assert agent.chain.schemas == [{"type": "integer", "enum": [1, 2, 3]}], agent.chain.schemas
     assert out.position == [-4.0, 5.5, -6.0]
+
+
+def test_the_thought_is_carried_into_the_output():
+    """`text` is unread by the scoring, so it is where the reasoning goes -- otherwise
+    auditing a run means paying for the whole run again on the board."""
+    agent = make_agent("2", reason=True)
+    agent.chain.replies = ["Memory 2 is the only walkway.", "2"]
+    assert agent.query(PREAMBLE_QUESTION).text == "Memory 2 is the only walkway."
+
+
+def test_an_abstention_says_so_on_its_own_line():
+    """The fallback and the reasoning both have to survive into the result file: one to
+    count how often the flag fired, the other to check the reasoning that led there."""
+    agent = make_agent(str(ABSTAIN), reason=True, abstain=True)
+    agent.chain.replies = ["None of these mentions it.", str(ABSTAIN)]
+    text = agent.query(PREAMBLE_QUESTION).text
+    assert text.splitlines()[0] == "abstained"
+    assert "None of these mentions it." in text
+
+
+def test_the_thinking_budget_is_configurable():
+    """Most of a --reason question is decode time in this call, so the budget is the one
+    knob that trades reasoning length against latency."""
+    agent = make_agent("1", reason=True, reason_tokens=80)
+    agent.chain.replies = ["Memory 1 is the bench.", "1"]
+    agent.query(PREAMBLE_QUESTION)
+    assert agent.chain.budgets[0] == 80, agent.chain.budgets
 
 
 def test_the_answer_call_can_see_what_the_thinking_call_said():

@@ -30,6 +30,7 @@ sys.path.append(sys.path[0] + '/..')
 # means one backend's missing dependency stops every other model from running.
 
 from memory.memory import MemoryItem
+from agents.direct_position_agent import REASON_MAX_TOKENS
 from memory.milvus_memory import INDEX_UNITS, TEXT_SEARCH_K, MilvusMemory
 from memory.text_memory import TextMemory
 from memory.video_memory import VideoMemory, ImageMemoryItem
@@ -376,7 +377,8 @@ def main(args):
         base_llm = args.model.split('+')[-1]
         agent = DirectPositionAgent(llm_type=base_llm, num_ctx=args.num_ctx,
                                     temperature=args.temperature,
-                                    abstain=args.abstain, reason=args.reason)
+                                    abstain=args.abstain, reason=args.reason,
+                                    reason_tokens=args.reason_tokens)
         use_milvus = True
 
     elif 'optimal' in args.model:
@@ -559,6 +561,7 @@ if __name__ == "__main__":
     # direct+ only. A second call that thinks in words before the grammar-constrained
     # pick. Costs a call and roughly triples the per-question time.
     parser.add_argument("--reason", action='store_true')
+    parser.add_argument("--reason_tokens", type=int, default=REASON_MAX_TOKENS)
 
 
     args = parser.parse_args()

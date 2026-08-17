@@ -22,8 +22,8 @@ from remembr.utils import trace
 # whitespace the way an object's can.
 ANSWER_MAX_TOKENS = 8
 
-# Room for the optional thinking call. Long enough for a sentence about each of the five
-# memories, short enough that a rambling reply cannot dominate the turn.
+# Default room for the optional thinking call, overridable per run because most of a
+# --reason question is decode time in that call.
 REASON_MAX_TOKENS = 160
 
 # The answer that names no memory. Without it the grammar forces a pick even when no
@@ -157,8 +157,10 @@ def memory_index_output(index, memories, text="") -> AgentOutput:
     `True` would otherwise index memory 1.
 
     `text` is unused by the scoring, so it carries how the answer was reached into
-    eval's saved JSON -- otherwise an abstention is indistinguishable from a confident
-    pick once the run is over.
+    eval's saved JSON: the thinking call's words, preceded by a line reading "abstained"
+    when the model said no memory matched. Without it, auditing a run means paying for
+    the whole run again on the board, and an abstention is indistinguishable from a
+    confident pick once the run is over.
     """
     if not isinstance(index, int) or isinstance(index, bool):
         raise ValueError(f"expected a memory number, got: {index!r}")
@@ -172,7 +174,7 @@ def memory_index_output(index, memories, text="") -> AgentOutput:
 
 class DirectPositionAgent(Agent):
     def __init__(self, llm_type="tt/Llama-3.1-8B-Instruct", num_ctx=8192, temperature=0,
-                 abstain=False, reason=False):
+                 abstain=False, reason=False, reason_tokens=REASON_MAX_TOKENS):
         # num_ctx: accepted so eval.py can construct every agent the same way; the
         # tt server owns its own context budget, so it is unused here.
         if not llm_type.startswith("tt/"):
@@ -185,6 +187,7 @@ class DirectPositionAgent(Agent):
         self.llm_type = llm_type
         self.abstain = abstain
         self.reason = reason
+        self.reason_tokens = reason_tokens
         # The grammar is bound per call, not here: it enumerates the memory numbers on
         # offer, and how many came back is only known once the search has run.
         self.chain = ChatOpenAI(
@@ -234,7 +237,7 @@ class DirectPositionAgent(Agent):
         """
         prompt = (f"{reason_prompt(here is not None)}\n\n"
                   f"{self.numbered_memories(memories, here)}\n\nQuestion: {asked}")
-        thought = self.chain.bind(max_tokens=REASON_MAX_TOKENS).invoke(prompt).content
+        thought = self.chain.bind(max_tokens=self.reason_tokens).invoke(prompt).content
         trace.step("추론", trace.clip(" ".join(thought.split()), 120))
         return thought
 
@@ -282,10 +285,10 @@ class DirectPositionAgent(Agent):
         if self.abstain and index == ABSTAIN:
             # No memory names the thing asked about, so the search's own first hit stands
             # -- taken from retrieval order, which `ordered` only changes the display of.
-            output = memory_index_output(1, memories, text="abstained")
+            output = memory_index_output(1, memories, text=f"abstained\n{thought or ''}")
             trace.step("답변", f"기권 -> 검색 1위  position={output.position!r}")
             return output
 
-        output = memory_index_output(index, memories)
+        output = memory_index_output(index, memories, text=thought or "")
         trace.step("답변", f"memory={index}/{len(memories)}  position={output.position!r}")
         return output
