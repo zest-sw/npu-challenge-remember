@@ -1,8 +1,8 @@
 """Question -> vector search -> which memory answers it.
 
 The default path searches with the question itself and makes one LLM selection call.
-The optional multi-query path asks the LLM for aliases of one copied target noun phrase,
-then fuses the original-question ranking with one compact keyword ranking. In both paths
+The optional multi-query path asks the LLM for one copied target noun phrase, then fuses
+the original-question ranking with one target-only keyword ranking. In both paths
 the selector answers with a memory's *number*, not a coordinate, and this module reads
 the coordinate off that memory. A position-only probe -- every question gets a
 coordinate, and non-position questions are knowingly wrong.
@@ -25,49 +25,32 @@ from remembr.utils import trace
 ANSWER_MAX_TOKENS = 8
 QUERY_MAX_TOKENS = 64
 TARGET_MAX_LENGTH = 60
-ALIAS_MAX_LENGTH = 40
-ALIAS_LIMIT = 2
 
 QUERY_EXPANSION_PROMPT = (
     "Identify only the smallest complete noun phrase naming the requested visual target. "
     "Copy that target_phrase exactly and contiguously from the question, excluding color, "
-    "state, distance, location, and relation words. Return one or two short aliases that "
-    "mean the same complete object category and that an image captioner might use. For a "
-    "compound noun, each alias must replace the whole compound. An alias must not be a "
-    "component, superclass, related object, visual feature, surrounding object, or an "
-    "alternative color or attribute. Do not rewrite the question and do not add scene facts."
+    "state, distance, location, and relation words. Return only that target_phrase. "
+    "Do not generate synonyms, aliases, surrounding objects, or scene facts."
 )
 
 
 def query_expansion_schema() -> dict:
-    """Bound the copied target and every alias so constrained decoding cannot run away."""
+    """Bound the copied target so constrained decoding cannot run away."""
     return {
         "type": "object",
         "properties": {
             "target_phrase": {"type": "string", "maxLength": TARGET_MAX_LENGTH},
-            "aliases": {
-                "type": "array",
-                "items": {"type": "string", "maxLength": ALIAS_MAX_LENGTH},
-                "maxItems": ALIAS_LIMIT,
-            },
         },
-        "required": ["target_phrase", "aliases"],
+        "required": ["target_phrase"],
         "additionalProperties": False,
     }
 
 
 def combined_queries(original: str, expansion: dict) -> list[str]:
-    """Return the original question plus one compact target-and-alias keyword query.
-
-    Aliases are deliberately not expanded back into whole questions. Doing that gives
-    near-duplicate long queries several RRF votes and lets their shared non-target words
-    dominate the ranking. One keyword bundle gives expansion one vote, equal to the
-    original question's one vote.
-    """
+    """Return the original question plus one target-only keyword query."""
     target = expansion.get("target_phrase", "")
-    aliases = expansion.get("aliases", [])
-    if not isinstance(target, str) or not isinstance(aliases, list):
-        raise ValueError(f"generated target or aliases have wrong types: {expansion!r}")
+    if not isinstance(target, str):
+        raise ValueError(f"generated target has wrong type: {expansion!r}")
 
     original = " ".join(original.split()).strip()
     target = " ".join(target.split()).strip('"\' .')
@@ -81,20 +64,7 @@ def combined_queries(original: str, expansion: dict) -> list[str]:
     if not target_pattern.search(original):
         raise ValueError(f"target phrase was not copied from the question: {target!r}")
 
-    terms = [target]
-    seen_aliases = {target.casefold()}
-    for alias in aliases[:ALIAS_LIMIT]:
-        if not isinstance(alias, str):
-            raise ValueError(f"generated alias is not a string: {alias!r}")
-        alias = " ".join(alias.split()).strip('"\' .,;:?')
-        canonical = alias.casefold()
-        # Long, comma-packed output is a rewritten query, not one noun-phrase alias.
-        if (not alias or canonical in seen_aliases or len(alias.split()) > 4
-                or "," in alias or ";" in alias):
-            continue
-        seen_aliases.add(canonical)
-        terms.append(alias)
-    return [original, ", ".join(terms)]
+    return [original, target]
 
 
 def memory_index_schema(count: int) -> dict:
@@ -305,8 +275,8 @@ class DirectPositionAgent(Agent):
         """Return original + one target keyword bundle, falling back on errors.
 
         The original preserves proper names, colors, state, distance, and relations. The
-        second query contains only the copied target and its aliases, rather than several
-        rewrites of the whole question. Repeated asked lines reuse their expansion because
+        second query contains only the copied target, rather than aliases or rewrites of the
+        whole question. Repeated asked lines reuse their expansion because
         several eval questions differ only in the time window and current pose.
         """
         if self.text_query_mode == "direct":
@@ -317,7 +287,7 @@ class DirectPositionAgent(Agent):
             reply = self.query_chain.bind(response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "visual_target_aliases",
+                    "name": "visual_target",
                     "schema": query_expansion_schema(),
                 },
             }).invoke(f"{QUERY_EXPANSION_PROMPT}\n\nQuestion: {asked}")

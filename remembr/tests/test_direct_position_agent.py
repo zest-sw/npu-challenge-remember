@@ -181,14 +181,13 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
     agent.text_query_mode = "multi"
     agent.query_chain = FakeChain(json.dumps({
         "target_phrase": "police call pole",
-        "aliases": ["emergency call box", "help station", "call post"],
     }))
 
     out = agent.query(PREAMBLE_QUESTION)
 
     assert agent.memory.searched == [[
         ASKED,
-        "police call pole, emergency call box, help station",
+        "police call pole",
     ]]
     assert agent.query_chain.calls == 1
     assert agent.chain.calls == 1
@@ -198,34 +197,27 @@ def test_multi_query_keeps_original_and_searches_fused_candidates():
 def test_multi_query_schema_bounds_every_generated_string():
     schema = query_expansion_schema()
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {"target_phrase", "aliases"}
+    assert set(schema["required"]) == {"target_phrase"}
     assert schema["properties"]["target_phrase"] == {"type": "string", "maxLength": 60}
-    assert schema["properties"]["aliases"] == {
-        "type": "array",
-        "items": {"type": "string", "maxLength": 40},
-        "maxItems": 2,
-    }
 
 
 def test_combined_queries_keeps_one_original_and_one_keyword_bundle():
     queries = combined_queries("Where is the nearest bike rack that is not empty?", {
         "target_phrase": "bike rack",
-        "aliases": ["bicycle rack", "cycle stand"],
     })
     assert queries == [
         "Where is the nearest bike rack that is not empty?",
-        "bike rack, bicycle rack, cycle stand",
+        "bike rack",
     ]
 
 
-def test_combined_queries_keeps_relation_in_original_and_aliases_in_keywords():
+def test_combined_queries_keeps_relation_in_original_and_uses_target_only():
     queries = combined_queries("Where is the statue in front of Gates Building?", {
         "target_phrase": "statue",
-        "aliases": ["sculpture", "monument", "public art"],
     })
     assert queries == [
         "Where is the statue in front of Gates Building?",
-        "statue, sculpture, monument",
+        "statue",
     ]
 
 
@@ -237,19 +229,11 @@ def test_combined_queries_rejects_a_target_not_copied_from_the_question():
         })
 
 
-def test_combined_queries_drops_bad_aliases_without_reading_past_the_limit():
-    assert combined_queries("Where is the marked object?", {
-        "target_phrase": "object",
-        "aliases": ["object", "item, thing", "item"],
-    }) == ["Where is the marked object?", "object"]
-
-
 def test_multi_query_caches_repeated_asked_lines():
     agent = make_agent("1")
     agent.text_query_mode = "multi"
     agent.query_chain = FakeChain(json.dumps({
         "target_phrase": "police call pole",
-        "aliases": ["emergency call box"],
     }))
 
     agent.query(PREAMBLE_QUESTION)
@@ -257,7 +241,7 @@ def test_multi_query_caches_repeated_asked_lines():
 
     assert agent.query_chain.calls == 1
     assert agent.memory.searched == [[
-        ASKED, "police call pole, emergency call box"
+        ASKED, "police call pole"
     ]] * 2
 
 
