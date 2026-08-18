@@ -147,7 +147,11 @@ def _timing_client(calls: list) -> httpx.Client:
         if timings:
             calls.append(timings)
 
-    return httpx.Client(event_hooks={"response": [record]})
+    # timeout=None matches what the openai SDK builds when it owns the client
+    # (langchain passes request_timeout=None). The SDK sends its own per-request
+    # timeout anyway, but httpx's own default is 5s -- and a single 8B decode runs
+    # for 30-60s, so inheriting that default would be a live grenade.
+    return httpx.Client(timeout=None, event_hooks={"response": [record]})
 
 
 SERVER_TIMING_KEYS = (
