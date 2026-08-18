@@ -13,11 +13,10 @@ Two failures this guards, both of which already happened:
    `orientation` was the union form and ran away on the board until it ate max_tokens,
    truncating the JSON mid-string and costing the whole answer.
 
-2. **Two copies drifting.** The schema used to be written separately in each agent, and
-   they disagreed twice: `position` stayed a loose string in NonAgent long after
-   ReMEmbRAgent constrained it to three numbers, and `orientation` was a string in one,
-   a [yaw] array in the other, and "[euler_rotation]" in the prompts -- for a field
-   AgentOutput declares as a float. Nothing scores that field, so nobody noticed.
+2. **Two full-answer copies drifting.** The full schema used to be written separately
+   in each agent, and they disagreed twice. ReMEmbRAgent still uses that shared contract;
+   NonAgent now deliberately has a smaller position-only response contract, guarded by
+   `test_position_only_schema.py`.
 
 Needs neither lm-format-enforcer nor a board: it asserts the *shape* of the schema,
 which is the property the enforcer depends on.
@@ -75,15 +74,11 @@ def test_schema_covers_exactly_agent_output():
     assert ANSWER_SCHEMA["additionalProperties"] is False
 
 
-def test_both_agents_use_the_shared_schema():
-    """Neither agent may keep its own copy -- that is how the two drifted before."""
-    from remembr.agents import non_agent, remembr_agent
+def test_remembr_agent_uses_the_shared_full_answer_schema():
+    """The remaining full-answer agent must not grow a second copy."""
+    from remembr.agents import remembr_agent
 
-    for module, name in ((remembr_agent, "remembr_agent"), (non_agent, "non_agent")):
-        assert getattr(module, "ANSWER_SCHEMA", None) is ANSWER_SCHEMA, (
-            f"{name} does not use the shared ANSWER_SCHEMA from agent.py -- if it "
-            f"defines its own, the two will drift as they did before"
-        )
+    assert remembr_agent.ANSWER_SCHEMA is ANSWER_SCHEMA
 
 
 def test_orientation_is_a_number_like_agent_output_declares():

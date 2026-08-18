@@ -50,9 +50,7 @@ def make_agent(reply):
     agent.llm_type = "tt/fake"
     agent.chain = FakeChain(reply)
     agent.memory = FakeMemory()
-    agent.prompt = "Context: {context}\nQuestion: {question}\nFormat: {output_format}"
-    # No grammar, so no answer-type pinning: query() keeps the permissive path, which
-    # is the one these tests are about.
+    agent.prompt = "Context: {context}\nQuestion: {question}"
     agent.answer_schema = None
     return agent
 
@@ -78,7 +76,7 @@ def test_unparseable_answer_raises_instead_of_hanging():
 
 
 def test_missing_required_key_is_also_bounded():
-    agent = make_agent('{"type": "time", "text": "5 minutes ago"}')  # no position/binary
+    agent = make_agent('{"text": "5 minutes ago"}')  # no position
     try:
         agent.query("When did you leave the building?")
     except ValueError:
@@ -89,12 +87,13 @@ def test_missing_required_key_is_also_bounded():
 
 
 def test_good_answer_returns_on_first_call():
-    good = ('{"type": "time", "text": "4 minutes ago", "binary": null, '
-            '"position": null, "orientation": null, "time": 4.07, "duration": null}')
+    good = '{"position": [1.0, 2.0, 0.0]}'
     agent = make_agent(good)
-    result = agent.query("When did you leave the building?")
+    result = agent.query("Where is the building?")
     assert isinstance(result, AgentOutput)
-    assert result.time == 4.07
+    assert result.position == [1.0, 2.0, 0.0]
+    assert result.type == "position"
+    assert result.time is None
     assert agent.chain.calls == 1, "a valid answer must not be retried"
 
 

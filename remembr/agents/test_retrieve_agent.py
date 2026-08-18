@@ -22,10 +22,7 @@ QUESTION = (
     "Where is the closest place to sit?"
 )
 
-ANSWER_JSON = (
-    '{"type": "position", "text": "A bench.", "binary": null, '
-    '"position": [3.0, 4.0, 0.0], "orientation": null, "time": null, "duration": null}'
-)
+ANSWER_JSON = '{"position": [3.0, 4.0, 0.0]}'
 
 
 class FakeReply:
@@ -69,8 +66,6 @@ def build(query_reply, answer_reply=ANSWER_JSON):
     agent.query_chain = FakeChain(query_reply)
     agent.chain = FakeChain(answer_reply)
     agent.memory = FakeMemory()
-    # No grammar, so NonAgent.query skips answer-type pinning. These tests are about
-    # the query -> retrieve -> answer order, not the answer schema.
     agent.answer_schema = None
     return agent
 

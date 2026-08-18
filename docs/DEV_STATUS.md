@@ -112,6 +112,17 @@ entity count 29와 재실행 시 중복 없는 재사용을 확인했다. `llm-8
 white plastic box?"에서 검색어 `White plastic storage container`를 생성했고, 정답 캡션/좌표가
 Milvus top-1로 검색되어 최종 position `[-0.708, -0.059, 1.215]`까지 end-to-end 응답했다.
 
+### 2026-08-14 — NonAgent 응답을 position 하나로 고정
+
+`NonAgent`가 답변 유형을 별도 LLM 호출로 분류한 뒤 7개 필드를 모두 생성하던 경로를 position
+전용 단일 생성으로 바꿨다. NPU JSON schema는 `{"position": [x, y, z]}`만 허용하며 좌표를 숫자
+3개로 강제한다. 프롬프트에서도 text/time/duration/binary/orientation 지시를 제거해 스키마와
+모델 지시가 충돌하지 않게 했다. 외부 `AgentOutput`/eval 계약은 유지하기 위해 파싱 후 나머지
+필드는 `None`으로 채운다. position 외 유형의 질문은 이 경로의 평가 대상이 아니다.
+
+검증: position-only schema/prompt, bounded retry, `RetrieveAgent` 배선 self-check 통과. 실제 NPU
+요청은 서버가 내려가 있어 대기 중이다.
+
 ### 2026-08-12 — VLM caption 해상도 실험과 프레임 샘플링 버그 수정
 
 - `/caption`이 모든 frame을 무조건 224x224로 찌그러뜨리던 경로에 `TT_VLM_IMAGE_LONG_SIDE`와
