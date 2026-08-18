@@ -18,6 +18,7 @@ from tt_server.domain.errors import (
     UnknownMode,
 )
 from tt_server.domain.models import LifecycleState, RuntimeSnapshot
+from tt_server.domain.models import ChatResult
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class TenstorrentRuntime:
             snapshot = self._snapshot
         return self._with_worker_state(snapshot)
 
-    def chat(self, command: ChatCommand) -> str:
+    def chat(self, command: ChatCommand) -> ChatResult:
         future = self._admit("llm", "chat", self._run_chat, command)
         return future.result()
 
@@ -288,19 +289,21 @@ class TenstorrentRuntime:
             )
             raise
 
-    def _run_chat(self, command: ChatCommand) -> str:
+    def _run_chat(self, command: ChatCommand) -> ChatResult:
         if self._llm is None:
             mode = self.snapshot().mode
             raise CapabilityUnavailable(
                 f"chat unavailable in mode {mode!r} (no LLM loaded); switch modes first"
             )
-        return self._llm.generate(
+        result = self._llm.generate(
             command.prompt,
             command.max_tokens,
             command.force_json,
             command.json_schema,
             command.temperature,
         )
+        # Keep test doubles and third-party engines returning strings compatible.
+        return result if isinstance(result, ChatResult) else ChatResult(result)
 
     def _run_caption(self, command: CaptionCommand) -> str:
         if self._vlm is None:

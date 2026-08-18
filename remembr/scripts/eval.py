@@ -208,6 +208,10 @@ def answer_squad_question(model, question, qa_instance, search_events=None):
             parsed = asdict(response)
             out_error = evaluate_output(qa_instance, parsed)
 
+            direct_latency = getattr(model, "last_latency", None)
+            if isinstance(direct_latency, dict) and direct_latency:
+                attempt_record["direct_latency"] = dict(direct_latency)
+
             attempt_record['status'] = 'ok'
             attempt_record['unanswered'] = bool(out_error.get('unanswered'))
 
@@ -262,6 +266,8 @@ def answer_squad_question(model, question, qa_instance, search_events=None):
     return_dict['last_attempt_latency_s'] = last_attempt_elapsed
     return_dict['attempts'] = attempts
     return_dict['attempt_latencies'] = attempt_latencies
+    if attempt_latencies and "direct_latency" in attempt_latencies[-1]:
+        return_dict["direct_latency"] = attempt_latencies[-1]["direct_latency"]
 
     return return_dict
 
@@ -409,7 +415,10 @@ def main(args):
         base_llm = args.model.split('+')[-1]
         agent = DirectPositionAgent(llm_type=base_llm, num_ctx=args.num_ctx,
                                     temperature=args.temperature,
-                                    text_query_mode=getattr(args, "text_query_mode", "direct"))
+                                    text_query_mode=getattr(args, "text_query_mode", "direct"),
+                                    collect_latency_breakdown=getattr(
+                                        args, "direct_latency_breakdown", False
+                                    ))
         use_milvus = True
 
     elif 'optimal' in args.model:
@@ -578,6 +587,10 @@ if __name__ == "__main__":
 
     # llm-specific args
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument(
+        "--direct_latency_breakdown", action="store_true",
+        help="record direct+tt VectorDB/client/server latency stages in eval JSON",
+    )
     parser.add_argument("--num_ctx", type=int, default=8192*8)
 
     # remembr specific args

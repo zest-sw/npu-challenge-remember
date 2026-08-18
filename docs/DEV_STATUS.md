@@ -98,6 +98,17 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-18 — direct+tt 단계별 latency 계측 (보드 적용 대기)
+
+- `/v1/chat/completions` 응답에 additive `timings`를 추가했다. Llama engine이 device
+  prefill, logits-return decode, JSON grammar의 host-side masking/선택, 생성 token 수를
+  분리해 반환한다. 기존 OpenAI client는 이 미지 필드를 무시하므로 기존 호출 contract는 유지된다.
+- `eval.py --direct_latency_breakdown`은 direct+tt에서 VectorDB search, prompt 조립,
+  서버 timing, memory index의 JSON 파싱·position metadata lookup을 response JSON에 기록한다.
+  direct는 최종 자연어/좌표 생성이 없으므로 `final_answer_generation_s=0`으로 명시한다.
+- 이 변경은 offline source/contract test 대상으로만 검증했다. 실제 NPU server에 bundle을
+  적용한 뒤 한 direct+tt 요청으로 prefill/decode timing의 합과 응답 JSON을 확인해야 한다.
+
 ### 2026-08-17 — alias 2개 검색의 원문 RRF 가중치를 1.5표로 조정
 
 - `fix/limit-query-aliases`의 원문 질문 + 핵심 키워드 묶음 2-query 구조와 alias 최대 2개 제한은

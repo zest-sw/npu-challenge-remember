@@ -6,7 +6,7 @@ from PIL import Image
 
 from tt_server.application.service import InferenceService
 from tt_server.domain.errors import CapabilityUnavailable, InvalidRequest
-from tt_server.domain.models import LifecycleState, RuntimeSnapshot
+from tt_server.domain.models import ChatResult, LifecycleState, RuntimeSnapshot
 from tt_server.presentation.http import create_app
 from tt_server.presentation.http.schemas import (
     CaptionRequest,
@@ -30,7 +30,7 @@ class StubRuntime:
         return self.current
 
     def chat(self, command):
-        return f"answer:{command.prompt}"
+        return ChatResult(f"answer:{command.prompt}", {"prefill_s": 1.25})
 
     def caption(self, command):
         return f"caption:{len(command.images)}"
@@ -100,6 +100,7 @@ class HttpContractTests(unittest.TestCase):
         )
         self.assertEqual(body["object"], "chat.completion")
         self.assertEqual(body["choices"][0]["message"]["content"], "answer:hello")
+        self.assertEqual(body["timings"], {"prefill_s": 1.25})
 
     def test_chat_reports_the_loaded_model_not_the_requested_one(self):
         """The reply must name whatever actually generated it.

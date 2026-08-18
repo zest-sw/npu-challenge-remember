@@ -15,6 +15,7 @@ nothing; a parse failure raises and eval's own attempt cap records it.
 import json
 import os
 import re
+import time
 
 from remembr.agents.agent import Agent, AgentOutput
 from remembr.memory.memory import Memory
@@ -185,7 +186,7 @@ def memory_index_output(index, memories) -> AgentOutput:
 
 class DirectPositionAgent(Agent):
     def __init__(self, llm_type="tt/Llama-3.1-8B-Instruct", num_ctx=8192, temperature=0,
-                 text_query_mode="direct"):
+                 text_query_mode="direct", collect_latency_breakdown=False):
         # num_ctx: accepted so eval.py can construct every agent the same way; the
         # tt server owns its own context budget, so it is unused here.
         if not llm_type.startswith("tt/"):
@@ -196,6 +197,10 @@ class DirectPositionAgent(Agent):
         from langchain_openai import ChatOpenAI  # lazy: optional dep
 
         self.llm_type = llm_type
+        self.temperature = temperature
+        self.collect_latency_breakdown = collect_latency_breakdown
+        self.llm_base_url = os.environ.get("TT_LLM_BASE_URL", "http://localhost:8100/v1")
+        self.last_latency = {}
         if text_query_mode not in {"direct", "multi"}:
             raise ValueError(f"unknown text_query_mode: {text_query_mode!r}")
         self.text_query_mode = text_query_mode
@@ -204,7 +209,7 @@ class DirectPositionAgent(Agent):
         # offer, and how many came back is only known once the search has run.
         self.chain = ChatOpenAI(
             model=llm_type[len("tt/"):],
-            base_url=os.environ.get("TT_LLM_BASE_URL", "http://localhost:8100/v1"),
+            base_url=self.llm_base_url,
             api_key="local",
             temperature=temperature,
             max_tokens=ANSWER_MAX_TOKENS,
@@ -213,7 +218,7 @@ class DirectPositionAgent(Agent):
         if text_query_mode == "multi":
             self.query_chain = ChatOpenAI(
                 model=llm_type[len("tt/"):],
-                base_url=os.environ.get("TT_LLM_BASE_URL", "http://localhost:8100/v1"),
+                base_url=self.llm_base_url,
                 api_key="local",
                 temperature=temperature,
                 max_tokens=QUERY_MAX_TOKENS,
@@ -296,14 +301,14 @@ class DirectPositionAgent(Agent):
         if asked in self.query_cache:
             return self.query_cache[asked]
         try:
-            reply = self.query_chain.bind(response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "visual_target_alias",
-                    "schema": query_expansion_schema(),
-                },
-            }).invoke(f"{QUERY_EXPANSION_PROMPT}\n\nQuestion: {asked}")
-            queries = combined_queries(asked, json.loads(reply.content))
+            schema = query_expansion_schema()
+            prompt = f"{QUERY_EXPANSION_PROMPT}\n\nQuestion: {asked}"
+            content, timing = self._invoke_llm(
+                prompt, schema, QUERY_MAX_TOKENS, chain=self.query_chain
+            )
+            if timing:
+                self.last_latency["query_expansion"] = timing
+            queries = combined_queries(asked, json.loads(content))
             if len(queries) == 1:
                 trace.warn("multi-query가 원문과 다른 검색어를 만들지 못해 원문만 사용한다")
             self.query_cache[asked] = queries
@@ -312,17 +317,54 @@ class DirectPositionAgent(Agent):
             trace.warn(f"multi-query 생성 실패, 원문 검색으로 대체: {error!r}")
             return [asked]
 
+    def _invoke_llm(self, prompt: str, schema: dict, max_tokens: int, chain=None):
+        """Return content plus server timings when latency collection is enabled.
+
+        ChatOpenAI intentionally ignores unknown top-level OpenAI response fields, so the
+        opt-in measurement path reads the additive server `timings` field directly.
+        Normal direct+tt execution continues through the existing ChatOpenAI client.
+        """
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "direct_latency_schema", "schema": schema},
+        }
+        if not getattr(self, "collect_latency_breakdown", False):
+            client = self.chain if chain is None else chain
+            reply = client.bind(response_format=response_format).invoke(prompt)
+            return reply.content, {}
+
+        import requests
+
+        endpoint = self.llm_base_url.rstrip("/") + "/chat/completions"
+        started = time.perf_counter()
+        response = requests.post(endpoint, json={
+            "model": self.llm_type[len("tt/"):],
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": self.temperature,
+            "response_format": response_format,
+        }, timeout=float(os.environ.get("TT_LLM_TIMEOUT", "900")))
+        response.raise_for_status()
+        payload = response.json()
+        timing = dict(payload.get("timings") or {})
+        timing["llm_request_s"] = time.perf_counter() - started
+        return payload["choices"][0]["message"]["content"], timing
+
     def query(self, question: str) -> AgentOutput:
+        pipeline_started = time.perf_counter()
+        self.last_latency = {}
         # The asked line is always one search query and is also the input to optional
         # expansion. The preamble is dropped: it names the robot's own position and time,
         # which the retriever has no use for and which only dilute the embedding.
         _, asked = split_question(question)
         queries = self.search_queries_for(asked)
         trace.step("검색어", repr(queries if self.text_query_mode == "multi" else asked))
+        search_started = time.perf_counter()
         if self.text_query_mode == "multi":
             self.memory.search_by_text_multi(queries)
         else:
             self.memory.search_by_text(asked)
+        self.last_latency["vector_db_search_s"] = time.perf_counter() - search_started
         memories = self.memory.get_working_memory()
         if not memories:
             # Nothing to name, so there is no answer to give. Raising lets eval record an
@@ -331,13 +373,20 @@ class DirectPositionAgent(Agent):
 
         # Exactly one LLM call. No retry: greedy decoding would repeat the same
         # bytes, and eval.answer_squad_question already caps attempts at 5.
-        reply = self.chain.bind(response_format={
-            "type": "json_schema",
-            "json_schema": {"name": "memory_index",
-                            "schema": memory_index_schema(len(memories))},
-        }).invoke(self.prompt_for(question, memories))
+        prompt_started = time.perf_counter()
+        prompt = self.prompt_for(question, memories)
+        self.last_latency["prompt_build_s"] = time.perf_counter() - prompt_started
+        content, timing = self._invoke_llm(
+            prompt, memory_index_schema(len(memories)), ANSWER_MAX_TOKENS
+        )
+        self.last_latency.update(timing)
 
-        index = json.loads(reply.content)
+        lookup_started = time.perf_counter()
+        index = json.loads(content)
         output = memory_index_output(index, memories)
+        self.last_latency["final_lookup_s"] = time.perf_counter() - lookup_started
+        # direct+tt selects an existing memory; it never generates a final answer.
+        self.last_latency["final_answer_generation_s"] = 0.0
+        self.last_latency["pipeline_total_s"] = time.perf_counter() - pipeline_started
         trace.step("답변", f"memory={index}/{len(memories)}  position={output.position!r}")
         return output

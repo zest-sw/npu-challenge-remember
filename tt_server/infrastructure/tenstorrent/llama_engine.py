@@ -1,6 +1,9 @@
 import torch
 import ttnn
 from loguru import logger
+from time import perf_counter
+
+from tt_server.domain.models import ChatResult
 
 from models.bos_model.llama32.demo_llama32 import create_tt_page_table
 from models.bos_model.llama32.tt.common import (
@@ -83,7 +86,7 @@ class LlamaEngine:
         force_json: bool = False,
         json_schema=None,
         temperature: float = 0.0,
-    ) -> str:
+    ) -> ChatResult:
         model_args, model, tokenizer = self.model_args, self.model, self.tokenizer
         generator, page_table, tt_kv_cache = self.generator, self.page_table, self.tt_kv_cache
 
@@ -108,12 +111,14 @@ class LlamaEngine:
 
         self._clear_kv_cache()
         input_tokens = torch.stack(input_tokens).view(1, -1)
+        prefill_started = perf_counter()
         logits = generator.prefill_forward_text(
             input_tokens,
             page_table=page_table,
             kv_cache=tt_kv_cache,
             prompt_lens=decoding_pos,
         )
+        prefill_s = perf_counter() - prefill_started
 
         # One decode path only, on purpose. There used to be a second one that let
         # the device do the argmax (`sampling_params=SamplingParams(...)`), taken
@@ -136,13 +141,17 @@ class LlamaEngine:
         # against a measured 293.5 ms/token decode -- under 0.1%, and the earlier
         # end-to-end comparison of the two paths came out at ~3%. See issue #21.
         enforcer = self.json_enforcers.create(json_schema) if force_json else None
-        return self._decode_on_host(
+        text, decode_timings = self._decode_on_host(
             logits,
             decoding_pos[0],
             max_new_tokens,
             temperature,
             enforcer,
         )
+        return ChatResult(text, {
+            "prefill_s": prefill_s,
+            **decode_timings,
+        })
 
     def _clear_kv_cache(self) -> None:
         for loaded_model in self.model:
@@ -158,17 +167,30 @@ class LlamaEngine:
         max_new_tokens: int,
         temperature: float,
         enforcer,
-    ) -> str:
+    ) -> tuple[str, dict[str, float | int]]:
         tokenizer = self.tokenizer
         vocab = self.model_args[0].vocab_size
-        allowed = enforcer.get_allowed_tokens([]) if enforcer else None
-        first = masked_sample(logits, allowed, vocab, temperature, self.debug_sample)
+        constraint_decoding_s = 0.0
+        device_decode_s = 0.0
+
+        def select(logits, generated):
+            nonlocal constraint_decoding_s
+            if enforcer is None:
+                return masked_sample(logits, None, vocab, temperature, self.debug_sample)
+            started = perf_counter()
+            allowed = enforcer.get_allowed_tokens(generated)
+            selected = masked_sample(logits, allowed, vocab, temperature, self.debug_sample)
+            constraint_decoding_s += perf_counter() - started
+            return selected
+
+        first = select(logits, [])
         generated = [] if first in tokenizer.stop_tokens else [first]
         self._print_token(first, bool(generated))
         current_pos = torch.tensor([decoding_pos])
         output_token = torch.tensor([[first]])
 
         for _ in range(max_new_tokens - 1):
+            decode_started = perf_counter()
             decode_logits = self.generator.decode_forward_text(
                 output_token,
                 current_pos,
@@ -177,14 +199,8 @@ class LlamaEngine:
                 kv_cache=self.tt_kv_cache,
                 sampling_params=None,
             )
-            allowed = enforcer.get_allowed_tokens(generated) if enforcer else None
-            next_token = masked_sample(
-                decode_logits,
-                allowed,
-                vocab,
-                temperature,
-                self.debug_sample,
-            )
+            device_decode_s += perf_counter() - decode_started
+            next_token = select(decode_logits, generated)
             current_pos = current_pos + 1
             if next_token in tokenizer.stop_tokens:
                 break
@@ -192,8 +208,17 @@ class LlamaEngine:
             self._print_token(next_token, True)
             output_token = torch.tensor([[next_token]])
 
+        synchronize_started = perf_counter()
         ttnn.synchronize_device(self.mesh_device)
-        return self._finish_decode(generated)
+        synchronize_s = perf_counter() - synchronize_started
+        return self._finish_decode(generated), {
+            "device_decode_s": device_decode_s,
+            "constraint_decoding_s": constraint_decoding_s,
+            # Post-prefill token generation: do not add this to its two components.
+            "generation_s": device_decode_s + constraint_decoding_s + synchronize_s,
+            "device_synchronize_s": synchronize_s,
+            "generated_tokens": len(generated),
+        }
 
     def _print_token(self, token: int, enabled: bool) -> None:
         if self.debug_decode and enabled:

@@ -6,7 +6,7 @@ from tt_server.application.commands import CaptionCommand, ChatCommand
 from tt_server.config.modes import MODES
 from tt_server.config.settings import ServerSettings
 from tt_server.domain.errors import CapabilityUnavailable
-from tt_server.domain.models import LifecycleState
+from tt_server.domain.models import ChatResult, LifecycleState
 from tt_server.infrastructure.tenstorrent.runtime import TenstorrentRuntime
 
 
@@ -56,7 +56,7 @@ class FakeLLM:
         pass
 
     def generate(self, prompt, max_tokens, force_json, schema, temperature):
-        return f"llm:{prompt}"
+        return ChatResult(f"llm:{prompt}")
 
 
 class FakeVLM:
@@ -107,7 +107,7 @@ class RuntimeTests(unittest.TestCase):
         runtime, devices = self.make_runtime()
         snapshot = runtime.start()
         self.assertTrue(snapshot.ready)
-        self.assertEqual(runtime.chat(ChatCommand("hello")), "llm:hello")
+        self.assertEqual(runtime.chat(ChatCommand("hello")).text, "llm:hello")
         self.assertEqual(
             runtime.caption(CaptionCommand((object(),), "scene")),
             "vlm:scene:1",

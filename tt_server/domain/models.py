@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -34,3 +34,11 @@ class RuntimeSnapshot:
     @property
     def switching(self) -> bool:
         return self.lifecycle == LifecycleState.SWITCHING
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    """One LLM response plus device-side timing observations in seconds."""
+
+    text: str
+    timings: dict[str, float | int] = field(default_factory=dict)

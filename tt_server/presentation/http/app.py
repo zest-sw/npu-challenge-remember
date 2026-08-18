@@ -95,7 +95,7 @@ def create_app(service: InferenceService) -> FastAPI:
             json_schema=json_schema,
             temperature=request.temperature or 0.0,
         )
-        text = service.chat(command)
+        result = service.chat(command)
         snapshot = service.health()
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -112,10 +112,12 @@ def create_app(service: InferenceService) -> FastAPI:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": text},
+                    "message": {"role": "assistant", "content": result.text},
                     "finish_reason": "stop",
                 }
             ],
+            # Additive field: OpenAI-compatible clients that do not know it ignore it.
+            "timings": result.timings,
         }
 
     @app.post("/caption")

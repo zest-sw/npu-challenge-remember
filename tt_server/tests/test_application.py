@@ -3,7 +3,7 @@ import unittest
 from tt_server.application.commands import CaptionCommand, ChatCommand
 from tt_server.application.service import InferenceService
 from tt_server.domain.errors import InvalidRequest
-from tt_server.domain.models import LifecycleState, RuntimeSnapshot
+from tt_server.domain.models import ChatResult, LifecycleState, RuntimeSnapshot
 
 
 class StubRuntime:
@@ -11,7 +11,7 @@ class StubRuntime:
         return RuntimeSnapshot(LifecycleState.READY, "3b+3b", "llm", "vlm")
 
     def chat(self, command):
-        return command.prompt
+        return ChatResult(command.prompt)
 
     def caption(self, command):
         return command.prompt
@@ -33,7 +33,7 @@ class InferenceServiceTests(unittest.TestCase):
             self.service.chat(ChatCommand("hello", temperature=-0.1))
 
     def test_forwards_valid_commands(self):
-        self.assertEqual(self.service.chat(ChatCommand("hello")), "hello")
+        self.assertEqual(self.service.chat(ChatCommand("hello")).text, "hello")
         self.assertEqual(
             self.service.caption(CaptionCommand((object(),), "describe")),
             "describe",

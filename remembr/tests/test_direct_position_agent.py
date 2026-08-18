@@ -176,6 +176,18 @@ def test_query_searches_with_the_asked_line_only_and_calls_once():
     assert out.position == [-4.0, 5.5, -6.0]
 
 
+def test_query_records_local_direct_pipeline_timings():
+    agent = make_agent("2")
+    agent.query(PREAMBLE_QUESTION)
+    timings = agent.last_latency
+    assert timings["vector_db_search_s"] >= 0
+    assert timings["prompt_build_s"] >= 0
+    assert timings["final_lookup_s"] >= 0
+    # The final coordinate is metadata copied by Python, not LLM generation.
+    assert timings["final_answer_generation_s"] == 0.0
+    assert timings["pipeline_total_s"] >= timings["vector_db_search_s"]
+
+
 def test_multi_query_keeps_original_and_searches_fused_candidates():
     agent = make_agent("2")
     agent.text_query_mode = "multi"

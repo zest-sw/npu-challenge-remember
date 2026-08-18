@@ -245,13 +245,26 @@ device allocator 상태를 읽는 디버그 엔드포인트. NPU 작업을 새�
 {
   "id": "chatcmpl-<hex>", "object": "chat.completion", "created": 1234567890,
   "model": "meta-llama/Llama-3.2-3B-Instruct",
-  "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}]
+  "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}],
+  "timings": {
+    "prefill_s": 0.0,
+    "device_decode_s": 0.0,
+    "constraint_decoding_s": 0.0,
+    "generation_s": 0.0,
+    "generated_tokens": 0
+  }
 }
 // 409 현재 모드에 LLM 없음(모드 전환 필요)   503 전환 중
 ```
 
 지원하지 않는 OpenAI 필드(`stream`, `top_p`, `n`, `stop`, …)는 무시되며, usage/token
 count는 보고되지 않습니다.
+
+`timings`는 이 서버가 추가한 선택적 관측 필드다. `prefill_s`는 device prefill,
+`device_decode_s`는 logits를 받는 decode forward들의 합, `constraint_decoding_s`는
+JSON grammar의 허용 token 계산과 host-side 선택 시간이다. `generation_s`는 prefill 뒤의
+생성 wall time(`device_decode_s`/`constraint_decoding_s`/마지막 synchronize 포함)이라
+두 하위 값과 중복 합산하면 안 된다. 기존 OpenAI client는 알 수 없는 필드를 무시한다.
 
 ### 예제
 
