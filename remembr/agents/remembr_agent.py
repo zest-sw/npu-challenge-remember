@@ -1,7 +1,10 @@
 from typing import Annotated, Literal, Sequence, TypedDict
 import json
+import time
 import traceback
 import sys, re
+
+import httpx
 
 # from langchain_openai import OpenAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -120,9 +123,61 @@ def try_except_continue(state, func, max_retries=3):
             continue
     raise last_exc
 
+# The tt server returns an additive `timings` field (device prefill, logits-return
+# decode, host-side grammar masking, generated tokens), but langchain_openai's
+# _create_chat_result keeps only token_usage/model_name/system_fingerprint and drops
+# everything else (chat_models/base.py:740) -- so the field reaches neither callbacks
+# nor response_metadata. An httpx response hook is the one place it survives without
+# rewriting call sites: the graph invokes the LLM from both the agent node and
+# generate(), and every one of those calls shares this client.
+#
+# DirectPositionAgent instead bypasses ChatOpenAI with a raw POST, which is why it
+# needs the --direct_latency_breakdown opt-in. Nothing here changes what is sent, so
+# this collection is always on: it costs one read() plus one json parse per call,
+# against a decode that runs at ~3.8 tok/s.
+def _timing_client(calls: list) -> httpx.Client:
+    def record(response):
+        if response.status_code != 200:
+            return
+        response.read()  # hooks run before the body is read; read() caches it for the SDK
+        try:
+            timings = response.json().get("timings")
+        except ValueError:
+            return
+        if timings:
+            calls.append(timings)
+
+    return httpx.Client(event_hooks={"response": [record]})
+
+
+SERVER_TIMING_KEYS = (
+    "prefill_s", "device_decode_s", "constraint_decoding_s",
+    "generation_s", "generated_tokens",
+)
+
+
+def _latency_summary(calls: list, pipeline_total_s: float) -> dict:
+    """Per-question latency: how many LLM calls the planner made, and their server split.
+
+    The graph decides its own number of calls, so the per-call list is kept alongside
+    the sums. Backends other than tt/ produce no timings; the sums are then left out
+    rather than reported as zeros.
+    """
+    summary = {"llm_calls": len(calls), "pipeline_total_s": pipeline_total_s}
+    if calls:
+        for key in SERVER_TIMING_KEYS:
+            summary[key] = sum(call.get(key, 0) for call in calls)
+        summary["per_call"] = calls
+    return summary
+
+
 class ReMEmbRAgent(Agent):
 
     def __init__(self, llm_type='gpt-4o', num_ctx=8192, temperature=0):
+
+        # Filled by the http client's response hook, one entry per LLM call.
+        self.server_timings = []
+        self.last_latency = {}
 
         # Wrapper that handles everything
         llm = self.llm_selector(llm_type, temperature, num_ctx)
@@ -177,6 +232,7 @@ class ReMEmbRAgent(Agent):
                 api_key='local',
                 temperature=temperature,
                 max_tokens=int(os.environ.get('TT_LLM_MAX_TOKENS', '256')),
+                http_client=_timing_client(self.server_timings),
             )
 
         # Support for Ollama functions
@@ -567,12 +623,19 @@ class ReMEmbRAgent(Agent):
 
     def query(self, question: str):
 
+        self.server_timings.clear()
+        started = time.perf_counter()
+
         inputs = { "messages": [
                                 (("user", question)),
             ]
         }
 
         out = self.graph.invoke(inputs)
+        # Set before parsing so a parse failure still leaves the attempt measured.
+        self.last_latency = _latency_summary(
+            list(self.server_timings), time.perf_counter() - started
+        )
         response = out['messages'][-1]
         response = ''.join(response.content.splitlines())
 

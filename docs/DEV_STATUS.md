@@ -98,6 +98,30 @@ _최종 수정: 2026-07-21 · branch `main`_
 
 ## 6. Changelog
 
+### 2026-08-18 — remembr+ 서버 timing 계측 (httpx response hook)
+
+- direct+ 전용이던 서버 단계 분해(prefill / device decode / grammar masking / 생성 token)를
+  remembr+에서도 받는다. `langchain_openai`의 `_create_chat_result`가 응답에서
+  token_usage·model_name·system_fingerprint만 남기고 나머지를 버리므로
+  (`chat_models/base.py:740`), `timings`는 콜백에도 `response_metadata`에도 오지 않는다.
+  ChatOpenAI에 넘기는 httpx client의 response hook에서 값을 건지고, `query()`가 호출별 목록과
+  합계를 `last_latency`에 채운다.
+- **direct+처럼 호출부를 우회하지 않은 이유**: remembr+는 planner 노드와 `generate()` 두
+  곳에서 LLM을 부르고 둘 다 `ChatPromptTemplate | model` 파이프라인이라, 우회하려면 그래프를
+  뜯어야 한다. 두 노드가 같은 `self.llm`을 쓰므로 hook 하나로 전부 잡힌다.
+- `eval.py`는 바꾸지 않았다. `getattr(model, "last_latency", None)`을 이미 읽으므로 결과 JSON에
+  `direct_latency` 키로 실린다. 이름은 direct+ 시절 그대로 두었다 — 소비자가 `eval.py`뿐이고,
+  바꾸면 08-18 direct+ 결과 JSON과 키가 갈린다.
+- **새 플래그 없음.** direct+가 `--direct_latency_breakdown`으로 게이트한 것은 ChatOpenAI를
+  우회하는 실동작 변경이기 때문이고, hook은 호출당 `read()` + json 파싱 하나라 항상 켜둔다.
+- 실보드 검증(`llm-8b`, temp 0.7, V4 caption 8개, 1질문): **LLM 호출 2회**, pipeline 65.3초 중
+  generation 63.1초(device decode 60.8, prefill 2.2, grammar masking 2.2), 생성 240 tokens.
+  질문 지연이 사실상 전부 생성 토큰 비용이라는 기존 결론과 일치한다.
+- 검증: `pytest -q remembr/tests` **88 passed** (신규 `test_remembr_agent_timings.py` 4개 포함,
+  가짜 localhost 서버로 hook을 확인해 보드가 필요 없다).
+- 한계: 어느 호출이 planner이고 어느 것이 `generate`인지는 구분되지 않는다. 필요하면 노드 진입
+  시 stage 이름을 세워 hook에서 함께 기록하면 된다.
+
 ### 2026-08-18 — direct+tt 단계별 latency 계측 (보드 적용 대기)
 
 - `/v1/chat/completions` 응답에 additive `timings`를 추가했다. Llama engine이 device
