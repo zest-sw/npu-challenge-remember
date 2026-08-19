@@ -5,6 +5,7 @@ from time import strftime, localtime
 from typing import Any, List, Optional, Tuple
 from langchain_core.documents import Document
 import numpy as np
+import warnings
 
 from remembr.memory.memory import Memory, MemoryItem
 from remembr.utils import trace
@@ -17,6 +18,18 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 
 FIXED_SUBTRACT=1721761000 # this is just a large value that brings us close to 1970
 
+try:
+    from langchain_core._api.deprecation import LangChainDeprecationWarning
+
+    warnings.filterwarnings(
+        "ignore",
+        category=LangChainDeprecationWarning,
+    )
+except ImportError:
+    warnings.filterwarnings(
+        "ignore",
+        message=r".deprecated in LangChain.*",
+    )
 
 class MilvusWrapper:
 

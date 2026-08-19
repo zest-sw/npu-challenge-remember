@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,10 @@ from remembr.memory.memory import MemoryItem  # noqa: E402
 from remembr.memory.milvus_memory import MilvusMemory  # noqa: E402
 from remembr.utils import trace  # noqa: E402
 
+warnings.filterwarnings(
+    "ignore",
+    message=r".*ORM-style PyMilvus API.*",
+)
 
 DEFAULT_DATA_DIR = REPO_ROOT / "remembr/data/try0_plane_preprocessed_5/0"
 DEFAULT_CAPTIONS = (
@@ -240,7 +245,12 @@ def main() -> None:
     print("질문을 입력하세요. 종료: /quit 또는 Ctrl-D")
     while True:
         try:
-            question = input("query> ").strip()
+            prompt = (
+                "\033[1;36mquery>\033[0m "
+                if sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+                else "query> "
+            )
+            question = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
