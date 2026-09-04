@@ -25,14 +25,13 @@ import warnings
 # load this directory
 sys.path.append(sys.path[0] + '/..')
 
-from agents.remembr_agent import ReMEmbRAgent
-from agents.non_agent import NonAgent
-from agents.retrieve_agent import RetrieveAgent
-from agents.direct_position_agent import DirectPositionAgent
-from agents.vlm_non_agent import VLMNonAgent
+# Agents are imported where they are chosen, not here. Each pulls in the stack its own
+# backend needs -- remembr_agent alone needs langgraph -- and importing all five up front
+# means one backend's missing dependency stops every other model from running.
 
 from memory.memory import MemoryItem
-from memory.milvus_memory import MilvusMemory
+from agents.direct_position_agent import REASON_MAX_TOKENS
+from memory.milvus_memory import INDEX_UNITS, TEXT_SEARCH_K, MilvusMemory
 from memory.text_memory import TextMemory
 from memory.video_memory import VideoMemory, ImageMemoryItem
 
@@ -271,7 +270,8 @@ def load_memory(args, qa_instance, use_milvus=True, use_optimal_context=False, i
 
     if use_milvus:
         # milv = MilvusWrapper(ip_address=ip_address)
-        memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address, time_offset=start_time)
+        memory = MilvusMemory(f"eval_memory_{args.sequence_id}", db_ip=ip_address, time_offset=start_time,
+                              index_unit=args.index_unit, text_k=args.text_k)
     elif 'vlm' in args.model:
         memory = VideoMemory()
     else:
@@ -353,11 +353,13 @@ def main(args):
     use_milvus = False
     use_optimal_context = False
     if 'remembr' in args.model:
+        from agents.remembr_agent import ReMEmbRAgent
         base_llm = args.model.split('+')[-1]
         agent = ReMEmbRAgent(llm_type=base_llm, num_ctx=args.num_ctx, temperature=args.temperature)
         use_milvus = True
 
     elif 'retrieve' in args.model:
+        from agents.retrieve_agent import RetrieveAgent
         # Real Milvus retrieval like remembr+, but without the tool-calling loop
         # the planner cannot drive on this board: one plain query, one search,
         # then NonAgent's answer stage. Directly comparable to optimal+, which
@@ -367,23 +369,29 @@ def main(args):
         use_milvus = True
 
     elif 'direct' in args.model:
+        from agents.direct_position_agent import DirectPositionAgent
         # The question itself is the Milvus query and the answer grammar is a
         # bare [x, y, z]: no query call, no answer-type call, no JSON-object
         # tokens. Position-only probe -- non-position questions are knowingly
         # wrong. See remembr/agents/direct_position_agent.py.
         base_llm = args.model.split('+')[-1]
         agent = DirectPositionAgent(llm_type=base_llm, num_ctx=args.num_ctx,
-                                    temperature=args.temperature)
+                                    temperature=args.temperature,
+                                    abstain=args.abstain, reason=args.reason,
+                                    reason_tokens=args.reason_tokens)
         use_milvus = True
 
     elif 'optimal' in args.model:
+        from agents.non_agent import NonAgent
         base_llm = args.model.split('+')[-1]
         agent = NonAgent(llm_type=base_llm, num_ctx=args.num_ctx, temperature=args.temperature)
         use_optimal_context = True
     elif 'vlm' in args.model:
+        from agents.vlm_non_agent import VLMNonAgent
         agent = VLMNonAgent(llm_type='gpt-4o')
 
     else:
+        from agents.non_agent import NonAgent
         agent = NonAgent(llm_type=args.model, num_ctx=args.num_ctx*4, temperature=args.temperature)
 
 
@@ -491,6 +499,10 @@ def main(args):
     # save all_questions into json
     out_json = {
         "version": 0.1,
+        # The filename is model + caption_file + postfix, so two runs differing only in
+        # --index_unit or --reason overwrite each other. Recording the args means a result
+        # file can at least be attributed after the fact.
+        "args": vars(args),
         "eval_total_latency_s": time.perf_counter() - eval_run_start,
         "responses": responses
     }
@@ -536,7 +548,25 @@ if __name__ == "__main__":
     parser.add_argument("--window_size", type=int, default=5)
     parser.add_argument("--db_name", type=str, default='test')
     parser.add_argument("--db_ip", type=str, default='127.0.0.1')
+    # 'sentence' indexes each sentence of a caption separately. Slower to load, since the
+    # caption file's precomputed embeddings no longer apply, but it retrieves memories
+    # much closer to the answer -- see MilvusMemory.__init__.
+    parser.add_argument("--index_unit", type=str, default='caption', choices=INDEX_UNITS)
+    # How many memories a text search hands over. 5 is the measured optimum without a
+    # thinking call; with --reason a longer list may pay, which is why this is a flag.
+    parser.add_argument("--text_k", type=int, default=TEXT_SEARCH_K)
+    # direct+ only. Lets the model answer "none of these", which falls back to the top
+    # search hit instead of the best of a set that does not contain the answer.
+    parser.add_argument("--abstain", action='store_true')
+    # direct+ only. A second call that thinks in words before the grammar-constrained
+    # pick. Costs a call and roughly triples the per-question time.
+    parser.add_argument("--reason", action='store_true')
+    parser.add_argument("--reason_tokens", type=int, default=REASON_MAX_TOKENS)
 
 
     args = parser.parse_args()
+    # These change what direct+ does and nothing else; silently ignoring them would put a
+    # run in out/ that reads as if the flag had applied.
+    if (args.abstain or args.reason) and 'direct' not in args.model:
+        parser.error("--abstain and --reason only apply to --model direct+...")
     main(args)

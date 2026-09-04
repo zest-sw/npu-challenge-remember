@@ -80,8 +80,11 @@ def asked_line(question):
     return lines[-1] if lines else question.strip()
 
 
-def post_chat(base_url, messages, max_tokens, schema=None, model=None):
-    """One chat request. Returns (text, model the server says actually served it).
+def post_choice(base_url, messages, max_tokens, schema=None, model=None, timeout=300):
+    """One chat request. Returns (the server's first choice, the model it says it served).
+
+    The whole choice, not just its text, because a probe that varies `max_tokens` needs
+    `finish_reason` to tell a finished answer from a truncated one.
 
     temperature=0 throughout: these probes compare prompt shapes, and sampling
     variance at n=4 would swamp the difference being measured.
@@ -96,9 +99,15 @@ def post_chat(base_url, messages, max_tokens, schema=None, model=None):
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=300) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         body = json.load(response)
-    return body["choices"][0]["message"]["content"].strip(), body.get("model")
+    return body["choices"][0], body.get("model")
+
+
+def post_chat(base_url, messages, max_tokens, schema=None, model=None):
+    """post_choice, for the callers that only want the text."""
+    choice, served = post_choice(base_url, messages, max_tokens, schema=schema, model=model)
+    return choice["message"]["content"].strip(), served
 
 
 def call_chat(base_url, messages, max_tokens, schema=None):
